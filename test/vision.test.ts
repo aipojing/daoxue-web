@@ -1,0 +1,80 @@
+import { describe, it, expect } from 'vitest';
+import {
+  getVisionConfig,
+  validateImageDataUrl,
+  buildVisionRequestBody,
+  parseVisionResponse,
+} from '../src/worker/chat/vision';
+
+describe('getVisionConfig', () => {
+  it('未配置 Key 返回 null', () => {
+    expect(getVisionConfig({})).toBeNull();
+  });
+
+  it('有 Key 时使用默认智谱地址与免费视觉模型', () => {
+    const cfg = getVisionConfig({ VISION_API_KEY: 'k' });
+    expect(cfg?.url).toContain('bigmodel.cn');
+    expect(cfg?.model).toBe('glm-4.1v-thinking-flash');
+  });
+
+  it('可覆盖为其他 OpenAI 兼容服务', () => {
+    const cfg = getVisionConfig({
+      VISION_API_KEY: 'k',
+      VISION_API_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      VISION_MODEL: 'qwen-vl-plus',
+    });
+    expect(cfg?.url).toContain('dashscope');
+    expect(cfg?.model).toBe('qwen-vl-plus');
+  });
+});
+
+describe('validateImageDataUrl', () => {
+  it('接受合法 jpeg data url', () => {
+    expect(validateImageDataUrl('data:image/jpeg;base64,/9j/4AAQ')).toBeNull();
+  });
+
+  it('拒绝非图片数据', () => {
+    expect(validateImageDataUrl('data:text/html;base64,AAA')).not.toBeNull();
+    expect(validateImageDataUrl('hello')).not.toBeNull();
+  });
+
+  it('拒绝超大图片', () => {
+    const huge = 'data:image/jpeg;base64,' + 'A'.repeat(7 * 1024 * 1024);
+    expect(validateImageDataUrl(huge)).toContain('过大');
+  });
+});
+
+describe('buildVisionRequestBody / parseVisionResponse', () => {
+  it('请求体为 OpenAI 兼容多模态格式', () => {
+    const body = buildVisionRequestBody('glm-4v-flash', 'data:image/jpeg;base64,xx') as {
+      model: string;
+      messages: Array<{ content: Array<{ type: string }> }>;
+    };
+    expect(body.model).toBe('glm-4v-flash');
+    expect(body.messages[0]!.content[0]!.type).toBe('image_url');
+    expect(body.messages[0]!.content[1]!.type).toBe('text');
+  });
+
+  it('解析字符串 content', () => {
+    expect(parseVisionResponse({ choices: [{ message: { content: ' 题目：1+1= ' } }] })).toBe('题目：1+1=');
+  });
+
+  it('解析分段数组 content', () => {
+    expect(
+      parseVisionResponse({ choices: [{ message: { content: [{ type: 'text', text: '题目' }, { type: 'text', text: 'A' }] } }] }),
+    ).toBe('题目A');
+  });
+
+  it('空响应返回 null', () => {
+    expect(parseVisionResponse({})).toBeNull();
+    expect(parseVisionResponse({ choices: [{ message: { content: '' } }] })).toBeNull();
+  });
+
+  it('剔除 thinking 模型的思考过程', () => {
+    expect(
+      parseVisionResponse({
+        choices: [{ message: { content: '<think>先看图里的数字</think>题目：1/2 + 1/3 = ?' } }],
+      }),
+    ).toBe('题目：1/2 + 1/3 = ?');
+  });
+});

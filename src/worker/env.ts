@@ -1,0 +1,23 @@
+export interface Env {
+  DB: D1Database;
+  ASSETS: Fetcher;
+  DEEPSEEK_API_KEY: string;
+  /** 可选：视觉模型（拍照识题）。不配置则前端隐藏拍照按钮 */
+  VISION_API_KEY?: string;
+  VISION_API_URL?: string;
+  VISION_MODEL?: string;
+}
+
+export interface AuthUser {
+  id: number;
+  email: string;
+  is_admin: number;
+  daily_message_limit: number;
+}
+
+export type AppContext = {
+  Bindings: Env;
+  Variables: {
+    user: AuthUser;
+  };
+};
