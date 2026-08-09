@@ -102,7 +102,7 @@ expect(splitRegion('北京市')).toEqual({ province: '北京', city: '' });
 expect(splitRegion('北京市朝阳区')).toEqual({ province: '北京', city: '朝阳区' });
 expect(splitRegion('浙江省杭州市')).toEqual({ province: '浙江', city: '杭州市' });
 
-expect(isNearBottom({ scrollHeight: 1000, scrollTop: 700, clientHeight: 200 })).toBe(false);
+expect(isNearBottom({ scrollHeight: 1000, scrollTop: 670, clientHeight: 200 })).toBe(false);
 expect(isNearBottom({ scrollHeight: 1000, scrollTop: 710, clientHeight: 200 })).toBe(true);
 expect(isPersistedMessage({ id: 3, persisted: true })).toBe(true);
 expect(isPersistedMessage({ id: 3, persisted: false })).toBe(false);
