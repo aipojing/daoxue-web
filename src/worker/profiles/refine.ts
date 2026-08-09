@@ -1,15 +1,47 @@
 import { completeJSON, type ChatMessage } from '../chat/deepseek';
 import { SUBJECT_NAMES, type Subject } from '../chat/prompt-builder';
+import { beijingToday } from '../chat/quota';
+import { SETTING_KEYS } from '../lib/settings';
 
-const REFINE_INTERVAL_MINUTES = 10;
+const DEFAULT_REFINE_INTERVAL_MINUTES = 10;
+const DEFAULT_DAILY_LIMIT = 0;
 const RECENT_MESSAGE_LIMIT = 30;
 const MAX_PROFILE_LENGTH = 500;
 
-export function shouldRefine(updatedAt: string | null, now: Date): boolean {
+export function shouldRefine(updatedAt: string | null, intervalMinutes: number, now: Date): boolean {
   if (!updatedAt) return true;
   const parsed = Date.parse(updatedAt.replace(' ', 'T') + 'Z');
   if (Number.isNaN(parsed)) return true;
-  return now.getTime() - parsed >= REFINE_INTERVAL_MINUTES * 60 * 1000;
+  const interval = Number.isFinite(intervalMinutes) && intervalMinutes > 0 ? intervalMinutes : DEFAULT_REFINE_INTERVAL_MINUTES;
+  return now.getTime() - parsed >= interval * 60 * 1000;
+}
+
+function resolveRefineSettings(settings: Record<string, string>): { intervalMinutes: number; dailyLimit: number } {
+  const intervalRaw = settings[SETTING_KEYS.profileRefineIntervalMinutes];
+  const limitRaw = settings[SETTING_KEYS.profileRefineDailyLimit];
+  const intervalMinutes = intervalRaw === undefined ? DEFAULT_REFINE_INTERVAL_MINUTES : Number(intervalRaw);
+  const dailyLimit = limitRaw === undefined ? DEFAULT_DAILY_LIMIT : Number(limitRaw);
+  return {
+    intervalMinutes: Number.isFinite(intervalMinutes) && intervalMinutes > 0 ? intervalMinutes : DEFAULT_REFINE_INTERVAL_MINUTES,
+    dailyLimit: Number.isFinite(dailyLimit) && dailyLimit >= 0 ? dailyLimit : DEFAULT_DAILY_LIMIT,
+  };
+}
+
+async function countTodayRefines(
+  db: D1Database,
+  studentId: number,
+  subject: Subject,
+  today: string,
+): Promise<number> {
+  // D1 的 datetime('now') 是 UTC，按北京时间计日需要 +8 小时
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM profile_refine_log
+       WHERE student_id = ? AND subject = ? AND date(datetime(created_at, '+8 hours')) = ?`,
+    )
+    .bind(studentId, subject, today)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
 }
 
 function buildRefineMessages(
@@ -44,14 +76,23 @@ export async function maybeRefineProfile(
   apiKey: string,
   studentId: number,
   subject: Subject,
+  settings: Record<string, string> = {},
 ): Promise<void> {
   try {
+    const { intervalMinutes, dailyLimit } = resolveRefineSettings(settings);
     const existing = await db
       .prepare('SELECT profile_text, updated_at FROM student_profiles WHERE student_id = ? AND subject = ?')
       .bind(studentId, subject)
       .first<{ profile_text: string; updated_at: string }>();
 
-    if (existing && !shouldRefine(existing.updated_at, new Date())) return;
+    if (existing && !shouldRefine(existing.updated_at, intervalMinutes, new Date())) return;
+
+    // dailyLimit === 0 表示不限；否则按北京日期计日
+    if (dailyLimit > 0) {
+      const today = beijingToday();
+      const todayCount = await countTodayRefines(db, studentId, subject, today);
+      if (todayCount >= dailyLimit) return;
+    }
 
     const { results: recent } = await db
       .prepare(
@@ -86,6 +127,12 @@ export async function maybeRefineProfile(
          ON CONFLICT(student_id, subject) DO UPDATE SET profile_text = excluded.profile_text, updated_at = datetime('now')`,
       )
       .bind(studentId, subject, profileText)
+      .run();
+
+    // 记录本次提炼，用于每日上限统计
+    await db
+      .prepare('INSERT INTO profile_refine_log (student_id, subject) VALUES (?, ?)')
+      .bind(studentId, subject)
       .run();
   } catch (e) {
     console.error('profile refine failed (ignored):', e);

@@ -11,7 +11,7 @@ import { hasAssistantOutput } from './output';
 import { checkAndIncrementQuota, refundChargedQuotaOnce, refundQuota, beijingToday } from './quota';
 import { toUserMessage } from '../lib/errors';
 import { validateImageDataUrl, transcribeImage } from './vision';
-import { resolveAIConfig } from '../lib/settings';
+import { resolveAIConfig, getSettings } from '../lib/settings';
 import { maybeRefineProfile } from '../profiles/refine';
 import { processSelfLearnMessage } from '../selflearn/process';
 import {
@@ -239,7 +239,8 @@ conversationRoutes.post('/:id/chat', async (c) => {
 
   const db = c.env.DB;
   const executionCtx = c.executionCtx;
-  const apiKey = (await resolveAIConfig(db, c.env)).deepseekKey;
+  const [aiConfig, appSettings] = await Promise.all([resolveAIConfig(db, c.env), getSettings(db)]);
+  const apiKey = aiConfig.deepseekKey;
 
   const today = beijingToday();
 
@@ -275,7 +276,7 @@ conversationRoutes.post('/:id/chat', async (c) => {
           processSelfLearnMessage(db, apiKey, conv.student_id, conv.id, conv.mode, acc.content),
         );
       } else if (acc.content && isSubject(conv.subject)) {
-        executionCtx.waitUntil(maybeRefineProfile(db, apiKey, conv.student_id, conv.subject));
+        executionCtx.waitUntil(maybeRefineProfile(db, apiKey, conv.student_id, conv.subject, appSettings));
       }
     };
 

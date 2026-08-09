@@ -20,6 +20,8 @@ export default function SettingsPage() {
   const [visionAdvancedOpen, setVisionAdvancedOpen] = useState(false);
   const [visionUrlInput, setVisionUrlInput] = useState('');
   const [visionModelInput, setVisionModelInput] = useState('');
+  const [profileRefineIntervalInput, setProfileRefineIntervalInput] = useState('10');
+  const [profileRefineDailyLimitInput, setProfileRefineDailyLimitInput] = useState('0');
   const [savingKeys, setSavingKeys] = useState(false);
 
   const isAdmin = user?.isAdmin ?? false;
@@ -40,6 +42,8 @@ export default function SettingsPage() {
         if (syncInputs) {
           setVisionUrlInput(settingsData.visionApiUrl);
           setVisionModelInput(settingsData.visionModel);
+          setProfileRefineIntervalInput(String(settingsData.profileRefineIntervalMinutes));
+          setProfileRefineDailyLimitInput(String(settingsData.profileRefineDailyLimit));
         }
       } catch (e) {
         setError(e instanceof ApiError ? e.message : '加载失败');
@@ -52,7 +56,20 @@ export default function SettingsPage() {
     setSavingKeys(true);
     setError('');
     try {
-      const body: Record<string, string> = {};
+      const intervalMinutes = Number(profileRefineIntervalInput);
+      const dailyLimit = Number(profileRefineDailyLimitInput);
+      if (!Number.isInteger(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 1440) {
+        setError('画像提炼间隔需为 1–1440 的整数（分钟）');
+        setSavingKeys(false);
+        return;
+      }
+      if (!Number.isInteger(dailyLimit) || dailyLimit < 0 || dailyLimit > 1000) {
+        setError('每日提炼上限需为 0–1000 的整数（0 表示不限）');
+        setSavingKeys(false);
+        return;
+      }
+
+      const body: Record<string, string | number> = {};
       if (deepseekKeyInput.trim()) body.deepseekApiKey = deepseekKeyInput.trim();
       if (visionKeyInput.trim()) body.visionApiKey = visionKeyInput.trim();
       // 只要和服务端现值不同就提交，避免用户改完又收起高级设置导致静默丢弃
@@ -61,6 +78,12 @@ export default function SettingsPage() {
       }
       if (visionModelInput.trim() !== (aiSettings?.visionModel ?? '')) {
         body.visionModel = visionModelInput.trim();
+      }
+      if (intervalMinutes !== (aiSettings?.profileRefineIntervalMinutes ?? 10)) {
+        body.profileRefineIntervalMinutes = intervalMinutes;
+      }
+      if (dailyLimit !== (aiSettings?.profileRefineDailyLimit ?? 0)) {
+        body.profileRefineDailyLimit = dailyLimit;
       }
       await apiPut('/api/admin/settings', body);
       setDeepseekKeyInput('');
@@ -221,6 +244,38 @@ export default function SettingsPage() {
                   />
                 </div>
               )}
+            </div>
+            <div className="key-row">
+              <div className="key-row-head">
+                <strong>学科画像提炼间隔</strong>（分钟）
+              </div>
+              <p className="form-hint">
+                同一学生同一学科两次画像提炼的最短间隔。默认 10 分钟，适合孩子专注力窗口；如果对话较稀疏可适度调大。
+              </p>
+              <input
+                type="number"
+                min={1}
+                max={1440}
+                value={profileRefineIntervalInput}
+                onChange={(e) => setProfileRefineIntervalInput(e.target.value)}
+                placeholder="10"
+              />
+            </div>
+            <div className="key-row">
+              <div className="key-row-head">
+                <strong>学科画像每日提炼上限</strong>（0 = 不限）
+              </div>
+              <p className="form-hint">
+                每个学生每个学科每天最多提炼几次。填 0 表示不限制；填 1–1000 可在对话非常密集时控制成本。
+              </p>
+              <input
+                type="number"
+                min={0}
+                max={1000}
+                value={profileRefineDailyLimitInput}
+                onChange={(e) => setProfileRefineDailyLimitInput(e.target.value)}
+                placeholder="0"
+              />
             </div>
             <button className="btn btn-primary" onClick={() => void saveAIKeys()} disabled={savingKeys}>
               {savingKeys ? '保存中…' : '保存配置'}

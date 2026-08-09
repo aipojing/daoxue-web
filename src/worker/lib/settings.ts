@@ -5,6 +5,8 @@ export const SETTING_KEYS = {
   visionApiKey: 'vision_api_key',
   visionApiUrl: 'vision_api_url',
   visionModel: 'vision_model',
+  profileRefineIntervalMinutes: 'profile_refine_interval_minutes',
+  profileRefineDailyLimit: 'profile_refine_daily_limit',
 } as const;
 
 export interface AIConfig {

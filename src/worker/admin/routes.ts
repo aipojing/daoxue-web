@@ -27,9 +27,18 @@ const settingsSchema = z.object({
   visionApiKey: z.string().trim().max(200).optional(),
   visionApiUrl: z.string().trim().max(300).optional(),
   visionModel: z.string().trim().max(100).optional(),
+  profileRefineIntervalMinutes: z.number().int().min(1).max(1440).optional(),
+  profileRefineDailyLimit: z.number().int().min(0).max(1000).optional(),
 });
 
 export const adminRoutes = new Hono<AppContext>();
+function parseRefineSetting(raw: string | undefined, defaultValue: number, max: number): number {
+  const num = raw === undefined ? defaultValue : Number(raw);
+  if (!Number.isFinite(num)) return defaultValue;
+  if (num < 0) return defaultValue;
+  return Math.min(Math.floor(num), max);
+}
+
 adminRoutes.get('/settings', async (c) => {
   const settings = await getSettings(c.env.DB);
   const ai = mergeAIConfig(settings, c.env);
@@ -42,18 +51,33 @@ adminRoutes.get('/settings', async (c) => {
     visionFromEnv: !!ai.vision && !ai.visionFromDb,
     visionApiUrl: settings[SETTING_KEYS.visionApiUrl] ?? '',
     visionModel: settings[SETTING_KEYS.visionModel] ?? '',
+    profileRefineIntervalMinutes: parseRefineSetting(settings[SETTING_KEYS.profileRefineIntervalMinutes], 10, 1440),
+    profileRefineDailyLimit: parseRefineSetting(settings[SETTING_KEYS.profileRefineDailyLimit], 0, 1000),
   });
 });
 
 adminRoutes.put('/settings', async (c) => {
   const body = settingsSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!body.success) return err(c, '输入不合法');
-  const { deepseekApiKey, visionApiKey, visionApiUrl, visionModel } = body.data;
+  const {
+    deepseekApiKey,
+    visionApiKey,
+    visionApiUrl,
+    visionModel,
+    profileRefineIntervalMinutes,
+    profileRefineDailyLimit,
+  } = body.data;
 
   if (deepseekApiKey !== undefined) await setSetting(c.env.DB, SETTING_KEYS.deepseekApiKey, deepseekApiKey);
   if (visionApiKey !== undefined) await setSetting(c.env.DB, SETTING_KEYS.visionApiKey, visionApiKey);
   if (visionApiUrl !== undefined) await setSetting(c.env.DB, SETTING_KEYS.visionApiUrl, visionApiUrl);
   if (visionModel !== undefined) await setSetting(c.env.DB, SETTING_KEYS.visionModel, visionModel);
+  if (profileRefineIntervalMinutes !== undefined) {
+    await setSetting(c.env.DB, SETTING_KEYS.profileRefineIntervalMinutes, String(profileRefineIntervalMinutes));
+  }
+  if (profileRefineDailyLimit !== undefined) {
+    await setSetting(c.env.DB, SETTING_KEYS.profileRefineDailyLimit, String(profileRefineDailyLimit));
+  }
 
   return ok(c, { saved: true });
 });

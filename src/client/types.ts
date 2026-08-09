@@ -262,6 +262,8 @@ export interface AdminSettings {
   visionFromEnv: boolean;
   visionApiUrl: string;
   visionModel: string;
+  profileRefineIntervalMinutes: number;
+  profileRefineDailyLimit: number;
 }
 
 export interface AdminUser {
