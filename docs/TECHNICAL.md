@@ -54,6 +54,8 @@ npm install
 cat > .dev.vars <<'EOF'
 DEEPSEEK_API_KEY=你的-key
 VISION_API_KEY=你的视觉模型-key
+# 本地个人 Key 加密主密钥（随机 32 字节 Base64，仅开发用，勿与生产相同）
+AI_SETTINGS_ENCRYPTION_KEY=$(openssl rand -base64 32 的输出)
 EOF
 
 # 初始化本地数据库
@@ -108,12 +110,35 @@ dry-run 只验证 Worker 和静态资源能否正确打包，不会部署，也�
 
 ## 配置与密钥
 
-DeepSeek 和视觉服务配置支持两种来源：
+AI 服务配置分为**个人配置**（`user_ai_settings`，按账号加密保存）和**站点共享配置**（`app_settings` + Worker 环境变量，管理员维护）。
 
-- 管理员在网页“设置”页写入 D1；
-- Worker 环境变量或 Cloudflare Secret。
+每次模型调用（聊天、OCR、错题提取、自学后处理、画像提炼）都通过 `resolveUserAIConfig()` 按账号解析：
 
-数据库配置优先于环境变量。管理页面只返回 Key 的尾部掩码，不返回完整值。
+```text
+个人密文（user_ai_settings）
+  → 若存在，按 user_id 解密并使用
+  → 若不存在且 shared_ai_fallback_enabled = 1，读取 app_settings / Worker Secret
+  → 否则返回未配置
+```
+
+要点：
+
+- 个人 Key 始终优先于站点共享 Key；两者不做字段级混搭（视觉配置的 Key/地址/模型整段取个人或整段取共享）。
+- 个人密文损坏或与主密钥不匹配时 **fail closed**：直接报错，不回退共享 Key，避免产生意外的共享费用。
+- 共享兜底由管理员显式控制。migration 0009 初始写入"开启"以保证发布平滑；完成用户迁移后由管理员在「AI 服务」页关闭，进入严格 BYOK。
+- `app_settings` 中的 DeepSeek/视觉配置语义为"站点共享服务"，仍保留环境变量兜底。
+
+### 个人 Key 加密
+
+- 算法：AES-256-GCM，12 字节随机 IV；密文、IV、尾号掩码分列存入 `user_ai_settings`。
+- AAD 固定为 `user-ai:v1:<user_id>:<deepseek|vision>`，防止密文跨用户或跨服务替换。
+- 主密钥只来自 Worker Secret `AI_SETTINGS_ENCRYPTION_KEY`（Base64 编码的 32 字节），本地开发放在 `.dev.vars`。主密钥丢失或轮换后，已有个人密文无法解密，用户需在「AI 服务」页重新保存 Key；在此之前相关账号的 AI 调用保持 fail closed。
+- 完整 Key、密文、IV 和主密钥不写入日志、不出现在任何 API 响应；GET 接口只返回是否已配置、尾号掩码和生效来源。
+- 每日消息上限对共享 Key 和个人 Key 一视同仁；画像提炼的间隔和每日上限仍是站点级策略，但后台提炼同样消耗发起会话账号当前生效的 DeepSeek Key。
+
+### 视觉服务白名单
+
+普通用户的个人视觉服务只允许后端白名单中的 provider（`zhipu`、`dashscope`），请求地址由后端固定映射，用户不能提交任意 URL（防 SSRF）。管理员的站点共享服务仍允许自定义 OpenAI 兼容地址。
 
 本地开发的 `.dev.vars` 已加入 `.gitignore`。不要把 API Key、生产数据库导出或真实学习数据提交到仓库。
 
@@ -163,8 +188,9 @@ src/worker/          Cloudflare Worker 后端
   mistakes/          错题卡抽取与错题本
   selflearn/         自学记忆、结构化抽取与每日流程
   profiles/          学科画像自动提炼
-  admin/             邀请码、限额和 API Key 配置
-  lib/               响应、错误与设置读取
+  admin/             邀请码、限额与站点共享 AI 服务配置
+  settings/          登录用户个人 AI 设置（加密 Key）接口
+  lib/               响应、错误、设置读取、个人设置解析与 AES-GCM 编解码
 
 src/client/          React 前端
   pages/             页面级功能

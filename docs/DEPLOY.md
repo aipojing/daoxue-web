@@ -77,28 +77,74 @@ npm run deploy
 
 ---
 
-## 三、API Key 配置
+## 二（附）、用户级 AI Key 功能首次发布（migration 0009）
 
-**推荐方式：网页配置**（不用重新部署，随时能换）
+发布顺序固定为：配置并备份加密 Secret → 备份 D1 → 应用迁移 → 发布 Worker → 验证共享兜底 →
+用户录入个人 Key → 关闭共享兜底。
 
-登录管理员账号 → 「设置」页 → 「AI 服务配置」：
+```bash
+# 1. 生成加密主密钥并立刻保存到密码管理器；丢失后已有个人 Key 无法恢复
+openssl rand -base64 32 | npx wrangler secret put AI_SETTINGS_ENCRYPTION_KEY
+
+# 2. 备份远程 D1
+npx wrangler d1 export daoxue-db --remote --output backups/pre-user-ai-settings.sql
+
+# 3. 应用迁移（只新增 0009_user_ai_settings.sql）并发布
+npx wrangler d1 migrations apply daoxue-db --remote
+npm run deploy
+```
+
+部署后检查：
+
+1. 管理员进入「AI 服务」页，确认"站点共享"区可见且共享兜底开关为开启（迁移初始值）；
+2. 用一个测试普通账号保存个人 Key，完成一次聊天；配置视觉 Key 后再完成一次拍照识题；
+3. 逐个账号完成个人 Key 录入后，管理员关闭共享兜底开关，进入严格 BYOK。
+
+回滚说明：
+
+- 回滚旧代码后，旧版本会忽略共享兜底开关并恢复"全局共享 Key"行为；
+- `user_ai_settings` 表（0009）保留不影响旧代码读写；
+- 只要表内仍有个人密文，就不得删除或覆盖 `AI_SETTINGS_ENCRYPTION_KEY`，否则密文永久无法恢复。
+
+---
+
+## 三、AI 服务与 API Key 配置
+
+AI 服务分两层，都在登录后可见的「AI 服务」页配置（不用重新部署，随时能换）：
+
+1. **个人配置（所有登录用户）**：每个账号填自己的 DeepSeek Key 和视觉服务 Key，优先级最高，
+   同账号下所有学生共用；Key 以 AES-256-GCM 密文存入 D1，页面只显示尾号不回显完整值。
+   个人视觉服务只允许智谱 / 阿里云百炼两种白名单服务。
+2. **站点共享配置（仅管理员）**：作为没有个人 Key 账号的兜底，可自定义 OpenAI 兼容地址。
 
 | 配置项 | 说明 | 从哪里拿 |
 |---|---|---|
 | DeepSeek API Key | 必填，驱动全部对话 | https://platform.deepseek.com |
 | 视觉模型 Key | 选填，开启拍照识题 | https://open.bigmodel.cn （GLM-4.1V-Thinking-Flash 免费） |
-| 视觉服务地址 / 模型 | 选填，换其他 OpenAI 兼容服务时填 | 如通义：`https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` + `qwen-vl-plus` |
+| 视觉服务地址 / 模型（仅共享） | 选填，共享服务换其他 OpenAI 兼容服务时填 | 如通义：`https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` + `qwen-vl-plus` |
 
-Key 存在 D1 的 `app_settings` 表里，页面只显示尾号不回显完整值，输入框留空表示不修改。
+共享兜底开关由管理员显式控制：migration 0009 初始为"开启"，保证老用户不中断；
+全部账号录完个人 Key 后，管理员在「AI 服务」页关闭开关，即进入严格 BYOK。
 
-**备用方式：环境变量 Secret**
+**共享服务的备用方式：环境变量 Secret**
 
 ```bash
 npx wrangler secret put DEEPSEEK_API_KEY
 npx wrangler secret put VISION_API_KEY
 ```
 
-优先级：**网页配置 > 环境变量**。两个都没配时，对话会提示"尚未配置 DeepSeek API Key"。
+共享服务优先级：**网页配置 > 环境变量**。共享与个人都没配时，对话会提示去「AI 服务」页配置。
+
+**必须配置的加密主密钥**
+
+个人 Key 依赖 Worker Secret `AI_SETTINGS_ENCRYPTION_KEY`（Base64 编码的 32 字节）：
+
+```bash
+# 生成后立刻保存到密码管理器；丢失后已有个人 Key 无法恢复，用户必须重新填写
+openssl rand -base64 32 | npx wrangler secret put AI_SETTINGS_ENCRYPTION_KEY
+```
+
+未配置该 Secret 时，「AI 服务」页保存个人 Key 会返回 503；已有的个人密文也会 fail closed。
 
 ---
 
@@ -194,10 +240,10 @@ npx wrangler tail --status error
 
 | 现象 | 原因 / 解决 |
 |---|---|
-| 页面正常但发消息报"Key 无效" | 设置页填 DeepSeek Key；或检查 Key 是否欠费 |
+| 页面正常但发消息报"Key 无效" | 「AI 服务」页填 DeepSeek Key；或检查 Key 是否欠费 |
 | 报"今日对话次数已用完" | 设置页调高该账号的每日上限，或等北京时间 0 点重置 |
 | 报"尝试次数过多" | 登录连错 5 次会锁 15 分钟，等待或删 `login_failures` 表对应行 |
-| 拍照按钮不见了 | 没配视觉模型 Key，设置页填上即可 |
+| 拍照按钮不见了 | 没配视觉模型 Key，「AI 服务」页填上即可 |
 | 部署后页面还是旧的 | 强制刷新浏览器（Cmd+Shift+R） |
 | 本地 `wrangler dev` 报 compatibility date 错误 | 本地 wrangler 版本旧，升级 wrangler 或调低 `wrangler.jsonc` 里的 `compatibility_date` |
 | 新绑定的域名报 SSL 错误 | 证书还在签发，等 1-3 分钟 |
