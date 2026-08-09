@@ -2,7 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { apiGet, apiPost, apiPut, streamChatRequest, ApiError } from '../api';
 import { useAuth } from '../AuthContext';
-import { isNearBottom, isPersistedMessage } from '../lib/chat';
+import {
+  isNearBottom,
+  isPersistedMessage,
+  markPersistedMessages,
+  shouldApplyConversationDetail,
+  shouldCommitAssistantMessage,
+  subscribeToMobileMediaQuery,
+} from '../lib/chat';
 import { compressImageToDataUrl } from '../lib/image';
 import {
   CONVERSATION_SUBJECT_NAMES,
@@ -60,6 +67,7 @@ export default function ChatPage() {
   const abortRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const loadGenRef = useRef(0);
+  const routeConversationIdRef = useRef(conversationId);
   const creatingRef = useRef(false);
   const stickToBottomRef = useRef(true);
   const streamBufRef = useRef({ content: '', reasoning: '' });
@@ -71,6 +79,7 @@ export default function ChatPage() {
   );
 
   const isNew = conversationId === 'new';
+  routeConversationIdRef.current = conversationId;
 
   const loadConversations = useCallback(async () => {
     try {
@@ -81,17 +90,32 @@ export default function ChatPage() {
   }, [studentId]);
 
   const loadDetail = useCallback(async () => {
-    if (isNew) return;
+    const requestedConversationId = conversationId;
+    if (isNew || !requestedConversationId) return;
     // 世代号：切换会话后旧请求的响应到达时直接丢弃，避免显示错会话的内容
     const gen = ++loadGenRef.current;
     setLoadFailed(false);
     try {
-      const data = await apiGet<ConversationDetail>(`/api/conversations/${conversationId}/messages`);
-      if (gen !== loadGenRef.current) return;
+      const data = await apiGet<ConversationDetail>(`/api/conversations/${requestedConversationId}/messages`);
+      if (
+        !shouldApplyConversationDetail({
+          routeConversationId: routeConversationIdRef.current,
+          requestedConversationId,
+          currentGeneration: loadGenRef.current,
+          requestGeneration: gen,
+        })
+      ) return;
       setDetail(data.conversation);
-      setMessages(data.messages.map((message) => ({ ...message, persisted: true })));
+      setMessages(markPersistedMessages(data.messages));
     } catch (e) {
-      if (gen !== loadGenRef.current) return;
+      if (
+        !shouldApplyConversationDetail({
+          routeConversationId: routeConversationIdRef.current,
+          requestedConversationId,
+          currentGeneration: loadGenRef.current,
+          requestGeneration: gen,
+        })
+      ) return;
       setError(e instanceof ApiError ? e.message : '加载会话失败');
       setLoadFailed(true);
     }
@@ -99,6 +123,12 @@ export default function ChatPage() {
 
   useEffect(() => {
     stickToBottomRef.current = true;
+    loadGenRef.current += 1;
+    setDetail(null);
+    setMessages([]);
+    setError('');
+    setStreaming(IDLE_STREAM);
+    setLoadFailed(false);
     if (isNew) {
       if (creatingRef.current) return;
       creatingRef.current = true;
@@ -123,20 +153,13 @@ export default function ChatPage() {
         cancelled = true;
       };
     }
-    setDetail(null);
-    setMessages([]);
-    setError('');
-    setStreaming(IDLE_STREAM);
     void loadDetail();
     void loadConversations();
   }, [isNew, conversationId, studentId, searchParams, navigate, loadDetail, loadConversations]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(max-width: 767px)');
-    const onChange = (event: MediaQueryListEvent) => setIsMobile(event.matches);
-    setIsMobile(mediaQuery.matches);
-    mediaQuery.addEventListener('change', onChange);
-    return () => mediaQuery.removeEventListener('change', onChange);
+    return subscribeToMobileMediaQuery(mediaQuery, setIsMobile);
   }, []);
 
   // 仅在用户本来就贴着底部时自动滚动，避免上翻查看历史时被拽回来
@@ -177,7 +200,7 @@ export default function ChatPage() {
 
   const send = async (override?: string) => {
     const content = (override ?? input).trim();
-    if (!content || streamingRef.current || !detail) return;
+    if (isNew || !content || streamingRef.current || !detail) return;
     streamingRef.current = true;
     setError('');
     setInput('');
@@ -197,7 +220,7 @@ export default function ChatPage() {
     const commitStreamed = (messageId: number | null) => {
       const { content: text, reasoning } = streamBufRef.current;
       streamBufRef.current = { content: '', reasoning: '' };
-      if (text || reasoning) {
+      if (shouldCommitAssistantMessage(text, reasoning)) {
         setMessages((msgs) => [
           ...msgs,
           {
@@ -256,7 +279,7 @@ export default function ChatPage() {
     abortRef.current = null;
     streamingRef.current = false;
     streamBufRef.current = { content: '', reasoning: '' };
-    if (text || reasoning) {
+    if (shouldCommitAssistantMessage(text, reasoning)) {
       setMessages((msgs) => [
         ...msgs,
         {
@@ -458,7 +481,7 @@ export default function ChatPage() {
                 className="icon-btn camera-btn"
                 title="拍照/上传题目，自动转写为文字"
                 aria-label="拍照识题"
-                disabled={!detail || streaming.active || ocrLoading}
+                disabled={isNew || !detail || streaming.active || ocrLoading}
                 onClick={() => fileInputRef.current?.click()}
               >
                 {ocrLoading ? <span className="btn-spinner" /> : <IconCamera size={20} />}
@@ -474,12 +497,12 @@ export default function ChatPage() {
               isMobile ? '输入题目或问题…' : '输入题目或问题…（Enter 发送，Shift+Enter 换行）'
             }
             rows={1}
-            disabled={!detail || streaming.active}
+            disabled={isNew || !detail || streaming.active}
           />
           <button
             className="btn btn-primary chat-send"
             onClick={() => void send()}
-            disabled={!detail || streaming.active || !input.trim()}
+            disabled={isNew || !detail || streaming.active || !input.trim()}
           >
             发送
           </button>
