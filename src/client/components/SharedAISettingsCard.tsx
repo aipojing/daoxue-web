@@ -29,6 +29,7 @@ export default function SharedAISettingsCard() {
     try {
       const loaded = await apiGet<AdminSettings>('/api/admin/settings');
       if (generation !== loadGenerationRef.current) return;
+      setError('');
       setSettings(loaded);
       setSharedFallbackEnabled(loaded.sharedFallbackEnabled);
       if (syncInputs) {
@@ -52,6 +53,7 @@ export default function SharedAISettingsCard() {
   }, [toast]);
 
   const save = async () => {
+    if (!settings || saving) return;
     setSaving(true);
     setError('');
     try {
@@ -77,6 +79,8 @@ export default function SharedAISettingsCard() {
     }
   };
 
+  const disabled = saving || !settings;
+
   return (
     <section className="card settings-card" aria-labelledby="shared-ai-title">
       <h2 id="shared-ai-title" className="section-title">站点共享 AI 服务</h2>
@@ -98,7 +102,7 @@ export default function SharedAISettingsCard() {
           onChange={(event) => setDeepseekInput(event.target.value)}
           placeholder="sk-…（留空表示不修改）"
           autoComplete="off"
-          disabled={saving}
+          disabled={disabled}
         />
       </div>
 
@@ -116,14 +120,14 @@ export default function SharedAISettingsCard() {
           onChange={(event) => setVisionInput(event.target.value)}
           placeholder="视觉服务 Key（留空表示不修改）"
           autoComplete="off"
-          disabled={saving}
+          disabled={disabled}
         />
         <button
           type="button"
           className="btn-link"
           aria-expanded={advancedOpen}
           onClick={() => setAdvancedOpen((open) => !open)}
-          disabled={saving}
+          disabled={disabled}
         >
           {advancedOpen ? '收起高级设置 ▲' : '高级：换其他视觉服务（如通义 qwen-vl）▼'}
         </button>
@@ -133,13 +137,13 @@ export default function SharedAISettingsCard() {
               value={visionApiUrl}
               onChange={(event) => setVisionApiUrl(event.target.value)}
               placeholder="接口地址（OpenAI 兼容），留空用智谱默认"
-              disabled={saving}
+              disabled={disabled}
             />
             <input
               value={visionModel}
               onChange={(event) => setVisionModel(event.target.value)}
               placeholder="模型名，如 qwen-vl-plus，留空用默认模型"
-              disabled={saving}
+              disabled={disabled}
             />
           </div>
         )}
@@ -150,12 +154,12 @@ export default function SharedAISettingsCard() {
           type="checkbox"
           checked={sharedFallbackEnabled}
           onChange={(event) => setSharedFallbackEnabled(event.target.checked)}
-          disabled={saving}
+          disabled={disabled}
         />
         允许未配置个人 Key 的用户使用站点共享服务
       </label>
       <div className="settings-actions">
-        <button type="button" className="btn btn-primary" disabled={saving} onClick={() => void save()}>
+        <button type="button" className="btn btn-primary" disabled={disabled} onClick={() => void save()}>
           {saving ? '保存中…' : '保存站点共享配置'}
         </button>
       </div>
