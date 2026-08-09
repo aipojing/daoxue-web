@@ -75,6 +75,8 @@ export interface UserAISettings {
     visionKeyTail: string;
     visionProvider: 'zhipu' | 'dashscope';
     visionModel: string;
+    profileRefineIntervalMinutes: number;
+    profileRefineDailyLimit: number;
   };
   sharedFallbackEnabled: boolean;
   effective: {
@@ -304,8 +306,6 @@ export interface AdminSettings {
   visionFromEnv: boolean;
   visionApiUrl: string;
   visionModel: string;
-  profileRefineIntervalMinutes: number;
-  profileRefineDailyLimit: number;
 }
 
 export interface AdminUser {

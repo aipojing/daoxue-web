@@ -4,6 +4,7 @@ import { apiGet, apiPost, apiPut, ApiError, performLogout } from '../api';
 import { useAuth } from '../AuthContext';
 import type { InviteCode, AdminUser } from '../types';
 import { finishPending, tryStartPending } from '../lib/chat';
+import SharedAISettingsCard from '../components/SharedAISettingsCard';
 
 export default function SettingsPage() {
   const { user, clear } = useAuth();
@@ -173,6 +174,8 @@ export default function SettingsPage() {
 
       {isAdmin && (
         <>
+          <SharedAISettingsCard />
+
           <div className="card settings-card">
             <h2 className="section-title">邀请码管理</h2>
             <div className="invite-create-row">
