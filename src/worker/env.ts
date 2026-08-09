@@ -6,6 +6,8 @@ export interface Env {
   VISION_API_KEY?: string;
   VISION_API_URL?: string;
   VISION_MODEL?: string;
+  /** Base64 编码的 32 字节 AES-GCM 主密钥，只能通过 Worker Secret 注入。 */
+  AI_SETTINGS_ENCRYPTION_KEY?: string;
 }
 
 export interface AuthUser {

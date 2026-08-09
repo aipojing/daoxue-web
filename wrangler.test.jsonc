@@ -4,6 +4,10 @@
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-05-03",
   "compatibility_flags": ["nodejs_compat"],
+  // 仅测试用固定主密钥，生产必须通过 wrangler secret 注入随机值
+  "vars": {
+    "AI_SETTINGS_ENCRYPTION_KEY": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+  },
   "d1_databases": [
     {
       "binding": "DB",

@@ -16,6 +16,7 @@ const MIGRATIONS = [
   '0006_operation_leases.sql',
   '0007_chat_request_id.sql',
   '0008_chat_request_recovery.sql',
+  '0009_user_ai_settings.sql',
 ] as const;
 
 function runSql(dbPath: string, sql: string): string {
