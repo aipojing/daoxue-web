@@ -47,7 +47,7 @@
 - Produces: `Subject` 新增 `'chemistry'`；`SUBJECT_NAMES.chemistry === '化学'`；`getBasePrompt('chemistry'): string`。
 - Consumes: 用户提供的 `/Users/ahs/Desktop/学习/化学题解导学系统提示词.md`。
 
-- [ ] **Step 1: 写 Worker 失败测试**
+- [x] **Step 1: 写 Worker 失败测试**
 
 把 `test/prompts.test.ts` 的导入和学科测试改为：
 
@@ -91,13 +91,13 @@ describe('subjects', () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试并确认 RED**
+- [x] **Step 2: 运行测试并确认 RED**
 
 Run: `npx vitest run test/prompts.test.ts`
 
 Expected: FAIL，明确显示 `SUBJECTS` 缺少 `chemistry`、`SUBJECT_NAMES.chemistry` 不存在或 `getBasePrompt('chemistry')` 无法通过类型/运行校验。
 
-- [ ] **Step 3: 加入 Worker 枚举和提示词映射**
+- [x] **Step 3: 加入 Worker 枚举和提示词映射**
 
 把 `src/worker/chat/prompt-builder.ts` 的学科声明更新为：
 
@@ -132,7 +132,7 @@ const BASE_PROMPTS: Record<Subject, string> = {
 };
 ```
 
-- [ ] **Step 4: 创建化学提示词**
+- [x] **Step 4: 创建化学提示词**
 
 使用 `apply_patch` 创建 `prompts/chemistry.md`，内容逐段采用 `/Users/ahs/Desktop/学习/化学题解导学系统提示词.md` 从标题 `# 校内化学题解导学系统提示词` 到末尾核心原则的完整文本，不删减五种模式、八步链路、默认输出格式、表达检查、首次对话和实验安全边界。
 
@@ -144,13 +144,13 @@ cmp prompts/chemistry.md '/Users/ahs/Desktop/学习/化学题解导学系统提�
 
 Expected: exit 0，无输出。
 
-- [ ] **Step 5: 运行测试并确认 GREEN**
+- [x] **Step 5: 运行测试并确认 GREEN**
 
 Run: `npx vitest run test/prompts.test.ts`
 
 Expected: PASS，`test/prompts.test.ts` 全部通过。
 
-- [ ] **Step 6: 提交 Worker 与提示词改动**
+- [x] **Step 6: 提交 Worker 与提示词改动**
 
 ```bash
 git add test/prompts.test.ts src/worker/chat/prompt-builder.ts src/worker/chat/prompts.ts prompts/chemistry.md
@@ -170,7 +170,7 @@ git commit -m "feat: add chemistry tutoring prompt"
 - Consumes: `chemistry` 学科代码和“化学”名称。
 - Produces: 前端 `Subject` 支持化学，所有基于 `SUBJECTS` 的入口/筛选/画像自动显示化学，并提供化学首次对话文案。
 
-- [ ] **Step 1: 写前端学科失败测试**
+- [x] **Step 1: 写前端学科失败测试**
 
 创建 `test/client-subjects.test.ts`：
 
@@ -193,13 +193,13 @@ describe('client subjects', () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试并确认 RED**
+- [x] **Step 2: 运行测试并确认 RED**
 
 Run: `npx vitest run test/client-subjects.test.ts`
 
 Expected: FAIL，显示数组缺少 `chemistry` 或化学名称/颜色未定义。
 
-- [ ] **Step 3: 更新前端严格枚举与显示元数据**
+- [x] **Step 3: 更新前端严格枚举与显示元数据**
 
 把 `src/client/types.ts` 的对应声明更新为：
 
@@ -225,7 +225,7 @@ export const SUBJECT_COLORS: Record<Subject, string> = {
 };
 ```
 
-- [ ] **Step 4: 增加化学首次对话文案**
+- [x] **Step 4: 增加化学首次对话文案**
 
 在 `src/client/pages/ChatPage.tsx` 的 `SUBJECT_INTROS` 中加入：
 
@@ -234,7 +234,7 @@ chemistry:
   '请告诉我：1. 年级；2. 化学题目或清晰图片；3. 你已经写出的过程；4. 你认为卡住的位置；5. 希望使用的模式：提示、分步导学、批改复盘或完整讲解。未选择模式时，我会根据现有信息采用批改复盘或分步导学。',
 ```
 
-- [ ] **Step 5: 更新 README**
+- [x] **Step 5: 更新 README**
 
 把解题辅导说明改为：
 
@@ -250,13 +250,13 @@ math/chinese/physics/english/chemistry.md   五套学科题解导学提示词
 
 同时把 `src/client/pages/StudentDetailPage.tsx` 的解题辅导说明更新为“数学 / 语文 / 物理 / 英语 / 化学”，并把 README 的自学方向说明从“不限于四学科”改为“不限于五学科”。
 
-- [ ] **Step 6: 运行测试、类型检查并确认 GREEN**
+- [x] **Step 6: 运行测试、类型检查并确认 GREEN**
 
 Run: `npx vitest run test/client-subjects.test.ts && npm run typecheck`
 
 Expected: PASS；前端与 Worker 类型检查均无错误，所有 `Record<Subject, ...>` 均覆盖化学。
 
-- [ ] **Step 7: 提交前端与文档改动**
+- [x] **Step 7: 提交前端与文档改动**
 
 ```bash
 git add test/client-subjects.test.ts src/client/types.ts src/client/pages/ChatPage.tsx src/client/pages/StudentDetailPage.tsx README.md docs/superpowers/plans/2026-08-09-chemistry-tutoring.md
@@ -275,7 +275,7 @@ git commit -m "feat: expose chemistry tutoring across the UI"
 - Consumes: `0001`—`0003` 创建的现有 D1 schema。
 - Produces: 保留原数据的 schema；`conversations`/`mistake_cards` 接受 `chemistry` 和 `selflearn`；`student_profiles` 接受 `chemistry`；三表均拒绝未知值。
 
-- [ ] **Step 1: 写迁移失败测试**
+- [x] **Step 1: 写迁移失败测试**
 
 创建 `test/chemistry-migration.test.ts`：
 
@@ -396,13 +396,13 @@ describe('0005_add_chemistry_subject migration', () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试并确认 RED**
+- [x] **Step 2: 运行测试并确认 RED**
 
 Run: `npx vitest run test/chemistry-migration.test.ts`
 
 Expected: FAIL at `expect(existsSync(migrationPath)).toBe(true)`，因为 `0005` 尚不存在。
 
-- [ ] **Step 3: 创建数据迁移**
+- [x] **Step 3: 创建数据迁移**
 
 创建 `migrations/0005_add_chemistry_subject.sql`，按以下确定顺序实现：
 
@@ -538,25 +538,25 @@ PRAGMA foreign_key_check;
 PRAGMA defer_foreign_keys = off;
 ```
 
-- [ ] **Step 4: 运行迁移测试并确认 GREEN**
+- [x] **Step 4: 运行迁移测试并确认 GREEN**
 
 Run: `npx vitest run test/chemistry-migration.test.ts`
 
 Expected: PASS；六类历史记录全部保留，`PRAGMA foreign_key_check` 返回空数组，化学写入成功，非法学科写入失败。
 
-- [ ] **Step 5: 为迁移测试安装 Node 20 开发类型并检查类型**
+- [x] **Step 5: 为迁移测试安装 Node 20 开发类型并检查类型**
 
 Run: `npm install --save-dev '@types/node@^20' && npm run typecheck`
 
 Expected: `package.json` 与 `package-lock.json` 记录 `@types/node` 开发依赖；前端与 Worker 类型检查均为 0 errors。
 
-- [ ] **Step 6: 用 Wrangler 验证全新本地 D1**
+- [x] **Step 6: 用 Wrangler 验证全新本地 D1**
 
 Run: `npx wrangler d1 migrations apply daoxue-db --local`
 
 Expected: `0005_add_chemistry_subject.sql` 成功应用；不连接远程数据库。
 
-- [ ] **Step 7: 提交迁移改动**
+- [x] **Step 7: 提交迁移改动**
 
 ```bash
 git add test/chemistry-migration.test.ts migrations/0005_add_chemistry_subject.sql package.json package-lock.json docs/superpowers/plans/2026-08-09-chemistry-tutoring.md
@@ -572,25 +572,25 @@ git commit -m "feat: migrate D1 for chemistry subjects"
 - Consumes: 完成后的应用、提示词与迁移。
 - Produces: 可交付的验证记录，不执行远程写入。
 
-- [ ] **Step 1: 运行全量单元和迁移测试**
+- [x] **Step 1: 运行全量单元和迁移测试**
 
 Run: `npm test`
 
 Expected: 所有 Vitest 测试通过，0 failures。
 
-- [ ] **Step 2: 运行类型检查**
+- [x] **Step 2: 运行类型检查**
 
 Run: `npm run typecheck`
 
 Expected: client 与 worker TypeScript 检查均通过，0 errors。
 
-- [ ] **Step 3: 运行生产构建**
+- [x] **Step 3: 运行生产构建**
 
 Run: `npm run build`
 
 Expected: Vite 构建成功生成 `dist/client`，无构建错误。
 
-- [ ] **Step 4: 检查差异质量与范围**
+- [x] **Step 4: 检查差异质量与范围**
 
 ```bash
 git diff --check HEAD~3..HEAD
@@ -600,6 +600,6 @@ git log -6 --oneline
 
 Expected: `git diff --check` 无输出；工作区无未提交源码改动；最近提交包含规格、计划和本功能的三个实现提交，除此之外只有原有历史提交。
 
-- [ ] **Step 5: 按 verification-before-completion 技能核对证据后交付**
+- [x] **Step 5: 按 verification-before-completion 技能核对证据后交付**
 
 交付摘要必须列出：五学科 UI、化学提示词、严格白名单迁移、历史数据迁移测试，以及 `npm test`、`npm run typecheck`、`npm run build` 的新鲜结果；明确说明未执行远程迁移和部署。
