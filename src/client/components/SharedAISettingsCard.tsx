@@ -149,14 +149,18 @@ export default function SharedAISettingsCard() {
         )}
       </div>
 
-      <label className="settings-toggle-row">
+      <label className={`settings-toggle-row${disabled ? ' is-disabled' : ''}`}>
         <input
           type="checkbox"
+          role="switch"
           checked={sharedFallbackEnabled}
           onChange={(event) => setSharedFallbackEnabled(event.target.checked)}
           disabled={disabled}
         />
-        允许未配置个人 Key 的用户使用站点共享服务
+        <span className="settings-toggle-copy">
+          <strong>允许使用站点共享服务</strong>
+          <span>仅当用户未配置对应的个人 Key 时启用，不会覆盖个人配置。</span>
+        </span>
       </label>
       <div className="settings-actions">
         <button type="button" className="btn btn-primary" disabled={disabled} onClick={() => void save()}>
