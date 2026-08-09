@@ -382,7 +382,7 @@ describe('资源归属、局部更新与聊天额度', () => {
     }, admin.cookie);
     expect(response.status).toBe(200);
     const stream = await response.text();
-    expect(stream).toContain('尚未配置 DeepSeek API Key');
+    expect(stream).toContain('请先在「AI 服务」页配置 DeepSeek API Key');
     expect(stream).toContain('"userMessageId":null');
     expect(stream).toContain('"assistantMessageId":null');
 
@@ -1040,5 +1040,260 @@ describe('用户 AI 设置', () => {
     await putAISettings(admin.cookie, { deepseekApiKey: null });
     status = await getAISettings(admin.cookie);
     expect(status.effective).toMatchObject({ deepseekConfigured: false, deepseekSource: 'none' });
+  });
+});
+
+async function createStudentAndConversation(cookie: string, subject = 'math') {
+  const created = await api('/api/students', {
+    method: 'POST',
+    body: JSON.stringify({ name: '小明', grade: '初二' }),
+  }, cookie);
+  const student = (await json<{ id: number }>(created)).data!;
+  const conversationResponse = await api(`/api/students/${student.id}/conversations`, {
+    method: 'POST',
+    body: JSON.stringify({ subject }),
+  }, cookie);
+  const conversation = (await json<{ id: number }>(conversationResponse)).data!;
+  return { student, conversation };
+}
+
+function upstreamCallHeaders(upstream: ReturnType<typeof vi.fn>, index = 0): Record<string, string> {
+  return (upstream.mock.calls[index]?.[1] as { headers?: Record<string, string> } | undefined)?.headers ?? {};
+}
+
+describe('账户级 AI 调用链', () => {
+  it('聊天优先发送个人 DeepSeek Key', async () => {
+    const admin = await createAdmin();
+    const { conversation } = await createStudentAndConversation(admin.cookie);
+    await env.DB.prepare(
+      `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'sk-shared')`,
+    ).run();
+    await putAISettings(admin.cookie, { deepseekApiKey: 'sk-personal' });
+    const upstream = vi.fn().mockImplementation(async () =>
+      new Response('data: {"choices":[{"delta":{"content":"答案"}}]}\n\ndata: [DONE]\n\n', { status: 200 }),
+    );
+    vi.stubGlobal('fetch', upstream);
+
+    const response = await api(`/api/conversations/${conversation.id}/chat`, {
+      method: 'POST',
+      body: JSON.stringify({ content: '题目' }),
+    }, admin.cookie);
+    expect(await response.text()).toContain('event: done');
+    expect(upstream).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: 'Bearer sk-personal' }),
+      }),
+    );
+  });
+
+  it('无个人 Key 且兜底开启时使用共享 Key', async () => {
+    const admin = await createAdmin();
+    const { conversation } = await createStudentAndConversation(admin.cookie);
+    await env.DB.prepare(
+      `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'sk-shared')`,
+    ).run();
+    const upstream = vi.fn().mockImplementation(async () =>
+      new Response('data: {"choices":[{"delta":{"content":"答案"}}]}\n\ndata: [DONE]\n\n', { status: 200 }),
+    );
+    vi.stubGlobal('fetch', upstream);
+
+    const response = await api(`/api/conversations/${conversation.id}/chat`, {
+      method: 'POST',
+      body: JSON.stringify({ content: '题目' }),
+    }, admin.cookie);
+    expect(await response.text()).toContain('event: done');
+    expect(upstreamCallHeaders(upstream).Authorization).toBe('Bearer sk-shared');
+  });
+
+  it('关闭共享兜底后无个人 Key 不扣额度也不落消息', async () => {
+    const admin = await createAdmin();
+    const { conversation } = await createStudentAndConversation(admin.cookie);
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'sk-shared')`),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '0')`,
+      ),
+    ]);
+    const upstream = vi.fn();
+    vi.stubGlobal('fetch', upstream);
+
+    const response = await api(`/api/conversations/${conversation.id}/chat`, {
+      method: 'POST',
+      body: JSON.stringify({ content: '题目' }),
+    }, admin.cookie);
+    expect(await response.text()).toContain('请先在「AI 服务」页配置');
+    expect(upstream).not.toHaveBeenCalled();
+    const usage = await env.DB.prepare(
+      'SELECT message_count FROM usage_log WHERE user_id = ?',
+    ).bind(admin.body.data!.id).first();
+    const messages = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?',
+    ).bind(conversation.id).first<{ n: number }>();
+    expect(usage).toBeNull();
+    expect(messages?.n).toBe(0);
+  });
+
+  it('个人密文损坏时聊天 fail closed，不使用共享 Key', async () => {
+    const admin = await createAdmin();
+    const { conversation } = await createStudentAndConversation(admin.cookie);
+    await env.DB.prepare(
+      `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'sk-shared')`,
+    ).run();
+    await putAISettings(admin.cookie, { deepseekApiKey: 'sk-personal' });
+    await env.DB.prepare(
+      `UPDATE user_ai_settings SET deepseek_key_ciphertext = '!!!corrupted!!!'
+       WHERE user_id = ?`,
+    ).bind(admin.body.data!.id).run();
+    const upstream = vi.fn();
+    vi.stubGlobal('fetch', upstream);
+
+    const response = await api(`/api/conversations/${conversation.id}/chat`, {
+      method: 'POST',
+      body: JSON.stringify({ content: '题目' }),
+    }, admin.cookie);
+    expect(await response.text()).toContain('个人 AI 配置无法读取');
+    expect(upstream).not.toHaveBeenCalled();
+    const messages = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?',
+    ).bind(conversation.id).first<{ n: number }>();
+    expect(messages?.n).toBe(0);
+
+    // 同一会话的租约已被释放，修复 Key 后可立即继续
+    const leases = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM conversation_chat_leases WHERE conversation_id = ? AND expires_at > datetime(\'now\')',
+    ).bind(conversation.id).first<{ n: number }>();
+    expect(leases?.n).toBe(0);
+  });
+
+  it('OCR 使用个人视觉 Key 和白名单 provider URL', async () => {
+    const admin = await createAdmin();
+    const { conversation } = await createStudentAndConversation(admin.cookie);
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO app_settings (key, value) VALUES ('vision_api_key', 'vk-shared')`),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('vision_api_url', 'https://shared.example.com/v1')`,
+      ),
+    ]);
+    await putAISettings(admin.cookie, {
+      visionApiKey: 'vision-personal',
+      visionProvider: 'dashscope',
+    });
+    const upstream = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: '识别文字' } }] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', upstream);
+
+    const response = await api(`/api/conversations/${conversation.id}/ocr`, {
+      method: 'POST',
+      body: JSON.stringify({ image: 'data:image/jpeg;base64,/9j/4AAQ' }),
+    }, admin.cookie);
+    expect(response.status).toBe(200);
+    expect((await json<{ text: string }>(response)).data?.text).toBe('识别文字');
+    expect(upstream.mock.calls[0]?.[0]).toBe(
+      'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+    );
+    expect(upstreamCallHeaders(upstream).Authorization).toBe('Bearer vision-personal');
+  });
+
+  it('未配置任何视觉服务时 OCR 引导去 AI 服务页', async () => {
+    const admin = await createAdmin();
+    const { conversation } = await createStudentAndConversation(admin.cookie);
+    await env.DB.prepare(
+      `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '0')`,
+    ).run();
+
+    const response = await api(`/api/conversations/${conversation.id}/ocr`, {
+      method: 'POST',
+      body: JSON.stringify({ image: 'data:image/jpeg;base64,/9j/4AAQ' }),
+    }, admin.cookie);
+    expect(response.status).toBe(501);
+    expect((await json(response)).error).toContain('请先在「AI 服务」页配置图片识别服务');
+  });
+
+  it('错题提取使用会话所属账户的个人 Key', async () => {
+    const admin = await createAdmin();
+    const { conversation } = await createStudentAndConversation(admin.cookie);
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', '我算得 1/2 + 1/3 = 2/5')`,
+      ).bind(conversation.id),
+      env.DB.prepare(
+        `INSERT INTO messages (conversation_id, role, content) VALUES (?, 'assistant', '异分母分数应先通分')`,
+      ).bind(conversation.id),
+      env.DB.prepare(`INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'sk-shared')`),
+    ]);
+    await putAISettings(admin.cookie, { deepseekApiKey: 'sk-personal' });
+    const cardJson = JSON.stringify({
+      title: '异分母分数加法',
+      knowledge_point: '分数通分',
+      my_answer: '2/5',
+      key_error: '直接将分子分母相加',
+      error_tags: ['运算规则'],
+      correct_steps: '先通分再相加',
+      reminder: '异分母先通分',
+      retest_question: '计算 1/4 + 1/6',
+    });
+    const upstream = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: cardJson } }] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', upstream);
+
+    const extracted = await api(`/api/conversations/${conversation.id}/mistake-card`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }, admin.cookie);
+    expect(extracted.status).toBe(200);
+    expect(upstreamCallHeaders(upstream).Authorization).toBe('Bearer sk-personal');
+  });
+
+  it('/api/auth/me 在保存、清除和启停兜底后返回正确来源', async () => {
+    const admin = await createAdmin();
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'sk-shared')`),
+      env.DB.prepare(`INSERT INTO app_settings (key, value) VALUES ('vision_api_key', 'vk-shared')`),
+    ]);
+    const me = async () =>
+      (await json<{
+        aiConfigured: boolean;
+        aiSource: string;
+        visionEnabled: boolean;
+        visionSource: string;
+      }>(await api('/api/auth/me', {}, admin.cookie))).data!;
+
+    expect(await me()).toMatchObject({
+      aiConfigured: true,
+      aiSource: 'shared',
+      visionEnabled: true,
+      visionSource: 'shared',
+    });
+
+    await putAISettings(admin.cookie, { deepseekApiKey: 'sk-personal', visionApiKey: 'vk-personal' });
+    expect(await me()).toMatchObject({
+      aiConfigured: true,
+      aiSource: 'personal',
+      visionEnabled: true,
+      visionSource: 'personal',
+    });
+
+    await putAISettings(admin.cookie, { deepseekApiKey: null, visionApiKey: null });
+    expect(await me()).toMatchObject({ aiSource: 'shared', visionSource: 'shared' });
+
+    await env.DB.prepare(
+      `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '0')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run();
+    expect(await me()).toMatchObject({
+      aiConfigured: false,
+      aiSource: 'none',
+      visionEnabled: false,
+      visionSource: 'none',
+    });
   });
 });

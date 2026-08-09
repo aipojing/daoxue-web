@@ -139,7 +139,9 @@ export async function transcribeImage(
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
     console.error(`vision API error ${res.status}: ${detail.slice(0, 500)}`);
-    if (res.status === 401) throw new UserFacingError('图片识别服务 Key 无效，请联系管理员');
+    if (res.status === 401) {
+      throw new UserFacingError('图片识别服务 Key 无效，请在「AI 服务」页检查当前配置');
+    }
     if (res.status === 429) throw new UserFacingError('图片识别请求过于频繁，请稍后再试');
     throw new UserFacingError('图片识别服务暂时不可用，请稍后再试或改为文字输入');
   }

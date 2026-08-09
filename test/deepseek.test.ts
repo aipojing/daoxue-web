@@ -48,6 +48,13 @@ describe('mapDeepSeekError', () => {
     expect(mapDeepSeekError(429)).toContain('频繁');
     expect(mapDeepSeekError(500)).toContain('稍后');
   });
+
+  it('鉴权与余额错误引导用户检查当前生效配置，不再要求联系管理员', () => {
+    expect(mapDeepSeekError(401)).toBe('DeepSeek API Key 无效，请在「AI 服务」页检查当前配置');
+    expect(mapDeepSeekError(402)).toBe('DeepSeek 账户余额不足，请检查当前生效 Key 对应的账户余额');
+    expect(mapDeepSeekError(401)).not.toContain('管理员');
+    expect(mapDeepSeekError(402)).not.toContain('管理员');
+  });
 });
 
 describe('streamChat 组合增量回调', () => {

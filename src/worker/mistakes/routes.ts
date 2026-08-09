@@ -6,7 +6,7 @@ import { getOwnedConversation } from '../chat/routes';
 import { completeJSON, type ChatMessage } from '../chat/deepseek';
 import { isSubject } from '../chat/prompt-builder';
 import { EXTRACT_INSTRUCTION, parseMistakeCard } from './extract';
-import { resolveAIConfig } from '../lib/settings';
+import { resolveUserAIConfig } from '../lib/user-ai-settings';
 import { checkAndIncrementQuota, refundQuota, beijingToday, beijingDatePlus } from '../chat/quota';
 import { toUserMessage } from '../lib/errors';
 
@@ -58,8 +58,8 @@ mistakeExtractRoutes.post('/:id/mistake-card', async (c) => {
     { role: 'user', content: `【辅导对话记录】\n\n${transcript}\n\n---\n\n${EXTRACT_INSTRUCTION}` },
   ];
 
-  const { deepseekKey } = await resolveAIConfig(c.env.DB, c.env);
-  if (!deepseekKey) return err(c, '尚未配置 DeepSeek API Key，请管理员在「设置」页填写', 501);
+  const { deepseekKey } = await resolveUserAIConfig(c.env.DB, c.env, user.id);
+  if (!deepseekKey) return err(c, '请先在「AI 服务」页配置 DeepSeek API Key', 501);
 
   // 这里同样会调用付费模型，必须计入每日额度
   const today = beijingToday();

@@ -17,9 +17,10 @@ import {
   reserveQuotaAndInsertChatMessage,
   reserveQuotaForExistingChatMessage,
 } from './quota';
-import { toUserMessage } from '../lib/errors';
+import { toUserMessage, UserFacingError } from '../lib/errors';
 import { validateImageDataUrl, transcribeImage } from './vision';
-import { getSettings, mergeAIConfig, resolveAIConfig } from '../lib/settings';
+import { getSettings } from '../lib/settings';
+import { resolveUserAIConfig, type ResolvedUserAIConfig } from '../lib/user-ai-settings';
 import { maybeRefineProfile } from '../profiles/refine';
 import { processSelfLearnMessage } from '../selflearn/process';
 import {
@@ -240,8 +241,8 @@ conversationRoutes.post('/:id/ocr', async (c) => {
   const conv = await getOwnedConversation(c.env.DB, user.id, Number(c.req.param('id')));
   if (!conv) return err(c, '会话不存在', 404);
 
-  const config = (await resolveAIConfig(c.env.DB, c.env)).vision;
-  if (!config) return err(c, '管理员未配置图片识别服务', 501);
+  const config = (await resolveUserAIConfig(c.env.DB, c.env, user.id)).vision;
+  if (!config) return err(c, '请先在「AI 服务」页配置图片识别服务', 501);
 
   const body = (await c.req.json().catch(() => ({}))) as { image?: unknown };
   const invalid = validateImageDataUrl(body.image as string);
@@ -335,7 +336,18 @@ conversationRoutes.post('/:id/chat', async (c) => {
     existingUserMessage = refreshedUser;
   }
   const appSettings = await getSettings(db);
-  const aiConfig = mergeAIConfig(appSettings, c.env);
+  // 本次请求只解析一次账户级配置，聊天、自学后处理和画像提炼共用同一个 Key，
+  // 保证来源一致；个人密文损坏时抛错 fail closed，绝不静默改用共享 Key。
+  let aiConfig: ResolvedUserAIConfig;
+  try {
+    aiConfig = await resolveUserAIConfig(db, c.env, user.id, appSettings);
+  } catch (e) {
+    await releaseConversationChatLease(db, conv.id, initialLeaseToken).catch(() => {});
+    if (e instanceof UserFacingError) {
+      return persistenceStatus(e.message, existingUserMessage?.id ?? null, null);
+    }
+    throw e;
+  }
   const apiKey = aiConfig.deepseekKey;
 
   const today = beijingToday();
@@ -393,7 +405,7 @@ conversationRoutes.post('/:id/chat', async (c) => {
     try {
       if (!apiKey) {
         await refundChargedQuota();
-        await sendError('尚未配置 DeepSeek API Key，请管理员在「设置」页填写');
+        await sendError('请先在「AI 服务」页配置 DeepSeek API Key');
         return;
       }
       if (savedUserMessageId === null) {

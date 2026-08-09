@@ -123,6 +123,16 @@ describe('buildVisionRequestBody / parseVisionResponse', () => {
 });
 
 describe('transcribeImage', () => {
+  it('视觉服务 Key 无效时引导去 AI 服务页而不是联系管理员', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('unauthorized', { status: 401 })));
+    await expect(
+      transcribeImage(
+        { apiKey: 'key', url: 'https://vision.example.test', model: 'vision' },
+        'data:image/png;base64,AAAA',
+      ),
+    ).rejects.toThrow('图片识别服务 Key 无效，请在「AI 服务」页检查当前配置');
+  });
+
   it('视觉服务长时无响应时主动超时', async () => {
     vi.stubGlobal(
       'fetch',

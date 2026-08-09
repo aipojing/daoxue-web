@@ -5,7 +5,7 @@ import type { AppContext } from '../env';
 import { ok, err } from '../lib/envelope';
 import { hashPassword, verifyPassword, generateToken, sha256Hex } from './crypto';
 import { requireAuth, SESSION_COOKIE } from './middleware';
-import { resolveAIConfig } from '../lib/settings';
+import { getUserAISettingsStatus, type UserAISettingsStatus } from '../lib/user-ai-settings';
 import { UserFacingError } from '../lib/errors';
 
 const SESSION_DAYS = 30;
@@ -255,12 +255,20 @@ authRoutes.post('/logout', async (c) => {
 
 authRoutes.get('/me', requireAuth, async (c) => {
   const user = c.get('user');
-  const ai = await resolveAIConfig(c.env.DB, c.env);
+  let status: UserAISettingsStatus | null = null;
+  try {
+    status = await getUserAISettingsStatus(c.env.DB, c.env, user.id);
+  } catch {
+    // 个人密文损坏或主密钥缺失时，能力状态降级为未配置，
+    // 保证用户仍能进入「AI 服务」页重新保存 Key；真正的模型调用会 fail closed。
+  }
   return ok(c, {
     id: user.id,
     email: user.email,
     isAdmin: !!user.is_admin,
-    visionEnabled: !!ai.vision,
-    aiConfigured: !!ai.deepseekKey,
+    aiConfigured: status?.effective.deepseekConfigured ?? false,
+    aiSource: status?.effective.deepseekSource ?? 'none',
+    visionEnabled: status?.effective.visionEnabled ?? false,
+    visionSource: status?.effective.visionSource ?? 'none',
   });
 });

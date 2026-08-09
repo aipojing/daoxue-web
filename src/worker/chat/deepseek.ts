@@ -36,9 +36,9 @@ export function parseSSELine(line: string): ParsedDelta | null {
 export function mapDeepSeekError(status: number): string {
   switch (status) {
     case 401:
-      return 'DeepSeek API Key 无效，请联系管理员检查配置';
+      return 'DeepSeek API Key 无效，请在「AI 服务」页检查当前配置';
     case 402:
-      return 'DeepSeek 账户余额不足，请联系管理员充值';
+      return 'DeepSeek 账户余额不足，请检查当前生效 Key 对应的账户余额';
     case 429:
       return '请求过于频繁，请稍后再试';
     default:
