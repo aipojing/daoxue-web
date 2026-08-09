@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
 import { buildSystemPrompt, isSubject, SUBJECTS, SUBJECT_NAMES } from '../src/worker/chat/prompt-builder';
 import { getBasePrompt } from '../src/worker/chat/prompts';
 
@@ -45,8 +44,7 @@ describe('subjects', () => {
   });
 
   it('化学提示词包含关键导学约束', () => {
-    expect(getBasePrompt('chemistry')).toBeTruthy();
-    const prompt = readFileSync(new URL('../prompts/chemistry.md', import.meta.url), 'utf8');
+    const prompt = getBasePrompt('chemistry');
     expect(prompt).toContain('校内化学题解导学系统');
     expect(prompt).toContain('三重一致');
     expect(prompt).toContain('先化学、后计算');

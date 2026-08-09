@@ -106,7 +106,7 @@ export default function StudentDetailPage() {
             <span className="mode-card-tag">遇到具体题目时用</span>
           </div>
           <p className="mode-card-desc">
-            把作业或练习里的题目发给 AI（数学 / 语文 / 物理 / 英语），它不直接报答案，
+            把作业或练习里的题目发给 AI（数学 / 语文 / 物理 / 英语 / 化学），它不直接报答案，
             而是分步引导孩子自己解出来；支持批改复盘、错因诊断、一键存入错题本。
           </p>
           <span className="mode-card-fit">适合：写作业卡壳、订正错题、考前针对性练习</span>

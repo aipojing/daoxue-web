@@ -30,6 +30,7 @@
 - Modify: `src/worker/chat/prompts.ts` — 化学提示词导入和映射。
 - Modify: `src/client/types.ts` — 前端学科枚举、中文名和主题色。
 - Modify: `src/client/pages/ChatPage.tsx` — 化学首次对话说明。
+- Modify: `src/client/pages/StudentDetailPage.tsx` — 学生主页的解题辅导学科说明。
 - Modify: `README.md` — 五学科能力及提示词目录说明。
 
 ### Task 1: Worker 学科模型与化学提示词
@@ -160,6 +161,7 @@ git commit -m "feat: add chemistry tutoring prompt"
 - Create: `test/client-subjects.test.ts`
 - Modify: `src/client/types.ts`
 - Modify: `src/client/pages/ChatPage.tsx`
+- Modify: `src/client/pages/StudentDetailPage.tsx`
 - Modify: `README.md`
 
 **Interfaces:**
@@ -244,6 +246,8 @@ chemistry:
 math/chinese/physics/english/chemistry.md   五套学科题解导学提示词
 ```
 
+同时把 `src/client/pages/StudentDetailPage.tsx` 的解题辅导说明更新为“数学 / 语文 / 物理 / 英语 / 化学”，并把 README 的自学方向说明从“不限于四学科”改为“不限于五学科”。
+
 - [ ] **Step 6: 运行测试、类型检查并确认 GREEN**
 
 Run: `npx vitest run test/client-subjects.test.ts && npm run typecheck`
@@ -253,7 +257,7 @@ Expected: PASS；前端与 Worker 类型检查均无错误，所有 `Record<Subj
 - [ ] **Step 7: 提交前端与文档改动**
 
 ```bash
-git add test/client-subjects.test.ts src/client/types.ts src/client/pages/ChatPage.tsx README.md
+git add test/client-subjects.test.ts src/client/types.ts src/client/pages/ChatPage.tsx src/client/pages/StudentDetailPage.tsx README.md docs/superpowers/plans/2026-08-09-chemistry-tutoring.md
 git commit -m "feat: expose chemistry tutoring across the UI"
 ```
 

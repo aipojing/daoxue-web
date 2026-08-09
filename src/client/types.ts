@@ -1,6 +1,6 @@
-export type Subject = 'math' | 'chinese' | 'physics' | 'english';
+export type Subject = 'math' | 'chinese' | 'physics' | 'english' | 'chemistry';
 
-export const SUBJECTS: Subject[] = ['math', 'chinese', 'physics', 'english'];
+export const SUBJECTS: Subject[] = ['math', 'chinese', 'physics', 'english', 'chemistry'];
 
 export function isSubject(value: string): value is Subject {
   return (SUBJECTS as string[]).includes(value);
@@ -11,6 +11,7 @@ export const SUBJECT_NAMES: Record<Subject, string> = {
   chinese: '语文',
   physics: '物理',
   english: '英语',
+  chemistry: '化学',
 };
 
 export const SUBJECT_COLORS: Record<Subject, string> = {
@@ -18,6 +19,7 @@ export const SUBJECT_COLORS: Record<Subject, string> = {
   chinese: '#b8432f',
   physics: '#3a7d5c',
   english: '#b0782a',
+  chemistry: '#7b4f8c',
 };
 
 export const PROVINCES = [
