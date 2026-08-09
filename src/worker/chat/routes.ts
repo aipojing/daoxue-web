@@ -254,7 +254,7 @@ conversationRoutes.post('/:id/chat', async (c) => {
     let quotaCharged = false;
 
     const persistAssistant = async () => {
-      if (!acc.content || savedMessageId !== null) return;
+      if ((!acc.content && !acc.reasoning) || savedMessageId !== null) return;
       const row = await db
         .prepare(
           'INSERT INTO messages (conversation_id, role, content, reasoning_content) VALUES (?, ?, ?, ?) RETURNING id',
@@ -267,11 +267,11 @@ conversationRoutes.post('/:id/chat', async (c) => {
         .bind(conv.id)
         .run();
 
-      if (conv.subject === 'selflearn') {
+      if (acc.content && conv.subject === 'selflearn') {
         executionCtx.waitUntil(
           processSelfLearnMessage(db, apiKey, conv.student_id, conv.id, conv.mode, acc.content),
         );
-      } else if (isSubject(conv.subject)) {
+      } else if (acc.content && isSubject(conv.subject)) {
         executionCtx.waitUntil(maybeRefineProfile(db, apiKey, conv.student_id, conv.subject));
       }
     };
@@ -358,7 +358,7 @@ conversationRoutes.post('/:id/chat', async (c) => {
         },
       );
 
-      if (!acc.content) {
+      if (!acc.content && !acc.reasoning) {
         if (quotaCharged) await refundQuota(db, user.id, today);
         await sendError('AI 未返回内容，请重试');
         return;
@@ -370,7 +370,7 @@ conversationRoutes.post('/:id/chat', async (c) => {
       console.error('chat stream error:', e);
       // 已生成的部分照样保存，用户刷新后能看到
       await persistAssistant().catch((e2) => console.error('persist partial reply failed:', e2));
-      if (!acc.content && quotaCharged) await refundQuota(db, user.id, today);
+      if (!acc.content && !acc.reasoning && quotaCharged) await refundQuota(db, user.id, today);
       await sendError(toUserMessage(e)).catch(() => {});
     }
   });

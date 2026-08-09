@@ -33,6 +33,12 @@ describe('validateImageDataUrl', () => {
     expect(validateImageDataUrl('data:image/jpeg;base64,/9j/4AAQ')).toBeNull();
   });
 
+  it('接受大小写兼容的 JPEG、JPG 与 PNG data url', () => {
+    expect(validateImageDataUrl('data:image/JPEG;base64,/9j/4AAQ')).toBeNull();
+    expect(validateImageDataUrl('data:image/JPG;base64,/9j/4AAQ')).toBeNull();
+    expect(validateImageDataUrl('data:image/PNG;base64,AAAA')).toBeNull();
+  });
+
   it('拒绝非图片数据', () => {
     expect(validateImageDataUrl('data:text/html;base64,AAA')).not.toBeNull();
     expect(validateImageDataUrl('hello')).not.toBeNull();

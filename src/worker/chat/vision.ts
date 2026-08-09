@@ -35,7 +35,7 @@ export function getVisionConfig(env: {
 
 export function validateImageDataUrl(dataUrl: string): string | null {
   if (typeof dataUrl !== 'string') return '图片数据不合法';
-  if (!/^data:image\/(jpeg|png|webp);base64,/.test(dataUrl)) return '仅支持 JPG/PNG/WebP 图片';
+  if (!/^data:image\/(?:jpe?g|png|webp);base64,/i.test(dataUrl)) return '仅支持 JPG/PNG/WebP 图片';
   if (dataUrl.length > MAX_IMAGE_BASE64_LENGTH) return '图片过大，请压缩后重试（最大约 4MB）';
   return null;
 }

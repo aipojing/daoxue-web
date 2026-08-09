@@ -12,6 +12,12 @@ describe('parseSSELine', () => {
     expect(r).toEqual({ reasoning: '思考' });
   });
 
+  it('同时解析 reasoning_content 与 content 增量', () => {
+    expect(
+      parseSSELine('data: {"choices":[{"delta":{"reasoning_content":"思考","content":"答案"}}]}'),
+    ).toEqual({ reasoning: '思考', content: '答案' });
+  });
+
   it('[DONE] 返回 done', () => {
     expect(parseSSELine('data: [DONE]')).toEqual({ done: true });
   });

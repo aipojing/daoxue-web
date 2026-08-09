@@ -21,13 +21,13 @@ export function parseSSELine(line: string): ParsedDelta | null {
     };
     const delta = json.choices?.[0]?.delta;
     if (!delta) return null;
-    if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
-      return { reasoning: delta.reasoning_content };
-    }
-    if (typeof delta.content === 'string' && delta.content.length > 0) {
-      return { content: delta.content };
-    }
-    return null;
+    const reasoning =
+      typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0
+        ? delta.reasoning_content
+        : undefined;
+    const content =
+      typeof delta.content === 'string' && delta.content.length > 0 ? delta.content : undefined;
+    return reasoning || content ? { reasoning, content } : null;
   } catch {
     return null;
   }
