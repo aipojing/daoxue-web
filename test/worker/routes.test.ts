@@ -984,6 +984,45 @@ describe('用户 AI 设置', () => {
     expect((await getAISettings(admin.cookie)).personal.visionProvider).toBe('dashscope');
   });
 
+  it('只有管理员能启停站点共享兜底，同值更新不报错', async () => {
+    const { admin, member } = await setupTwoUsers();
+
+    expect((await api('/api/admin/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ sharedFallbackEnabled: false }),
+    }, member.cookie)).status).toBe(403);
+
+    const initial = await json<{ sharedFallbackEnabled: boolean }>(
+      await api('/api/admin/settings', {}, admin.cookie),
+    );
+    expect(initial.data?.sharedFallbackEnabled).toBe(true);
+
+    const first = await api('/api/admin/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ sharedFallbackEnabled: false }),
+    }, admin.cookie);
+    const second = await api('/api/admin/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ sharedFallbackEnabled: false }),
+    }, admin.cookie);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+
+    const after = await json<{ sharedFallbackEnabled: boolean }>(
+      await api('/api/admin/settings', {}, admin.cookie),
+    );
+    expect(after.data?.sharedFallbackEnabled).toBe(false);
+
+    await api('/api/admin/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ sharedFallbackEnabled: true }),
+    }, admin.cookie);
+    const reenabled = await json<{ sharedFallbackEnabled: boolean }>(
+      await api('/api/admin/settings', {}, admin.cookie),
+    );
+    expect(reenabled.data?.sharedFallbackEnabled).toBe(true);
+  });
+
   it('保存或清除后立即返回最新生效来源', async () => {
     const { admin } = await setupTwoUsers();
     await env.DB.prepare(

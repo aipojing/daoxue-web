@@ -4,6 +4,7 @@ import type { AppContext } from '../env';
 import { ok, err } from '../lib/envelope';
 import { beijingToday } from '../chat/quota';
 import { getSettings, setSetting, maskTail, SETTING_KEYS, mergeAIConfig } from '../lib/settings';
+import { isSharedFallbackEnabled } from '../lib/user-ai-settings';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CODE_LENGTH = 8;
@@ -29,6 +30,7 @@ const settingsSchema = z.object({
   visionModel: z.string().trim().max(100).optional(),
   profileRefineIntervalMinutes: z.number().int().min(1).max(1440).optional(),
   profileRefineDailyLimit: z.number().int().min(0).max(1000).optional(),
+  sharedFallbackEnabled: z.boolean().optional(),
 });
 
 export const adminRoutes = new Hono<AppContext>();
@@ -43,6 +45,8 @@ adminRoutes.get('/settings', async (c) => {
   const settings = await getSettings(c.env.DB);
   const ai = mergeAIConfig(settings, c.env);
   return ok(c, {
+    // 以下 Key 字段均指"站点共享"服务，个人 Key 在 /api/ai-settings
+    sharedFallbackEnabled: isSharedFallbackEnabled(settings),
     deepseekKeySet: !!ai.deepseekKey,
     deepseekKeyTail: maskTail(settings[SETTING_KEYS.deepseekApiKey] ?? ''),
     deepseekFromEnv: !!ai.deepseekKey && !ai.deepseekFromDb,
@@ -66,7 +70,16 @@ adminRoutes.put('/settings', async (c) => {
     visionModel,
     profileRefineIntervalMinutes,
     profileRefineDailyLimit,
+    sharedFallbackEnabled,
   } = body.data;
+
+  if (sharedFallbackEnabled !== undefined) {
+    await setSetting(
+      c.env.DB,
+      SETTING_KEYS.sharedAIFallbackEnabled,
+      sharedFallbackEnabled ? '1' : '0',
+    );
+  }
 
   if (deepseekApiKey !== undefined) await setSetting(c.env.DB, SETTING_KEYS.deepseekApiKey, deepseekApiKey);
   if (visionApiKey !== undefined) await setSetting(c.env.DB, SETTING_KEYS.visionApiKey, visionApiKey);
