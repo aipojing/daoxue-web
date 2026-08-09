@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   getVisionConfig,
+  getPersonalVisionConfig,
   validateImageDataUrl,
   buildVisionRequestBody,
   parseVisionResponse,
@@ -30,6 +31,31 @@ describe('getVisionConfig', () => {
     });
     expect(cfg?.url).toContain('dashscope');
     expect(cfg?.model).toBe('qwen-vl-plus');
+  });
+});
+
+describe('getPersonalVisionConfig', () => {
+  it('没有 Key 返回 null', () => {
+    expect(getPersonalVisionConfig('zhipu', '', '')).toBeNull();
+  });
+
+  it('白名单 provider 使用固定地址与默认模型', () => {
+    expect(getPersonalVisionConfig('zhipu', 'vk', '')).toMatchObject({
+      apiKey: 'vk',
+      url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+      model: 'glm-4.1v-thinking-flash',
+    });
+    expect(getPersonalVisionConfig('dashscope', 'vk', '')).toMatchObject({
+      apiKey: 'vk',
+      url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      model: 'qwen-vl-plus',
+    });
+  });
+
+  it('允许覆盖模型但不接受自定义地址', () => {
+    const cfg = getPersonalVisionConfig('dashscope', 'vk', 'qwen-vl-max');
+    expect(cfg?.model).toBe('qwen-vl-max');
+    expect(cfg?.url).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions');
   });
 });
 

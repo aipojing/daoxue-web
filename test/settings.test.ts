@@ -40,6 +40,12 @@ describe('mergeAIConfig', () => {
   });
 });
 
+describe('SETTING_KEYS', () => {
+  it('包含站点共享兜底开关键名', () => {
+    expect(SETTING_KEYS.sharedAIFallbackEnabled).toBe('shared_ai_fallback_enabled');
+  });
+});
+
 describe('maskTail', () => {
   it('只显示尾 4 位', () => {
     expect(maskTail('sk-1234567890abcd')).toBe('abcd');

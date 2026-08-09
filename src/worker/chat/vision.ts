@@ -34,6 +34,38 @@ export function getVisionConfig(env: {
   };
 }
 
+/** 普通用户的个人视觉服务白名单：固定地址，防止把请求指向任意 URL（SSRF）。 */
+export type PersonalVisionProvider = 'zhipu' | 'dashscope';
+
+const PERSONAL_VISION_PROVIDERS: Record<
+  PersonalVisionProvider,
+  { url: string; defaultModel: string }
+> = {
+  zhipu: { url: DEFAULT_VISION_URL, defaultModel: DEFAULT_VISION_MODEL },
+  dashscope: {
+    url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+    defaultModel: 'qwen-vl-plus',
+  },
+};
+
+export const PERSONAL_VISION_PROVIDER_IDS = Object.keys(
+  PERSONAL_VISION_PROVIDERS,
+) as PersonalVisionProvider[];
+
+export function isPersonalVisionProvider(value: string): value is PersonalVisionProvider {
+  return Object.hasOwn(PERSONAL_VISION_PROVIDERS, value);
+}
+
+export function getPersonalVisionConfig(
+  provider: PersonalVisionProvider,
+  apiKey: string,
+  model: string,
+): VisionConfig | null {
+  if (!apiKey) return null;
+  const selected = PERSONAL_VISION_PROVIDERS[provider];
+  return { apiKey, url: selected.url, model: model || selected.defaultModel };
+}
+
 export function validateImageDataUrl(dataUrl: string): string | null {
   if (typeof dataUrl !== 'string') return '图片数据不合法';
   if (!/^data:image\/(?:jpe?g|png|webp);base64,/i.test(dataUrl)) return '仅支持 JPG/PNG/WebP 图片';
