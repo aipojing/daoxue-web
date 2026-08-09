@@ -7,6 +7,7 @@ import { getOwnedStudent } from '../students/routes';
 import { buildSystemPrompt, isSubject } from './prompt-builder';
 import { getBasePrompt, getSelfLearnBasePrompt } from './prompts';
 import { streamChat, type ChatMessage } from './deepseek';
+import { hasAssistantOutput } from './output';
 import { checkAndIncrementQuota, refundQuota, beijingToday } from './quota';
 import { toUserMessage } from '../lib/errors';
 import { validateImageDataUrl, transcribeImage } from './vision';
@@ -254,7 +255,7 @@ conversationRoutes.post('/:id/chat', async (c) => {
     let quotaCharged = false;
 
     const persistAssistant = async () => {
-      if ((!acc.content && !acc.reasoning) || savedMessageId !== null) return;
+      if (!hasAssistantOutput(acc.content, acc.reasoning) || savedMessageId !== null) return;
       const row = await db
         .prepare(
           'INSERT INTO messages (conversation_id, role, content, reasoning_content) VALUES (?, ?, ?, ?) RETURNING id',
@@ -358,7 +359,7 @@ conversationRoutes.post('/:id/chat', async (c) => {
         },
       );
 
-      if (!acc.content && !acc.reasoning) {
+      if (!hasAssistantOutput(acc.content, acc.reasoning)) {
         if (quotaCharged) await refundQuota(db, user.id, today);
         await sendError('AI 未返回内容，请重试');
         return;
@@ -370,7 +371,9 @@ conversationRoutes.post('/:id/chat', async (c) => {
       console.error('chat stream error:', e);
       // 已生成的部分照样保存，用户刷新后能看到
       await persistAssistant().catch((e2) => console.error('persist partial reply failed:', e2));
-      if (!acc.content && !acc.reasoning && quotaCharged) await refundQuota(db, user.id, today);
+      if (!hasAssistantOutput(acc.content, acc.reasoning) && quotaCharged) {
+        await refundQuota(db, user.id, today);
+      }
       await sendError(toUserMessage(e)).catch(() => {});
     }
   });
