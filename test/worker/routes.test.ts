@@ -66,6 +66,7 @@ async function createInvite(adminCookie: string, maxUses = 1): Promise<string> {
 beforeEach(async () => {
   vi.unstubAllGlobals();
   await env.DB.batch([
+    env.DB.prepare('DELETE FROM user_ai_settings'),
     env.DB.prepare('DELETE FROM invite_codes'),
     env.DB.prepare('DELETE FROM login_failures'),
     env.DB.prepare('DELETE FROM app_settings'),
@@ -886,5 +887,119 @@ describe('错题本与自学路由', () => {
     const member = await register('member@example.com', code);
     expect(member.response.status).toBe(200);
     expect((await api(`/api/students/${student.id}/selflearn`, {}, member.cookie)).status).toBe(404);
+  });
+});
+
+interface AISettingsStatus {
+  personal: {
+    deepseekKeySet: boolean;
+    deepseekKeyTail: string;
+    visionKeySet: boolean;
+    visionKeyTail: string;
+    visionProvider: 'zhipu' | 'dashscope';
+    visionModel: string;
+  };
+  sharedFallbackEnabled: boolean;
+  effective: {
+    deepseekConfigured: boolean;
+    deepseekSource: 'personal' | 'shared' | 'none';
+    visionEnabled: boolean;
+    visionSource: 'personal' | 'shared' | 'none';
+  };
+}
+
+async function putAISettings(cookie: string, body: unknown): Promise<Response> {
+  return api('/api/ai-settings', { method: 'PUT', body: JSON.stringify(body) }, cookie);
+}
+
+async function getAISettings(cookie: string): Promise<AISettingsStatus> {
+  const response = await api('/api/ai-settings', {}, cookie);
+  expect(response.status).toBe(200);
+  return (await json<AISettingsStatus>(response)).data!;
+}
+
+describe('用户 AI 设置', () => {
+  async function setupTwoUsers() {
+    const admin = await createAdmin();
+    const code = await createInvite(admin.cookie, 2);
+    const member = await register('member@example.com', code);
+    expect(member.response.status).toBe(200);
+    return { admin, member };
+  }
+
+  it('未登录不能读取或修改 AI 设置', async () => {
+    expect((await api('/api/ai-settings')).status).toBe(401);
+    expect((await api('/api/ai-settings', { method: 'PUT', body: '{}' })).status).toBe(401);
+  });
+
+  it('两名用户只能看到和修改自己的 Key 状态', async () => {
+    const { admin, member } = await setupTwoUsers();
+    expect((await putAISettings(admin.cookie, { deepseekApiKey: 'sk-user-a' })).status).toBe(200);
+    expect((await putAISettings(member.cookie, { deepseekApiKey: 'sk-user-b' })).status).toBe(200);
+
+    const adminStatus = await getAISettings(admin.cookie);
+    const memberStatus = await getAISettings(member.cookie);
+    expect(adminStatus.personal).toMatchObject({ deepseekKeySet: true, deepseekKeyTail: 'er-a' });
+    expect(memberStatus.personal).toMatchObject({ deepseekKeySet: true, deepseekKeyTail: 'er-b' });
+
+    expect(JSON.stringify(adminStatus)).not.toContain('sk-user-a');
+    expect(JSON.stringify(adminStatus)).not.toContain('sk-user-b');
+    expect(JSON.stringify(memberStatus)).not.toContain('sk-user-a');
+    expect(JSON.stringify(memberStatus)).not.toContain('sk-user-b');
+
+    // D1 中只保存密文、IV 和尾号
+    const rows = await env.DB.prepare('SELECT * FROM user_ai_settings').all();
+    expect(JSON.stringify(rows.results)).not.toContain('sk-user-a');
+    expect(JSON.stringify(rows.results)).not.toContain('sk-user-b');
+  });
+
+  it('null 清除、字段省略保留、空字符串拒绝', async () => {
+    const { admin } = await setupTwoUsers();
+    await putAISettings(admin.cookie, {
+      deepseekApiKey: 'sk-user-a',
+      visionApiKey: 'vision-user-a',
+    });
+
+    const cleared = await putAISettings(admin.cookie, { deepseekApiKey: null });
+    expect(cleared.status).toBe(200);
+    expect((await getAISettings(admin.cookie)).personal).toMatchObject({
+      deepseekKeySet: false,
+      deepseekKeyTail: '',
+      visionKeySet: true,
+    });
+
+    expect((await putAISettings(admin.cookie, { visionApiKey: '' })).status).toBe(400);
+    expect((await putAISettings(admin.cookie, { visionApiKey: '   ' })).status).toBe(400);
+    // 保存后视觉 Key 未被空字符串误删
+    expect((await getAISettings(admin.cookie)).personal.visionKeySet).toBe(true);
+  });
+
+  it('普通用户无法配置白名单以外的视觉 provider 或未知字段', async () => {
+    const { admin } = await setupTwoUsers();
+    expect((await putAISettings(admin.cookie, { visionProvider: 'https://attacker.example' })).status).toBe(400);
+    expect((await putAISettings(admin.cookie, { visionApiUrl: 'https://attacker.example' })).status).toBe(400);
+    expect((await putAISettings(admin.cookie, {})).status).toBe(400);
+    const valid = await putAISettings(admin.cookie, { visionApiKey: 'vk-a', visionProvider: 'dashscope' });
+    expect(valid.status).toBe(200);
+    expect((await getAISettings(admin.cookie)).personal.visionProvider).toBe('dashscope');
+  });
+
+  it('保存或清除后立即返回最新生效来源', async () => {
+    const { admin } = await setupTwoUsers();
+    await env.DB.prepare(
+      `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '0')`,
+    ).run();
+
+    let status = await getAISettings(admin.cookie);
+    expect(status.sharedFallbackEnabled).toBe(false);
+    expect(status.effective.deepseekSource).toBe('none');
+
+    await putAISettings(admin.cookie, { deepseekApiKey: 'sk-user-a' });
+    status = await getAISettings(admin.cookie);
+    expect(status.effective).toMatchObject({ deepseekConfigured: true, deepseekSource: 'personal' });
+
+    await putAISettings(admin.cookie, { deepseekApiKey: null });
+    status = await getAISettings(admin.cookie);
+    expect(status.effective).toMatchObject({ deepseekConfigured: false, deepseekSource: 'none' });
   });
 });

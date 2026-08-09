@@ -7,6 +7,7 @@ import { studentRoutes } from './students/routes';
 import { conversationStudentRoutes, conversationRoutes } from './chat/routes';
 import { mistakeExtractRoutes, mistakeStudentRoutes, mistakeCardRoutes } from './mistakes/routes';
 import { selfLearnRoutes } from './selflearn/routes';
+import { userAISettingsRoutes } from './settings/routes';
 import { adminRoutes } from './admin/routes';
 import { toHttpError } from './lib/errors';
 
@@ -28,6 +29,8 @@ app.route('/api/students', studentRoutes);
 app.route('/api/conversations', mistakeExtractRoutes);
 app.route('/api/conversations', conversationRoutes);
 app.route('/api/mistake-cards', mistakeCardRoutes);
+// requireAuth 已在子路由内执行一次，这里不再重复挂载
+app.route('/api/ai-settings', userAISettingsRoutes);
 app.route('/api/admin', adminRoutes);
 
 app.notFound((c) => err(c, '接口不存在', 404));
