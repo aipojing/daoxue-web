@@ -1,4 +1,4 @@
-export const SUBJECTS = ['math', 'chinese', 'physics', 'english'] as const;
+export const SUBJECTS = ['math', 'chinese', 'physics', 'english', 'chemistry'] as const;
 export type Subject = (typeof SUBJECTS)[number];
 
 export const SUBJECT_NAMES: Record<Subject, string> = {
@@ -6,6 +6,7 @@ export const SUBJECT_NAMES: Record<Subject, string> = {
   chinese: '语文',
   physics: '物理',
   english: '英语',
+  chemistry: '化学',
 };
 
 export function isSubject(value: string): value is Subject {
