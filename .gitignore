@@ -3,5 +3,6 @@ dist/
 .wrangler/
 .worktrees/
 .dev.vars
+backups/
 .DS_Store
 *.log

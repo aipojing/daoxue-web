@@ -83,11 +83,17 @@ npm run deploy
 用户录入个人 Key → 关闭共享兜底。
 
 ```bash
-# 1. 生成加密主密钥并立刻保存到密码管理器；丢失后已有个人 Key 无法恢复
-openssl rand -base64 32 | npx wrangler secret put AI_SETTINGS_ENCRYPTION_KEY
+# 1. 生成一次加密主密钥。复制输出并先保存到密码管理器；不要生成第二次
+openssl rand -base64 32
 
-# 2. 备份远程 D1
+# 将密码管理器里刚保存的同一个值粘贴到 Wrangler 提示中
+npx wrangler secret put AI_SETTINGS_ENCRYPTION_KEY
+
+# 2. 备份远程 D1；目录已被 gitignore，避免误提交真实学习数据
+mkdir -p backups
+chmod 700 backups
 npx wrangler d1 export daoxue-db --remote --output backups/pre-user-ai-settings.sql
+chmod 600 backups/pre-user-ai-settings.sql
 
 # 3. 应用迁移（只新增 0009_user_ai_settings.sql）并发布
 npx wrangler d1 migrations apply daoxue-db --remote
@@ -140,8 +146,11 @@ npx wrangler secret put VISION_API_KEY
 个人 Key 依赖 Worker Secret `AI_SETTINGS_ENCRYPTION_KEY`（Base64 编码的 32 字节）：
 
 ```bash
-# 生成后立刻保存到密码管理器；丢失后已有个人 Key 无法恢复，用户必须重新填写
-openssl rand -base64 32 | npx wrangler secret put AI_SETTINGS_ENCRYPTION_KEY
+# 只生成一次，先把输出保存到密码管理器
+openssl rand -base64 32
+
+# 再将密码管理器中的同一个值粘贴到提示中
+npx wrangler secret put AI_SETTINGS_ENCRYPTION_KEY
 ```
 
 未配置该 Secret 时，「AI 服务」页保存个人 Key 会返回 503；已有的个人密文也会 fail closed。

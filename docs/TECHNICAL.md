@@ -50,12 +50,15 @@ Cloudflare D1
 ```bash
 npm install
 
-# 本地密钥文件已被 gitignore，不会提交
+# 先生成一把仅用于本地开发的主密钥，复制输出备用
+openssl rand -base64 32
+
+# 本地密钥文件已被 gitignore，不会提交；把上一条命令的输出粘贴到最后一行
 cat > .dev.vars <<'EOF'
 DEEPSEEK_API_KEY=你的-key
 VISION_API_KEY=你的视觉模型-key
 # 本地个人 Key 加密主密钥（随机 32 字节 Base64，仅开发用，勿与生产相同）
-AI_SETTINGS_ENCRYPTION_KEY=$(openssl rand -base64 32 的输出)
+AI_SETTINGS_ENCRYPTION_KEY=把刚才生成的完整Base64值粘贴到这里
 EOF
 
 # 初始化本地数据库
