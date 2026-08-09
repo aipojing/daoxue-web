@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { apiGet, apiPost, apiPut, streamChatRequest, ApiError } from '../api';
 import { useAuth } from '../AuthContext';
+import { isNearBottom, isPersistedMessage } from '../lib/chat';
 import { compressImageToDataUrl } from '../lib/image';
 import {
   CONVERSATION_SUBJECT_NAMES,
@@ -65,7 +66,9 @@ export default function ChatPage() {
   const [ocrLoading, setOcrLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [savedMistakeToast, setSavedMistakeToast] = useState(false);
-  const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches;
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches,
+  );
 
   const isNew = conversationId === 'new';
 
@@ -86,7 +89,7 @@ export default function ChatPage() {
       const data = await apiGet<ConversationDetail>(`/api/conversations/${conversationId}/messages`);
       if (gen !== loadGenRef.current) return;
       setDetail(data.conversation);
-      setMessages(data.messages);
+      setMessages(data.messages.map((message) => ({ ...message, persisted: true })));
     } catch (e) {
       if (gen !== loadGenRef.current) return;
       setError(e instanceof ApiError ? e.message : '加载会话失败');
@@ -95,6 +98,7 @@ export default function ChatPage() {
   }, [conversationId, isNew]);
 
   useEffect(() => {
+    stickToBottomRef.current = true;
     if (isNew) {
       if (creatingRef.current) return;
       creatingRef.current = true;
@@ -127,12 +131,19 @@ export default function ChatPage() {
     void loadConversations();
   }, [isNew, conversationId, studentId, searchParams, navigate, loadDetail, loadConversations]);
 
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(max-width: 767px)');
+    const onChange = (event: MediaQueryListEvent) => setIsMobile(event.matches);
+    setIsMobile(mediaQuery.matches);
+    mediaQuery.addEventListener('change', onChange);
+    return () => mediaQuery.removeEventListener('change', onChange);
+  }, []);
+
   // 仅在用户本来就贴着底部时自动滚动，避免上翻查看历史时被拽回来
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    if (nearBottom || stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+    if (!el || !stickToBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
   }, [messages, streaming]);
 
   useEffect(() => {
@@ -173,7 +184,7 @@ export default function ChatPage() {
     const optimisticId = -Date.now();
     setMessages((prev) => [
       ...prev,
-      { id: optimisticId, role: 'user', content, reasoning_content: null, created_at: '' },
+      { id: optimisticId, role: 'user', content, reasoning_content: null, created_at: '', persisted: false },
     ]);
     setStreaming({ active: true, content: '', reasoning: '' });
 
@@ -186,7 +197,7 @@ export default function ChatPage() {
     const commitStreamed = (messageId: number | null) => {
       const { content: text, reasoning } = streamBufRef.current;
       streamBufRef.current = { content: '', reasoning: '' };
-      if (text) {
+      if (text || reasoning) {
         setMessages((msgs) => [
           ...msgs,
           {
@@ -195,6 +206,7 @@ export default function ChatPage() {
             content: text,
             reasoning_content: reasoning || null,
             created_at: '',
+            persisted: messageId !== null,
           },
         ]);
       }
@@ -244,7 +256,7 @@ export default function ChatPage() {
     abortRef.current = null;
     streamingRef.current = false;
     streamBufRef.current = { content: '', reasoning: '' };
-    if (text) {
+    if (text || reasoning) {
       setMessages((msgs) => [
         ...msgs,
         {
@@ -253,6 +265,7 @@ export default function ChatPage() {
           content: text,
           reasoning_content: reasoning || null,
           created_at: '',
+          persisted: false,
         },
       ]);
     }
@@ -276,9 +289,9 @@ export default function ChatPage() {
     if (!detail) return;
     setSaveStates((prev) => ({ ...prev, [messageId]: 'saving' }));
     try {
-      // 只有服务端返回的真实 id 才能定位消息；乐观 id（负数/时间戳）退回按会话提取
-      const realId = messages.some((m) => m.id === messageId && m.created_at) ? messageId : undefined;
-      await apiPost(`/api/conversations/${detail.id}/mistake-card`, realId ? { messageId: realId } : {});
+      const message = messages.find((m) => m.id === messageId);
+      const realId = message && isPersistedMessage(message) ? messageId : undefined;
+      await apiPost(`/api/conversations/${detail.id}/mistake-card`, realId !== undefined ? { messageId: realId } : {});
       setSaveStates((prev) => ({ ...prev, [messageId]: 'saved' }));
       setSavedMistakeToast(true);
     } catch (e) {
@@ -374,7 +387,13 @@ export default function ChatPage() {
           </label>
         </header>
 
-        <div className="chat-messages" ref={scrollRef}>
+        <div
+          className="chat-messages"
+          ref={scrollRef}
+          onScroll={(event) => {
+            stickToBottomRef.current = isNearBottom(event.currentTarget);
+          }}
+        >
           {detail && messages.length === 0 && !streaming.active && (
             <div className="chat-intro card">
               <p>{introKey ? (SUBJECT_INTROS[introKey] ?? '') : ''}</p>

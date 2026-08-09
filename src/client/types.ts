@@ -35,7 +35,10 @@ export function splitRegion(region: string): { province: string; city: string } 
   const trimmed = region.trim();
   if (!trimmed) return { province: '', city: '' };
   const matched = PROVINCES.find((p) => trimmed.startsWith(p));
-  if (matched) return { province: matched, city: trimmed.slice(matched.length).trim() };
+  if (matched) {
+    const city = trimmed.slice(matched.length).trim().replace(/^(特别行政区|自治区|省|市)/, '').trim();
+    return { province: matched, city };
+  }
   return { province: '', city: trimmed };
 }
 
@@ -104,6 +107,7 @@ export interface Message {
   content: string;
   reasoning_content: string | null;
   created_at: string;
+  persisted?: boolean;
 }
 
 export interface ConversationDetail {
