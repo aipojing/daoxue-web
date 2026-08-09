@@ -15,6 +15,8 @@ const userAISettingsSchema = z
     // 个人视觉服务只允许白名单 provider，禁止任意 URL（SSRF）
     visionProvider: z.enum(['zhipu', 'dashscope']).optional(),
     visionModel: z.string().trim().max(100).optional(),
+    profileRefineIntervalMinutes: z.number().int().min(1).max(1440).optional(),
+    profileRefineDailyLimit: z.number().int().min(0).max(1000).optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, '没有需要保存的配置');
@@ -29,8 +31,12 @@ userAISettingsRoutes.get('/', async (c) => {
 userAISettingsRoutes.put('/', async (c) => {
   const parsed = userAISettingsSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
-  if (!c.env.AI_SETTINGS_ENCRYPTION_KEY) return err(c, '服务器尚未配置 AI 设置加密服务', 503);
+  const writesNewKey =
+    typeof parsed.data.deepseekApiKey === 'string' || typeof parsed.data.visionApiKey === 'string';
+  if (writesNewKey && !c.env.AI_SETTINGS_ENCRYPTION_KEY) {
+    return err(c, '服务器尚未配置 AI 设置加密服务', 503);
+  }
   // owner 只来自 session，绝不接收 body/query 中的 userId
-  await saveUserAISettings(c.env.DB, c.env.AI_SETTINGS_ENCRYPTION_KEY, c.get('user').id, parsed.data);
+  await saveUserAISettings(c.env.DB, c.env.AI_SETTINGS_ENCRYPTION_KEY ?? '', c.get('user').id, parsed.data);
   return ok(c, await getUserAISettingsStatus(c.env.DB, c.env, c.get('user').id));
 });

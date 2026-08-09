@@ -17,6 +17,13 @@ export interface UserAISettingsPatch {
   visionApiKey?: string | null;
   visionProvider?: PersonalVisionProvider;
   visionModel?: string;
+  profileRefineIntervalMinutes?: number;
+  profileRefineDailyLimit?: number;
+}
+
+export interface ProfileRefineSettings {
+  intervalMinutes: number;
+  dailyLimit: number;
 }
 
 export interface UserAISettingsStatus {
@@ -27,6 +34,8 @@ export interface UserAISettingsStatus {
     visionKeyTail: string;
     visionProvider: PersonalVisionProvider;
     visionModel: string;
+    profileRefineIntervalMinutes: number;
+    profileRefineDailyLimit: number;
   };
   sharedFallbackEnabled: boolean;
   effective: {
@@ -42,6 +51,7 @@ export interface ResolvedUserAIConfig {
   vision: VisionConfig | null;
   deepseekSource: AIConfigSource;
   visionSource: AIConfigSource;
+  profileRefine: ProfileRefineSettings;
 }
 
 interface PersonalRow {
@@ -54,11 +64,30 @@ interface PersonalRow {
   vision_key_tail: string;
   vision_provider: PersonalVisionProvider;
   vision_model: string;
+  profile_refine_interval_minutes: number;
+  profile_refine_daily_limit: number;
 }
 
 type PersonalKeyService = 'deepseek' | 'vision';
 
 const DECRYPT_FAILED_MESSAGE = '个人 AI 配置无法读取，请在「AI 服务」页重新保存 Key';
+const DEFAULT_PROFILE_REFINE_INTERVAL_MINUTES = 10;
+const DEFAULT_PROFILE_REFINE_DAILY_LIMIT = 0;
+
+function resolveProfileRefineSettings(row: PersonalRow | null): ProfileRefineSettings {
+  const interval = row?.profile_refine_interval_minutes;
+  const dailyLimit = row?.profile_refine_daily_limit;
+  return {
+    intervalMinutes:
+      Number.isInteger(interval) && interval! >= 1 && interval! <= 1440
+        ? interval!
+        : DEFAULT_PROFILE_REFINE_INTERVAL_MINUTES,
+    dailyLimit:
+      Number.isInteger(dailyLimit) && dailyLimit! >= 0 && dailyLimit! <= 1000
+        ? dailyLimit!
+        : DEFAULT_PROFILE_REFINE_DAILY_LIMIT,
+  };
+}
 
 /** AAD 绑定用户与服务类型，防止密文被跨用户或跨服务替换。 */
 function secretAAD(userId: number, service: PersonalKeyService): string {
@@ -138,6 +167,7 @@ function resolveFromParts(
       : fallbackEnabled && shared.vision
         ? 'shared'
         : 'none',
+    profileRefine: resolveProfileRefineSettings(personal),
   };
 }
 
@@ -179,6 +209,8 @@ export async function getUserAISettingsStatus(
       visionKeyTail: personal?.vision_key_tail ?? '',
       visionProvider: personal?.vision_provider ?? 'zhipu',
       visionModel: personal?.vision_model ?? '',
+      profileRefineIntervalMinutes: resolved.profileRefine.intervalMinutes,
+      profileRefineDailyLimit: resolved.profileRefine.dailyLimit,
     },
     sharedFallbackEnabled: isSharedFallbackEnabled(settings),
     effective: {
@@ -240,6 +272,14 @@ export async function saveUserAISettings(
   if (patch.visionModel !== undefined) {
     sets.push('vision_model = ?');
     binds.push(patch.visionModel);
+  }
+  if (patch.profileRefineIntervalMinutes !== undefined) {
+    sets.push('profile_refine_interval_minutes = ?');
+    binds.push(patch.profileRefineIntervalMinutes);
+  }
+  if (patch.profileRefineDailyLimit !== undefined) {
+    sets.push('profile_refine_daily_limit = ?');
+    binds.push(patch.profileRefineDailyLimit);
   }
 
   if (sets.length === 0) return;

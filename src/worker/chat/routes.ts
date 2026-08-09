@@ -398,7 +398,7 @@ conversationRoutes.post('/:id/chat', async (c) => {
           processSelfLearnMessage(db, apiKey, conv.student_id, conv.id, conv.mode, acc.content),
         );
       } else if (acc.content && isSubject(conv.subject)) {
-        executionCtx.waitUntil(maybeRefineProfile(db, apiKey, conv.student_id, conv.subject, appSettings));
+        executionCtx.waitUntil(maybeRefineProfile(db, apiKey, conv.student_id, conv.subject, aiConfig.profileRefine));
       }
     };
 

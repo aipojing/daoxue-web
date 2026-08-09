@@ -186,6 +186,32 @@ describe('resolveUserAIConfig 优先级', () => {
 });
 
 describe('saveUserAISettings', () => {
+  it('画像策略按账户隔离，局部保存不覆盖另一个字段或已有 Key', async () => {
+    await insertUser(1, 'user-a@example.com');
+    await insertUser(2, 'user-b@example.com');
+    const masterKey = env.AI_SETTINGS_ENCRYPTION_KEY!;
+    await saveUserAISettings(env.DB, masterKey, 1, {
+      deepseekApiKey: 'sk-user-a',
+      profileRefineIntervalMinutes: 20,
+      profileRefineDailyLimit: 1,
+    });
+    await saveUserAISettings(env.DB, masterKey, 2, {
+      profileRefineIntervalMinutes: 60,
+      profileRefineDailyLimit: 3,
+    });
+    await saveUserAISettings(env.DB, '', 1, { profileRefineDailyLimit: 2 });
+
+    expect((await resolveUserAIConfig(env.DB, env, 1)).profileRefine).toEqual({
+      intervalMinutes: 20,
+      dailyLimit: 2,
+    });
+    expect((await resolveUserAIConfig(env.DB, env, 1)).deepseekKey).toBe('sk-user-a');
+    expect((await resolveUserAIConfig(env.DB, env, 2)).profileRefine).toEqual({
+      intervalMinutes: 60,
+      dailyLimit: 3,
+    });
+  });
+
   it('局部保存不覆盖未提交字段，null 清除对应 Key', async () => {
     await insertUser(1, 'user-a@example.com');
     const masterKey = env.AI_SETTINGS_ENCRYPTION_KEY!;
@@ -240,6 +266,20 @@ describe('saveUserAISettings', () => {
 });
 
 describe('getUserAISettingsStatus', () => {
+  it('没有个人设置行时返回账户画像策略默认值', async () => {
+    await insertUser(1, 'user-a@example.com');
+
+    const status = await getUserAISettingsStatus(env.DB, env, 1);
+    expect(status.personal).toMatchObject({
+      profileRefineIntervalMinutes: 10,
+      profileRefineDailyLimit: 0,
+    });
+    expect((await resolveUserAIConfig(env.DB, env, 1)).profileRefine).toEqual({
+      intervalMinutes: 10,
+      dailyLimit: 0,
+    });
+  });
+
   it('反映个人/共享/未配置三种生效来源', async () => {
     await insertUser(1, 'user-a@example.com');
     const masterKey = env.AI_SETTINGS_ENCRYPTION_KEY!;

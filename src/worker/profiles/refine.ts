@@ -1,10 +1,9 @@
 import { completeJSON, type ChatMessage } from '../chat/deepseek';
 import { SUBJECT_NAMES, type Subject } from '../chat/prompt-builder';
 import { beijingToday } from '../chat/quota';
-import { SETTING_KEYS } from '../lib/settings';
+import type { ProfileRefineSettings } from '../lib/user-ai-settings';
 
 const DEFAULT_REFINE_INTERVAL_MINUTES = 10;
-const DEFAULT_DAILY_LIMIT = 0;
 const RECENT_MESSAGE_LIMIT = 30;
 const MAX_PROFILE_LENGTH = 500;
 // 与模型的 120 秒超时保持足够间隔，避免旧提炼仍运行时被新任务接管。
@@ -16,17 +15,6 @@ export function shouldRefine(updatedAt: string | null, intervalMinutes: number, 
   if (Number.isNaN(parsed)) return true;
   const interval = Number.isFinite(intervalMinutes) && intervalMinutes > 0 ? intervalMinutes : DEFAULT_REFINE_INTERVAL_MINUTES;
   return now.getTime() - parsed >= interval * 60 * 1000;
-}
-
-function resolveRefineSettings(settings: Record<string, string>): { intervalMinutes: number; dailyLimit: number } {
-  const intervalRaw = settings[SETTING_KEYS.profileRefineIntervalMinutes];
-  const limitRaw = settings[SETTING_KEYS.profileRefineDailyLimit];
-  const intervalMinutes = intervalRaw === undefined ? DEFAULT_REFINE_INTERVAL_MINUTES : Number(intervalRaw);
-  const dailyLimit = limitRaw === undefined ? DEFAULT_DAILY_LIMIT : Number(limitRaw);
-  return {
-    intervalMinutes: Number.isFinite(intervalMinutes) && intervalMinutes > 0 ? intervalMinutes : DEFAULT_REFINE_INTERVAL_MINUTES,
-    dailyLimit: Number.isFinite(dailyLimit) && dailyLimit >= 0 ? dailyLimit : DEFAULT_DAILY_LIMIT,
-  };
 }
 
 export async function tryAcquireProfileRefineLease(
@@ -121,11 +109,11 @@ export async function maybeRefineProfile(
   apiKey: string,
   studentId: number,
   subject: Subject,
-  settings: Record<string, string> = {},
+  profileRefine: ProfileRefineSettings,
 ): Promise<void> {
   let leaseToken: string | null = null;
   try {
-    const { intervalMinutes, dailyLimit } = resolveRefineSettings(settings);
+    const { intervalMinutes, dailyLimit } = profileRefine;
     const candidateToken = crypto.randomUUID();
     if (!(await tryAcquireProfileRefineLease(db, studentId, subject, candidateToken))) return;
     leaseToken = candidateToken;

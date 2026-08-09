@@ -101,15 +101,57 @@ describe('画像提炼并发预算', () => {
       }),
     );
     vi.stubGlobal('fetch', upstream);
-    const settings = {
-      [SETTING_KEYS.profileRefineIntervalMinutes]: '10',
-      [SETTING_KEYS.profileRefineDailyLimit]: '1',
-    };
+    const settings = { intervalMinutes: 10, dailyLimit: 1 };
 
     await Promise.all([
       maybeRefineProfile(env.DB, 'key', 1, 'math', settings),
       maybeRefineProfile(env.DB, 'key', 1, 'math', settings),
     ]);
+
+    expect(upstream).toHaveBeenCalledTimes(1);
+    const log = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM profile_refine_log WHERE student_id = 1 AND subject = 'math'`,
+    ).first<{ n: number }>();
+    expect(log?.n).toBe(1);
+  });
+
+  it('使用调用账户传入的每日上限，不读取旧全站画像设置', async () => {
+    await env.DB.prepare(
+      `INSERT INTO users (id, email, password_hash) VALUES (1, 'admin@example.com', 'hash')`,
+    ).run();
+    await env.DB.prepare(
+      `INSERT INTO students (id, user_id, name, grade) VALUES (1, 1, '小明', '初二')`,
+    ).run();
+    await env.DB.prepare(
+      `INSERT INTO conversations (id, student_id, subject, title) VALUES (1, 1, 'math', '测试')`,
+    ).run();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO messages (conversation_id, role, content) VALUES (1, 'user', '问题')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO messages (conversation_id, role, content) VALUES (1, 'assistant', '回答')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('profile_refine_daily_limit', '0')`,
+      ),
+    ]);
+
+    const upstream = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: '{"profile":"新画像"}' } }] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', upstream);
+    const profileRefine = { intervalMinutes: 1, dailyLimit: 1 };
+
+    await maybeRefineProfile(env.DB, 'key', 1, 'math', profileRefine);
+    await env.DB.prepare(
+      `UPDATE student_profiles SET updated_at = '2000-01-01 00:00:00'
+       WHERE student_id = 1 AND subject = 'math'`,
+    ).run();
+    await maybeRefineProfile(env.DB, 'key', 1, 'math', profileRefine);
 
     expect(upstream).toHaveBeenCalledTimes(1);
     const log = await env.DB.prepare(
@@ -919,6 +961,8 @@ interface AISettingsStatus {
     visionKeyTail: string;
     visionProvider: 'zhipu' | 'dashscope';
     visionModel: string;
+    profileRefineIntervalMinutes: number;
+    profileRefineDailyLimit: number;
   };
   sharedFallbackEnabled: boolean;
   effective: {
@@ -951,6 +995,37 @@ describe('用户 AI 设置', () => {
   it('未登录不能读取或修改 AI 设置', async () => {
     expect((await api('/api/ai-settings')).status).toBe(401);
     expect((await api('/api/ai-settings', { method: 'PUT', body: '{}' })).status).toBe(401);
+  });
+
+  it('画像策略使用账户默认值、按用户隔离并拒绝越界输入', async () => {
+    const { admin, member } = await setupTwoUsers();
+    expect((await getAISettings(admin.cookie)).personal).toMatchObject({
+      profileRefineIntervalMinutes: 10,
+      profileRefineDailyLimit: 0,
+    });
+
+    expect((await putAISettings(admin.cookie, {
+      profileRefineIntervalMinutes: 20,
+      profileRefineDailyLimit: 1,
+    })).status).toBe(200);
+    expect((await putAISettings(member.cookie, {
+      profileRefineIntervalMinutes: 60,
+      profileRefineDailyLimit: 3,
+    })).status).toBe(200);
+
+    expect((await getAISettings(admin.cookie)).personal).toMatchObject({
+      profileRefineIntervalMinutes: 20,
+      profileRefineDailyLimit: 1,
+    });
+    expect((await getAISettings(member.cookie)).personal).toMatchObject({
+      profileRefineIntervalMinutes: 60,
+      profileRefineDailyLimit: 3,
+    });
+
+    expect((await putAISettings(admin.cookie, { profileRefineIntervalMinutes: 0 })).status).toBe(400);
+    expect((await putAISettings(admin.cookie, { profileRefineIntervalMinutes: 1441 })).status).toBe(400);
+    expect((await putAISettings(admin.cookie, { profileRefineDailyLimit: -1 })).status).toBe(400);
+    expect((await putAISettings(admin.cookie, { profileRefineDailyLimit: 1001 })).status).toBe(400);
   });
 
   it('两名用户只能看到和修改自己的 Key 状态', async () => {
