@@ -63,7 +63,7 @@ Worker 的提示词加载方式沿用现有 `getBasePrompt(subject)` 接口，�
 
 ## 数据迁移
 
-现有 D1 表在 `conversations`、`mistake_cards` 和 `student_profiles` 上使用严格学科 `CHECK` 约束。新增 `migrations/0004_add_chemistry_subject.sql`，把允许值扩展为：
+现有 D1 表在 `conversations`、`mistake_cards` 和 `student_profiles` 上使用严格学科 `CHECK` 约束。由于并行开发已占用 `0004`，新增 `migrations/0005_add_chemistry_subject.sql`，把允许值扩展为：
 
 - `conversations.subject`：`math`、`chinese`、`physics`、`english`、`chemistry`、`selflearn`。
 - `mistake_cards.subject`：`math`、`chinese`、`physics`、`english`、`chemistry`、`selflearn`。
@@ -94,7 +94,7 @@ Cloudflare D1 始终启用外键，且延迟外键检查不会阻止 `ON DELETE 
 
 1. 更新学科枚举测试，先观察其因缺少 `chemistry` 失败。
 2. 增加提示词加载测试，验证化学提示词包含角色、核心视角、模式、默认输出格式和实验安全边界。
-3. 增加迁移测试：在仅应用 `0001`—`0003` 的 SQLite 数据库中写入历史会话、消息、错题、画像、每课输出和每日报告，再应用 `0004`。
+3. 增加迁移测试：在仅应用 `0001`—`0003` 的 SQLite 数据库中写入历史会话、消息、错题、画像、每课输出和每日报告，再应用 `0005`；该迁移不依赖 `0004` 的画像提炼日志表。
 4. 迁移后验证所有历史数据及关联 ID 完整，外键检查无异常，三个目标表可写入 `chemistry`，并继续拒绝非法学科。
 5. 运行全量 Vitest、TypeScript 类型检查和 Vite 生产构建。
 

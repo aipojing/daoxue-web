@@ -24,7 +24,7 @@
 - Create: `prompts/chemistry.md` — 化学专属系统提示词。
 - Create: `test/client-subjects.test.ts` — 前端学科枚举与显示元数据测试。
 - Create: `test/chemistry-migration.test.ts` — 带历史数据的 SQLite 迁移回归测试。
-- Create: `migrations/0004_add_chemistry_subject.sql` — D1 严格白名单迁移。
+- Create: `migrations/0005_add_chemistry_subject.sql` — D1 严格白名单迁移（`0004` 已被并行开发占用）。
 - Modify: `test/prompts.test.ts` — Worker 枚举、校验和提示词加载测试。
 - Modify: `src/worker/chat/prompt-builder.ts` — Worker 学科枚举与中文名。
 - Modify: `src/worker/chat/prompts.ts` — 化学提示词导入和映射。
@@ -261,7 +261,7 @@ git commit -m "feat: expose chemistry tutoring across the UI"
 
 **Files:**
 - Create: `test/chemistry-migration.test.ts`
-- Create: `migrations/0004_add_chemistry_subject.sql`
+- Create: `migrations/0005_add_chemistry_subject.sql`
 
 **Interfaces:**
 - Consumes: `0001`—`0003` 创建的现有 D1 schema。
@@ -298,9 +298,9 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe('0004_add_chemistry_subject migration', () => {
+describe('0005_add_chemistry_subject migration', () => {
   it('保留历史关联数据并扩展严格学科白名单', () => {
-    const migrationPath = join(repoRoot, 'migrations/0004_add_chemistry_subject.sql');
+    const migrationPath = join(repoRoot, 'migrations/0005_add_chemistry_subject.sql');
     expect(existsSync(migrationPath)).toBe(true);
 
     const dir = mkdtempSync(join(tmpdir(), 'daoxue-chemistry-'));
@@ -392,21 +392,21 @@ describe('0004_add_chemistry_subject migration', () => {
 
 Run: `npx vitest run test/chemistry-migration.test.ts`
 
-Expected: FAIL at `expect(existsSync(migrationPath)).toBe(true)`，因为 `0004` 尚不存在。
+Expected: FAIL at `expect(existsSync(migrationPath)).toBe(true)`，因为 `0005` 尚不存在。
 
 - [ ] **Step 3: 创建数据迁移**
 
-创建 `migrations/0004_add_chemistry_subject.sql`，按以下确定顺序实现：
+创建 `migrations/0005_add_chemistry_subject.sql`，按以下确定顺序实现：
 
 ```sql
 PRAGMA defer_foreign_keys = on;
 
-CREATE TABLE _0004_conversations AS SELECT * FROM conversations;
-CREATE TABLE _0004_messages AS SELECT * FROM messages;
-CREATE TABLE _0004_mistake_cards AS SELECT * FROM mistake_cards;
-CREATE TABLE _0004_student_profiles AS SELECT * FROM student_profiles;
-CREATE TABLE _0004_lesson_outputs AS SELECT * FROM lesson_outputs;
-CREATE TABLE _0004_daily_reports AS SELECT * FROM daily_reports;
+CREATE TABLE _0005_conversations AS SELECT * FROM conversations;
+CREATE TABLE _0005_messages AS SELECT * FROM messages;
+CREATE TABLE _0005_mistake_cards AS SELECT * FROM mistake_cards;
+CREATE TABLE _0005_student_profiles AS SELECT * FROM student_profiles;
+CREATE TABLE _0005_lesson_outputs AS SELECT * FROM lesson_outputs;
+CREATE TABLE _0005_daily_reports AS SELECT * FROM daily_reports;
 
 DROP TABLE messages;
 DROP TABLE mistake_cards;
@@ -484,12 +484,12 @@ CREATE TABLE daily_reports (
 INSERT INTO conversations
   (id, student_id, subject, mode, title, deep_thinking, created_at, updated_at)
   SELECT id, student_id, subject, mode, title, deep_thinking, created_at, updated_at
-  FROM _0004_conversations;
+  FROM _0005_conversations;
 
 INSERT INTO messages
   (id, conversation_id, role, content, reasoning_content, created_at)
   SELECT id, conversation_id, role, content, reasoning_content, created_at
-  FROM _0004_messages;
+  FROM _0005_messages;
 
 INSERT INTO mistake_cards
   (id, student_id, subject, direction, conversation_id, title, knowledge_point, my_answer,
@@ -498,20 +498,20 @@ INSERT INTO mistake_cards
   SELECT id, student_id, subject, direction, conversation_id, title, knowledge_point, my_answer,
          key_error, error_tags, correct_steps, reminder, retest_question, next_review_date,
          review_status, created_at
-  FROM _0004_mistake_cards;
+  FROM _0005_mistake_cards;
 
 INSERT INTO student_profiles (student_id, subject, profile_text, updated_at)
-  SELECT student_id, subject, profile_text, updated_at FROM _0004_student_profiles;
+  SELECT student_id, subject, profile_text, updated_at FROM _0005_student_profiles;
 
 INSERT INTO lesson_outputs
   (id, student_id, conversation_id, direction, content, next_instruction, created_at)
   SELECT id, student_id, conversation_id, direction, content, next_instruction, created_at
-  FROM _0004_lesson_outputs;
+  FROM _0005_lesson_outputs;
 
 INSERT INTO daily_reports
   (id, student_id, conversation_id, report_date, content, created_at)
   SELECT id, student_id, conversation_id, report_date, content, created_at
-  FROM _0004_daily_reports;
+  FROM _0005_daily_reports;
 
 CREATE INDEX idx_conversations_student ON conversations(student_id, updated_at DESC);
 CREATE INDEX idx_messages_conversation ON messages(conversation_id, id);
@@ -519,12 +519,12 @@ CREATE INDEX idx_mistakes_student ON mistake_cards(student_id, next_review_date)
 CREATE INDEX idx_lesson_outputs_student ON lesson_outputs(student_id, id DESC);
 CREATE INDEX idx_daily_reports_student ON daily_reports(student_id, id DESC);
 
-DROP TABLE _0004_messages;
-DROP TABLE _0004_mistake_cards;
-DROP TABLE _0004_student_profiles;
-DROP TABLE _0004_lesson_outputs;
-DROP TABLE _0004_daily_reports;
-DROP TABLE _0004_conversations;
+DROP TABLE _0005_messages;
+DROP TABLE _0005_mistake_cards;
+DROP TABLE _0005_student_profiles;
+DROP TABLE _0005_lesson_outputs;
+DROP TABLE _0005_daily_reports;
+DROP TABLE _0005_conversations;
 
 PRAGMA foreign_key_check;
 PRAGMA defer_foreign_keys = off;
@@ -540,12 +540,12 @@ Expected: PASS；六类历史记录全部保留，`PRAGMA foreign_key_check` 返
 
 Run: `npx wrangler d1 migrations apply daoxue-db --local`
 
-Expected: `0004_add_chemistry_subject.sql` 成功应用；如果本地库已有迁移，只应用尚未执行的 `0004`，不连接远程数据库。
+Expected: `0005_add_chemistry_subject.sql` 成功应用；不连接远程数据库。
 
 - [ ] **Step 6: 提交迁移改动**
 
 ```bash
-git add test/chemistry-migration.test.ts migrations/0004_add_chemistry_subject.sql
+git add test/chemistry-migration.test.ts migrations/0005_add_chemistry_subject.sql
 git commit -m "feat: migrate D1 for chemistry subjects"
 ```
 
