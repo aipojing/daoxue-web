@@ -43,6 +43,17 @@ describe('client chat helpers', () => {
     ).toBe(false);
   });
 
+  it('路由 ID 与请求世代都匹配时应用会话详情', () => {
+    expect(
+      shouldApplyConversationDetail({
+        routeConversationId: '1',
+        requestedConversationId: '1',
+        currentGeneration: 2,
+        requestGeneration: 2,
+      }),
+    ).toBe(true);
+  });
+
   it('为服务端历史消息标记 persisted', () => {
     const history: Message[] = [
       { id: 1, role: 'assistant', content: '答案', reasoning_content: null, created_at: '2026-01-01' },

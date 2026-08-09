@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { isQuotaExceeded, todayString, beijingToday } from '../src/worker/chat/quota';
+import {
+  beijingToday,
+  isQuotaExceeded,
+  refundChargedQuotaOnce,
+  todayString,
+} from '../src/worker/chat/quota';
 
 describe('quota', () => {
   it('未达上限允许', () => {
@@ -14,6 +19,19 @@ describe('quota', () => {
 
   it('todayString 输出 YYYY-MM-DD（UTC）', () => {
     expect(todayString(new Date('2026-08-03T01:02:03Z'))).toBe('2026-08-03');
+  });
+
+  it('已扣额度连续退款两次时只执行第一次退款尝试', async () => {
+    const state = { charged: true };
+    let attempts = 0;
+    const refund = async () => {
+      attempts += 1;
+      throw new Error('退款写入失败');
+    };
+
+    await expect(refundChargedQuotaOnce(state, refund)).rejects.toThrow('退款写入失败');
+    await expect(refundChargedQuotaOnce(state, refund)).resolves.toBe(false);
+    expect(attempts).toBe(1);
   });
 });
 

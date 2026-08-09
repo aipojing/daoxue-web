@@ -51,6 +51,24 @@ export interface StreamCallbacks {
   onReasoning: (text: string) => Promise<void> | void;
 }
 
+export async function dispatchDeltaCallbacks(
+  delta: ParsedDelta,
+  callbacks: StreamCallbacks,
+): Promise<void> {
+  const pending: Promise<void>[] = [];
+  if (delta.reasoning) {
+    const reasoning = delta.reasoning;
+    pending.push(Promise.resolve().then(() => callbacks.onReasoning(reasoning)));
+  }
+  if (delta.content) {
+    const content = delta.content;
+    pending.push(Promise.resolve().then(() => callbacks.onDelta(content)));
+  }
+  const results = await Promise.allSettled(pending);
+  const rejected = results.find((result) => result.status === 'rejected');
+  if (rejected?.status === 'rejected') throw rejected.reason;
+}
+
 export async function streamChat(
   apiKey: string,
   options: { model: string; messages: ChatMessage[] },
@@ -94,12 +112,11 @@ export async function streamChat(
       if (parsed.done) continue;
       if (parsed.reasoning) {
         reasoningContent += parsed.reasoning;
-        await callbacks.onReasoning(parsed.reasoning);
       }
       if (parsed.content) {
         content += parsed.content;
-        await callbacks.onDelta(parsed.content);
       }
+      await dispatchDeltaCallbacks(parsed, callbacks);
     }
   }
 
@@ -109,12 +126,11 @@ export async function streamChat(
   if (tail && !tail.done) {
     if (tail.reasoning) {
       reasoningContent += tail.reasoning;
-      await callbacks.onReasoning(tail.reasoning);
     }
     if (tail.content) {
       content += tail.content;
-      await callbacks.onDelta(tail.content);
     }
+    await dispatchDeltaCallbacks(tail, callbacks);
   }
 
   return { content, reasoningContent };

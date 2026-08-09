@@ -17,6 +17,16 @@ export function isQuotaExceeded(usedCount: number, limit: number): boolean {
   return usedCount >= limit;
 }
 
+export async function refundChargedQuotaOnce(
+  state: { charged: boolean },
+  refund: () => Promise<void>,
+): Promise<boolean> {
+  if (!state.charged) return false;
+  state.charged = false;
+  await refund();
+  return true;
+}
+
 /**
  * 原子地检查并递增当日用量。
  * 用带 WHERE 的 upsert，避免"先查后写"在并发下被绕过。

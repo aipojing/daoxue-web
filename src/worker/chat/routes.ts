@@ -8,7 +8,7 @@ import { buildSystemPrompt, isSubject } from './prompt-builder';
 import { getBasePrompt, getSelfLearnBasePrompt } from './prompts';
 import { streamChat, type ChatMessage } from './deepseek';
 import { hasAssistantOutput } from './output';
-import { checkAndIncrementQuota, refundQuota, beijingToday } from './quota';
+import { checkAndIncrementQuota, refundChargedQuotaOnce, refundQuota, beijingToday } from './quota';
 import { toUserMessage } from '../lib/errors';
 import { validateImageDataUrl, transcribeImage } from './vision';
 import { resolveAIConfig } from '../lib/settings';
@@ -252,7 +252,9 @@ conversationRoutes.post('/:id/chat', async (c) => {
     // 否则历史里会出现"学生问了但老师没答"，且这次调用的费用白花。
     const acc = { content: '', reasoning: '' };
     let savedMessageId: number | null = null;
-    let quotaCharged = false;
+    const quotaCharge = { charged: false };
+    const refundChargedQuota = () =>
+      refundChargedQuotaOnce(quotaCharge, () => refundQuota(db, user.id, today));
 
     const persistAssistant = async () => {
       if (!hasAssistantOutput(acc.content, acc.reasoning) || savedMessageId !== null) return;
@@ -287,7 +289,7 @@ conversationRoutes.post('/:id/chat', async (c) => {
         await sendError('今日对话次数已用完，明天再来吧');
         return;
       }
-      quotaCharged = true;
+      quotaCharge.charged = true;
 
       await db
         .prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)')
@@ -360,7 +362,7 @@ conversationRoutes.post('/:id/chat', async (c) => {
       );
 
       if (!hasAssistantOutput(acc.content, acc.reasoning)) {
-        if (quotaCharged) await refundQuota(db, user.id, today);
+        await refundChargedQuota();
         await sendError('AI 未返回内容，请重试');
         return;
       }
@@ -371,8 +373,8 @@ conversationRoutes.post('/:id/chat', async (c) => {
       console.error('chat stream error:', e);
       // 已生成的部分照样保存，用户刷新后能看到
       await persistAssistant().catch((e2) => console.error('persist partial reply failed:', e2));
-      if (!hasAssistantOutput(acc.content, acc.reasoning) && quotaCharged) {
-        await refundQuota(db, user.id, today);
+      if (!hasAssistantOutput(acc.content, acc.reasoning)) {
+        await refundChargedQuota();
       }
       await sendError(toUserMessage(e)).catch(() => {});
     }

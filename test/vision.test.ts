@@ -39,6 +39,12 @@ describe('validateImageDataUrl', () => {
     expect(validateImageDataUrl('data:image/PNG;base64,AAAA')).toBeNull();
   });
 
+  it('接受混合或大写 WebP，拒绝 GIF', () => {
+    expect(validateImageDataUrl('data:image/WebP;base64,AAAA')).toBeNull();
+    expect(validateImageDataUrl('data:image/WEBP;base64,AAAA')).toBeNull();
+    expect(validateImageDataUrl('data:image/GIF;base64,R0lGODlh')).not.toBeNull();
+  });
+
   it('拒绝非图片数据', () => {
     expect(validateImageDataUrl('data:text/html;base64,AAA')).not.toBeNull();
     expect(validateImageDataUrl('hello')).not.toBeNull();

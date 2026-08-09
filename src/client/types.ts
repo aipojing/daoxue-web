@@ -31,12 +31,25 @@ export const PROVINCES = [
   '青海', '宁夏', '新疆', '香港', '澳门', '台湾',
 ];
 
+const PROVINCE_SUFFIXES = [
+  '维吾尔自治区',
+  '壮族自治区',
+  '回族自治区',
+  '特别行政区',
+  '自治区',
+  '省',
+  '市',
+].sort((a, b) => b.length - a.length);
+
 export function splitRegion(region: string): { province: string; city: string } {
   const trimmed = region.trim();
   if (!trimmed) return { province: '', city: '' };
   const matched = PROVINCES.find((p) => trimmed.startsWith(p));
   if (matched) {
-    const city = trimmed.slice(matched.length).trim().replace(/^(特别行政区|自治区|省|市)/, '').trim();
+    let city = trimmed.slice(matched.length);
+    const suffix = PROVINCE_SUFFIXES.find((candidate) => city.startsWith(candidate));
+    if (suffix) city = city.slice(suffix.length);
+    city = city.trim();
     return { province: matched, city };
   }
   return { province: '', city: trimmed };

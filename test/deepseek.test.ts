@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'vitest';
-import { parseSSELine, mapDeepSeekError } from '../src/worker/chat/deepseek';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { mapDeepSeekError, parseSSELine, streamChat } from '../src/worker/chat/deepseek';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('parseSSELine', () => {
   it('解析 content 增量', () => {
@@ -38,5 +42,56 @@ describe('mapDeepSeekError', () => {
     expect(mapDeepSeekError(402)).toContain('余额');
     expect(mapDeepSeekError(429)).toContain('频繁');
     expect(mapDeepSeekError(500)).toContain('稍后');
+  });
+});
+
+describe('streamChat 组合增量回调', () => {
+  function stubCombinedDelta() {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          'data: {"choices":[{"delta":{"reasoning_content":"思考","content":"答案"}}]}\n',
+          { status: 200 },
+        ),
+      ),
+    );
+  }
+
+  const options = { model: 'deepseek-reasoner', messages: [] };
+
+  it('reasoning 回调 Promise reject 时仍分派 content，并传播原错误', async () => {
+    stubCombinedDelta();
+    const error = new Error('reasoning reject');
+    const content: string[] = [];
+
+    await expect(
+      streamChat('key', options, {
+        onReasoning: () => Promise.reject(error),
+        onDelta: async (text) => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          content.push(text);
+        },
+      }),
+    ).rejects.toBe(error);
+    expect(content).toEqual(['答案']);
+  });
+
+  it('reasoning 回调同步抛错时仍分派 content，并传播原错误', async () => {
+    stubCombinedDelta();
+    const error = new Error('reasoning throw');
+    const content: string[] = [];
+
+    await expect(
+      streamChat('key', options, {
+        onReasoning: () => {
+          throw error;
+        },
+        onDelta: (text) => {
+          content.push(text);
+        },
+      }),
+    ).rejects.toBe(error);
+    expect(content).toEqual(['答案']);
   });
 });

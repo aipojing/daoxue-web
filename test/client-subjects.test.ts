@@ -19,4 +19,14 @@ describe('client subjects', () => {
     expect(splitRegion('北京市朝阳区')).toEqual({ province: '北京', city: '朝阳区' });
     expect(splitRegion('浙江省杭州市')).toEqual({ province: '浙江', city: '杭州市' });
   });
+
+  it('省份后缀不紧邻省份名时保留城市的市字', () => {
+    expect(splitRegion('北京 市辖区')).toEqual({ province: '北京', city: '市辖区' });
+  });
+
+  it('按最长后缀拆分民族自治区名称', () => {
+    expect(splitRegion('广西壮族自治区南宁市')).toEqual({ province: '广西', city: '南宁市' });
+    expect(splitRegion('宁夏回族自治区银川市')).toEqual({ province: '宁夏', city: '银川市' });
+    expect(splitRegion('新疆维吾尔自治区乌鲁木齐市')).toEqual({ province: '新疆', city: '乌鲁木齐市' });
+  });
 });
