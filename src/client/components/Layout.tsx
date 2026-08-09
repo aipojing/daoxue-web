@@ -21,6 +21,9 @@ export default function Layout({ children }: { children: ReactNode }) {
             <Link to="/" className={isActive('/') ? 'nav-link active' : 'nav-link'}>
               学生
             </Link>
+            <Link to="/ai-settings" className={isActive('/ai-settings') ? 'nav-link active' : 'nav-link'}>
+              AI 服务
+            </Link>
             <Link to="/settings" className={isActive('/settings') ? 'nav-link active' : 'nav-link'}>
               设置
             </Link>

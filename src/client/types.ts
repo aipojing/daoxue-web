@@ -65,11 +65,34 @@ export const GRADES = [
   '高一', '高二', '高三',
 ];
 
+export type AIConfigSource = 'personal' | 'shared' | 'none';
+
+export interface UserAISettings {
+  personal: {
+    deepseekKeySet: boolean;
+    deepseekKeyTail: string;
+    visionKeySet: boolean;
+    visionKeyTail: string;
+    visionProvider: 'zhipu' | 'dashscope';
+    visionModel: string;
+  };
+  sharedFallbackEnabled: boolean;
+  effective: {
+    deepseekConfigured: boolean;
+    deepseekSource: AIConfigSource;
+    visionEnabled: boolean;
+    visionSource: AIConfigSource;
+  };
+}
+
 export interface User {
   id: number;
   email: string;
   isAdmin: boolean;
-  visionEnabled?: boolean;
+  aiConfigured: boolean;
+  aiSource: AIConfigSource;
+  visionEnabled: boolean;
+  visionSource: AIConfigSource;
 }
 
 export interface Student {
@@ -272,6 +295,7 @@ export interface InviteCode {
 }
 
 export interface AdminSettings {
+  sharedFallbackEnabled: boolean;
   deepseekKeySet: boolean;
   deepseekKeyTail: string;
   deepseekFromEnv: boolean;

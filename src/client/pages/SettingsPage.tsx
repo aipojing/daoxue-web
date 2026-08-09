@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPost, apiPut, ApiError, performLogout } from '../api';
 import { useAuth } from '../AuthContext';
-import type { InviteCode, AdminUser, AdminSettings } from '../types';
+import type { InviteCode, AdminUser } from '../types';
 import { finishPending, tryStartPending } from '../lib/chat';
 
 export default function SettingsPage() {
@@ -15,15 +15,6 @@ export default function SettingsPage() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [inviteNote, setInviteNote] = useState('');
   const [limitEdits, setLimitEdits] = useState<Record<number, string>>({});
-  const [aiSettings, setAiSettings] = useState<AdminSettings | null>(null);
-  const [deepseekKeyInput, setDeepseekKeyInput] = useState('');
-  const [visionKeyInput, setVisionKeyInput] = useState('');
-  const [visionAdvancedOpen, setVisionAdvancedOpen] = useState(false);
-  const [visionUrlInput, setVisionUrlInput] = useState('');
-  const [visionModelInput, setVisionModelInput] = useState('');
-  const [profileRefineIntervalInput, setProfileRefineIntervalInput] = useState('10');
-  const [profileRefineDailyLimitInput, setProfileRefineDailyLimitInput] = useState('0');
-  const [savingKeys, setSavingKeys] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [creatingInvite, setCreatingInvite] = useState(false);
   const [pendingInviteIds, setPendingInviteIds] = useState<Set<number>>(() => new Set());
@@ -33,88 +24,25 @@ export default function SettingsPage() {
 
   const isAdmin = user?.isAdmin ?? false;
 
-  const loadAdmin = useCallback(
-    async (syncInputs = false) => {
-      if (!isAdmin) return;
-      const generation = ++loadAdminGenRef.current;
-      try {
-        const [inviteData, userData, settingsData] = await Promise.all([
-          apiGet<InviteCode[]>('/api/admin/invite-codes'),
-          apiGet<AdminUser[]>('/api/admin/users'),
-          apiGet<AdminSettings>('/api/admin/settings'),
-        ]);
-        if (generation !== loadAdminGenRef.current) return;
-        setInvites(inviteData);
-        setUsers(userData);
-        setAiSettings(settingsData);
-        // 只在首次加载/保存配置后回填，否则生成邀请码会把正在输入的地址冲掉
-        if (syncInputs) {
-          setVisionUrlInput(settingsData.visionApiUrl);
-          setVisionModelInput(settingsData.visionModel);
-          setProfileRefineIntervalInput(String(settingsData.profileRefineIntervalMinutes));
-          setProfileRefineDailyLimitInput(String(settingsData.profileRefineDailyLimit));
-        }
-      } catch (e) {
-        if (generation !== loadAdminGenRef.current) return;
-        setError(e instanceof ApiError ? e.message : '加载失败');
-      }
-    },
-    [isAdmin],
-  );
-
-  const saveAIKeys = async () => {
-    setSavingKeys(true);
-    setError('');
+  const loadAdmin = useCallback(async () => {
+    if (!isAdmin) return;
+    const generation = ++loadAdminGenRef.current;
     try {
-      const intervalMinutes = Number(profileRefineIntervalInput);
-      const dailyLimit = Number(profileRefineDailyLimitInput);
-      if (!Number.isInteger(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 1440) {
-        setError('画像提炼间隔需为 1–1440 的整数（分钟）');
-        setSavingKeys(false);
-        return;
-      }
-      if (!Number.isInteger(dailyLimit) || dailyLimit < 0 || dailyLimit > 1000) {
-        setError('每日提炼上限需为 0–1000 的整数（0 表示不限）');
-        setSavingKeys(false);
-        return;
-      }
-
-      const body: Record<string, string | number> = {};
-      if (deepseekKeyInput.trim()) body.deepseekApiKey = deepseekKeyInput.trim();
-      if (visionKeyInput.trim()) body.visionApiKey = visionKeyInput.trim();
-      // 只要和服务端现值不同就提交，避免用户改完又收起高级设置导致静默丢弃
-      if (visionUrlInput.trim() !== (aiSettings?.visionApiUrl ?? '')) {
-        body.visionApiUrl = visionUrlInput.trim();
-      }
-      if (visionModelInput.trim() !== (aiSettings?.visionModel ?? '')) {
-        body.visionModel = visionModelInput.trim();
-      }
-      if (intervalMinutes !== (aiSettings?.profileRefineIntervalMinutes ?? 10)) {
-        body.profileRefineIntervalMinutes = intervalMinutes;
-      }
-      if (dailyLimit !== (aiSettings?.profileRefineDailyLimit ?? 0)) {
-        body.profileRefineDailyLimit = dailyLimit;
-      }
-      await apiPut('/api/admin/settings', body);
-      setDeepseekKeyInput('');
-      setVisionKeyInput('');
-      setToast('已保存，立即生效');
-      await loadAdmin(true);
+      const [inviteData, userData] = await Promise.all([
+        apiGet<InviteCode[]>('/api/admin/invite-codes'),
+        apiGet<AdminUser[]>('/api/admin/users'),
+      ]);
+      if (generation !== loadAdminGenRef.current) return;
+      setInvites(inviteData);
+      setUsers(userData);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : '保存失败');
-    } finally {
-      setSavingKeys(false);
+      if (generation !== loadAdminGenRef.current) return;
+      setError(e instanceof ApiError ? e.message : '加载失败');
     }
-  };
-
-  const keyStatus = (set: boolean, tail: string, fromEnv: boolean) => {
-    if (!set) return <span className="badge badge-danger">未配置</span>;
-    if (fromEnv) return <span className="badge badge-success">已配置（环境变量）</span>;
-    return <span className="badge badge-success">已配置（尾号 {tail || '****'}）</span>;
-  };
+  }, [isAdmin]);
 
   useEffect(() => {
-    void loadAdmin(true);
+    void loadAdmin();
   }, [loadAdmin]);
 
   useEffect(() => {
@@ -235,6 +163,9 @@ export default function SettingsPage() {
           登录邮箱：<strong>{user?.email}</strong>
           {isAdmin && <span className="badge badge-primary settings-admin-badge">管理员</span>}
         </p>
+        <p className="form-hint">
+          DeepSeek 与图片识别服务的 Key 请在「AI 服务」页配置。
+        </p>
         <button className="btn btn-danger-ghost" disabled={loggingOut} onClick={() => void logout()}>
           {loggingOut ? '退出中…' : '退出登录'}
         </button>
@@ -242,101 +173,6 @@ export default function SettingsPage() {
 
       {isAdmin && (
         <>
-          <div className="card settings-card">
-            <h2 className="section-title">AI 服务配置</h2>
-            <div className="key-row">
-              <div className="key-row-head">
-                <strong>DeepSeek API Key</strong>（必须，驱动全部对话）
-                {aiSettings && keyStatus(aiSettings.deepseekKeySet, aiSettings.deepseekKeyTail, aiSettings.deepseekFromEnv)}
-              </div>
-              <p className="form-hint">
-                在 <a href="https://platform.deepseek.com" target="_blank" rel="noreferrer">platform.deepseek.com</a> 创建，
-                以 sk- 开头。粘贴新 Key 保存即覆盖；Key 保存后不回显。
-              </p>
-              <input
-                type="password"
-                value={deepseekKeyInput}
-                onChange={(e) => setDeepseekKeyInput(e.target.value)}
-                placeholder="sk-…（留空表示不修改）"
-                autoComplete="off"
-              />
-            </div>
-            <div className="key-row">
-              <div className="key-row-head">
-                <strong>视觉模型 Key</strong>（可选，开启拍照识题）
-                {aiSettings && keyStatus(aiSettings.visionKeySet, aiSettings.visionKeyTail, aiSettings.visionFromEnv)}
-              </div>
-              <p className="form-hint">
-                默认接智谱 GLM-4.1V-Thinking-Flash（免费），在{' '}
-                <a href="https://open.bigmodel.cn" target="_blank" rel="noreferrer">open.bigmodel.cn</a> 注册取 Key。
-                配置后聊天输入框出现相机按钮。
-              </p>
-              <input
-                type="password"
-                value={visionKeyInput}
-                onChange={(e) => setVisionKeyInput(e.target.value)}
-                placeholder="智谱 API Key（留空表示不修改）"
-                autoComplete="off"
-              />
-              <button
-                className="btn-link"
-                aria-expanded={visionAdvancedOpen}
-                onClick={() => setVisionAdvancedOpen(!visionAdvancedOpen)}
-              >
-                {visionAdvancedOpen ? '收起高级设置 ▲' : '高级：换其他视觉服务（如通义 qwen-vl）▼'}
-              </button>
-              {visionAdvancedOpen && (
-                <div className="key-advanced">
-                  <input
-                    value={visionUrlInput}
-                    onChange={(e) => setVisionUrlInput(e.target.value)}
-                    placeholder="接口地址（OpenAI 兼容），留空用智谱默认"
-                  />
-                  <input
-                    value={visionModelInput}
-                    onChange={(e) => setVisionModelInput(e.target.value)}
-                    placeholder="模型名，如 qwen-vl-plus，留空用 glm-4.1v-thinking-flash"
-                  />
-                </div>
-              )}
-            </div>
-            <div className="key-row">
-              <div className="key-row-head">
-                <strong>学科画像提炼间隔</strong>（分钟）
-              </div>
-              <p className="form-hint">
-                同一学生同一学科两次画像提炼的最短间隔。默认 10 分钟，适合孩子专注力窗口；如果对话较稀疏可适度调大。
-              </p>
-              <input
-                type="number"
-                min={1}
-                max={1440}
-                value={profileRefineIntervalInput}
-                onChange={(e) => setProfileRefineIntervalInput(e.target.value)}
-                placeholder="10"
-              />
-            </div>
-            <div className="key-row">
-              <div className="key-row-head">
-                <strong>学科画像每日提炼上限</strong>（0 = 不限）
-              </div>
-              <p className="form-hint">
-                每个学生每个学科每天最多提炼几次。填 0 表示不限制；填 1–1000 可在对话非常密集时控制成本。
-              </p>
-              <input
-                type="number"
-                min={0}
-                max={1000}
-                value={profileRefineDailyLimitInput}
-                onChange={(e) => setProfileRefineDailyLimitInput(e.target.value)}
-                placeholder="0"
-              />
-            </div>
-            <button className="btn btn-primary" onClick={() => void saveAIKeys()} disabled={savingKeys}>
-              {savingKeys ? '保存中…' : '保存配置'}
-            </button>
-          </div>
-
           <div className="card settings-card">
             <h2 className="section-title">邀请码管理</h2>
             <div className="invite-create-row">

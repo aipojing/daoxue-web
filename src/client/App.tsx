@@ -13,6 +13,7 @@ const MistakesPage = lazy(() => import('./pages/MistakesPage'));
 const SelfLearnPage = lazy(() => import('./pages/SelfLearnPage'));
 const TutoringPage = lazy(() => import('./pages/TutoringPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
+const AISettingsPage = lazy(() => import('./pages/AISettingsPage'));
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user, loading, error, refresh } = useAuth();
@@ -145,6 +146,16 @@ function AppRoutes() {
           <RequireAuth>
             <Layout>
               <MistakesPage />
+            </Layout>
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/ai-settings"
+        element={
+          <RequireAuth>
+            <Layout>
+              <AISettingsPage />
             </Layout>
           </RequireAuth>
         }
