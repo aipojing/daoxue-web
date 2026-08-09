@@ -25,6 +25,8 @@
 - Create: `test/client-subjects.test.ts` — 前端学科枚举与显示元数据测试。
 - Create: `test/chemistry-migration.test.ts` — 带历史数据的 SQLite 迁移回归测试。
 - Create: `migrations/0005_add_chemistry_subject.sql` — D1 严格白名单迁移（`0004` 已被并行开发占用）。
+- Modify: `package.json` — 为 SQLite 迁移测试提供 Node 20 类型。
+- Modify: `package-lock.json` — 锁定新增开发类型依赖。
 - Modify: `test/prompts.test.ts` — Worker 枚举、校验和提示词加载测试。
 - Modify: `src/worker/chat/prompt-builder.ts` — Worker 学科枚举与中文名。
 - Modify: `src/worker/chat/prompts.ts` — 化学提示词导入和映射。
@@ -266,6 +268,8 @@ git commit -m "feat: expose chemistry tutoring across the UI"
 **Files:**
 - Create: `test/chemistry-migration.test.ts`
 - Create: `migrations/0005_add_chemistry_subject.sql`
+- Modify: `package.json`
+- Modify: `package-lock.json`
 
 **Interfaces:**
 - Consumes: `0001`—`0003` 创建的现有 D1 schema。
@@ -540,16 +544,22 @@ Run: `npx vitest run test/chemistry-migration.test.ts`
 
 Expected: PASS；六类历史记录全部保留，`PRAGMA foreign_key_check` 返回空数组，化学写入成功，非法学科写入失败。
 
-- [ ] **Step 5: 用 Wrangler 验证全新本地 D1**
+- [ ] **Step 5: 为迁移测试安装 Node 20 开发类型并检查类型**
+
+Run: `npm install --save-dev '@types/node@^20' && npm run typecheck`
+
+Expected: `package.json` 与 `package-lock.json` 记录 `@types/node` 开发依赖；前端与 Worker 类型检查均为 0 errors。
+
+- [ ] **Step 6: 用 Wrangler 验证全新本地 D1**
 
 Run: `npx wrangler d1 migrations apply daoxue-db --local`
 
 Expected: `0005_add_chemistry_subject.sql` 成功应用；不连接远程数据库。
 
-- [ ] **Step 6: 提交迁移改动**
+- [ ] **Step 7: 提交迁移改动**
 
 ```bash
-git add test/chemistry-migration.test.ts migrations/0005_add_chemistry_subject.sql
+git add test/chemistry-migration.test.ts migrations/0005_add_chemistry_subject.sql package.json package-lock.json docs/superpowers/plans/2026-08-09-chemistry-tutoring.md
 git commit -m "feat: migrate D1 for chemistry subjects"
 ```
 
