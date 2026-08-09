@@ -4,6 +4,7 @@ import { apiGet, apiDelete, ApiError } from '../api';
 import type { Student } from '../types';
 import StudentFormModal from '../components/StudentFormModal';
 import StudentWizard from '../components/StudentWizard';
+import StudentDeleteModal from '../components/StudentDeleteModal';
 
 export default function StudentsPage() {
   const [students, setStudents] = useState<Student[] | null>(null);
@@ -13,6 +14,7 @@ export default function StudentsPage() {
     student: null,
   });
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Student | null>(null);
   const navigate = useNavigate();
 
   const load = useCallback(async () => {
@@ -28,21 +30,10 @@ export default function StudentsPage() {
   }, [load]);
 
   const onDelete = async (student: Student) => {
-    const typed = window.prompt(
-      `删除「${student.name}」会同时删除该学生的全部会话、错题本和学习画像，且无法恢复。\n如果确认，请输入学生姓名：`,
-    );
-    if (typed === null) return;
-    if (typed.trim() !== student.name) {
-      setError('姓名不匹配，已取消删除');
-      return;
-    }
-    try {
-      await apiDelete(`/api/students/${student.id}`);
-      setError('');
-      await load();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : '删除失败，请重试');
-    }
+    await apiDelete(`/api/students/${student.id}`);
+    setError('');
+    await load();
+    setDeleteTarget(null);
   };
 
   if (!students) {
@@ -103,7 +94,7 @@ export default function StudentsPage() {
               <button className="btn btn-sm" onClick={() => setModal({ open: true, student: s })}>
                 编辑
               </button>
-              <button className="btn btn-sm btn-danger-ghost" onClick={() => void onDelete(s)}>
+              <button className="btn btn-sm btn-danger-ghost" onClick={() => setDeleteTarget(s)}>
                 删除
               </button>
             </div>
@@ -119,6 +110,14 @@ export default function StudentsPage() {
             setModal({ open: false, student: null });
             void load();
           }}
+        />
+      )}
+
+      {deleteTarget && (
+        <StudentDeleteModal
+          student={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={() => onDelete(deleteTarget)}
         />
       )}
 

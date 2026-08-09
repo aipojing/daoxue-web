@@ -43,11 +43,25 @@ export const apiPost = <T>(path: string, body?: unknown) => request<T>('POST', p
 export const apiPut = <T>(path: string, body?: unknown) => request<T>('PUT', path, body);
 export const apiDelete = <T>(path: string) => request<T>('DELETE', path);
 
+export function getAuthProbeError(error: unknown): string {
+  return error instanceof ApiError && error.status === 401 ? '' : '无法确认登录状态，请重试';
+}
+
+export async function performLogout(requestLogout: () => Promise<unknown>, clearAuth: () => void): Promise<void> {
+  await requestLogout();
+  clearAuth();
+}
+
 export interface StreamHandlers {
   onDelta: (text: string) => void;
   onReasoning: (text: string) => void;
   onDone: (messageId: number | null) => void;
-  onError: (message: string) => void;
+  onError: (message: string, metadata?: StreamErrorMetadata) => void;
+}
+
+export interface StreamErrorMetadata {
+  userMessageId: number | null;
+  assistantMessageId: number | null;
 }
 
 export async function streamChatRequest(
@@ -55,13 +69,14 @@ export async function streamChatRequest(
   content: string,
   handlers: StreamHandlers,
   signal?: AbortSignal,
+  requestId?: string,
 ): Promise<void> {
   let res: Response;
   try {
     res = await fetch(`/api/conversations/${conversationId}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, ...(requestId ? { requestId } : {}) }),
       credentials: 'same-origin',
       signal,
     });
@@ -74,7 +89,13 @@ export async function streamChatRequest(
   const contentType = res.headers.get('Content-Type') ?? '';
   if (!res.ok || !res.body || !contentType.includes('text/event-stream')) {
     const json = (await res.json().catch(() => null)) as Envelope<unknown> | null;
-    handlers.onError(json?.error ?? 'AI 服务暂时不可用，请稍后再试');
+    if (res.status === 401 && typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+      window.location.assign('/login');
+    }
+    handlers.onError(json?.error ?? 'AI 服务暂时不可用，请稍后再试', {
+      userMessageId: null,
+      assistantMessageId: null,
+    });
     return;
   }
 
@@ -84,14 +105,21 @@ export async function streamChatRequest(
   let finished = false;
 
   const processEvent = (rawEvent: string) => {
+    if (finished) return;
     let eventName = 'message';
     const dataLines: string[] = [];
-    for (const line of rawEvent.split('\n')) {
+    for (const line of rawEvent.split(/\r\n|\r|\n/)) {
       if (line.startsWith('event:')) eventName = line.slice(6).trim();
       else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
     }
     if (dataLines.length === 0) return;
-    let payload: { text?: string; message?: string; messageId?: number | null };
+    let payload: {
+      text?: string;
+      message?: string;
+      messageId?: number | null;
+      userMessageId?: number | null;
+      assistantMessageId?: number | null;
+    };
     try {
       payload = JSON.parse(dataLines.join('\n'));
     } catch {
@@ -104,7 +132,16 @@ export async function streamChatRequest(
       handlers.onDone(payload.messageId ?? null);
     } else if (eventName === 'error') {
       finished = true;
-      handlers.onError(payload.message ?? 'AI 服务出错，请重试');
+      const hasPersistenceMetadata = 'userMessageId' in payload || 'assistantMessageId' in payload;
+      handlers.onError(
+        payload.message ?? 'AI 服务出错，请重试',
+        hasPersistenceMetadata
+          ? {
+              userMessageId: typeof payload.userMessageId === 'number' ? payload.userMessageId : null,
+              assistantMessageId: typeof payload.assistantMessageId === 'number' ? payload.assistantMessageId : null,
+            }
+          : undefined,
+      );
     }
   };
 
@@ -113,11 +150,11 @@ export async function streamChatRequest(
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      let idx = buffer.indexOf('\n\n');
-      while (idx >= 0) {
-        processEvent(buffer.slice(0, idx));
-        buffer = buffer.slice(idx + 2);
-        idx = buffer.indexOf('\n\n');
+      let boundary = buffer.match(/\r?\n\r?\n|\r\r/);
+      while (boundary?.index !== undefined) {
+        processEvent(buffer.slice(0, boundary.index));
+        buffer = buffer.slice(boundary.index + boundary[0].length);
+        boundary = buffer.match(/\r?\n\r?\n|\r\r/);
       }
     }
     if (!finished && buffer.trim()) processEvent(buffer);

@@ -76,5 +76,6 @@ export async function setSetting(db: D1Database, key: string, value: string): Pr
 }
 
 export function maskTail(value: string): string {
-  return value ? value.slice(-4) : '';
+  if (!value) return '';
+  return value.length <= 8 ? '****' : value.slice(-4);
 }

@@ -3,6 +3,7 @@ import { UserFacingError } from '../lib/errors';
 const DEFAULT_VISION_URL = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
 const DEFAULT_VISION_MODEL = 'glm-4.1v-thinking-flash';
 const MAX_IMAGE_BASE64_LENGTH = 6 * 1024 * 1024;
+const VISION_TIMEOUT_MS = 120_000;
 
 export const OCR_PROMPT = [
   '你是题目转写助手。请把图片中的题目完整、准确地转写成文字：',
@@ -80,15 +81,28 @@ export function parseVisionResponse(json: unknown): string | null {
   return null;
 }
 
-export async function transcribeImage(config: VisionConfig, imageDataUrl: string): Promise<string> {
-  const res = await fetch(config.url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.apiKey}`,
-    },
-    body: JSON.stringify(buildVisionRequestBody(config.model, imageDataUrl)),
-  });
+export async function transcribeImage(
+  config: VisionConfig,
+  imageDataUrl: string,
+  timeoutMs = VISION_TIMEOUT_MS,
+): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch(config.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify(buildVisionRequestBody(config.model, imageDataUrl)),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (e) {
+    if (e instanceof DOMException && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+      throw new UserFacingError('图片识别超时，请重试或改为文字输入');
+    }
+    throw e;
+  }
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');

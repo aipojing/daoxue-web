@@ -4,13 +4,7 @@ import remarkMath from 'remark-math';
 import remarkGfm from 'remark-gfm';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-
-// DeepSeek 常输出 \( \) / \[ \] 定界的公式，remark-math 只识别 $ / $$，先行转换
-function normalizeMathDelimiters(text: string): string {
-  return text
-    .replace(/\\\[([\s\S]*?)\\\]/g, (_m, expr: string) => `$$${expr}$$`)
-    .replace(/\\\(([\s\S]*?)\\\)/g, (_m, expr: string) => `$${expr}$`);
-}
+import { normalizeMathDelimiters } from '../lib/markdown';
 
 function PreWithCopy(props: ComponentPropsWithoutRef<'pre'>) {
   const preRef = useRef<HTMLPreElement>(null);

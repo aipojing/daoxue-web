@@ -35,7 +35,7 @@ export type ParseResult = { card: MistakeCardData } | { noMistake: true } | { er
 
 export function parseMistakeCard(raw: string): ParseResult {
   let text = raw.trim();
-  const fenceMatch = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (fenceMatch?.[1]) text = fenceMatch[1];
 
   let json: unknown;

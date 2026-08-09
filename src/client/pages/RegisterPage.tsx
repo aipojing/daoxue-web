@@ -50,6 +50,7 @@ export default function RegisterPage() {
             placeholder="you@example.com"
             required
             autoComplete="email"
+            autoFocus
           />
         </label>
         <label className="form-label">

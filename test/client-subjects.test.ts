@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SUBJECTS, SUBJECT_NAMES, SUBJECT_COLORS, isSubject, splitRegion } from '../src/client/types';
+import * as clientTypes from '../src/client/types';
 
 describe('client subjects', () => {
   it('将化学作为第五个完整学科', () => {
@@ -28,5 +29,34 @@ describe('client subjects', () => {
     expect(splitRegion('广西壮族自治区南宁市')).toEqual({ province: '广西', city: '南宁市' });
     expect(splitRegion('宁夏回族自治区银川市')).toEqual({ province: '宁夏', city: '银川市' });
     expect(splitRegion('新疆维吾尔自治区乌鲁木齐市')).toEqual({ province: '新疆', city: '乌鲁木齐市' });
+  });
+});
+
+describe('画像表单关闭保护', () => {
+  it('仅填写特别注意事项也应识别为已有内容', () => {
+    const hasProfileFormContent = (clientTypes as typeof clientTypes & {
+      hasProfileFormContent?: (form: typeof clientTypes.EMPTY_PROFILE_FORM) => boolean;
+    }).hasProfileFormContent;
+
+    expect(
+      hasProfileFormContent?.({
+        ...clientTypes.EMPTY_PROFILE_FORM,
+        specialNotes: '容易焦虑，需要多鼓励',
+      }),
+    ).toBe(true);
+    expect(hasProfileFormContent?.(clientTypes.EMPTY_PROFILE_FORM)).toBe(false);
+  });
+
+  it('编辑现有画像时只把真实变更识别为 dirty', () => {
+    const isProfileFormDirty = (clientTypes as typeof clientTypes & {
+      isProfileFormDirty?: (
+        current: typeof clientTypes.EMPTY_PROFILE_FORM,
+        initial: typeof clientTypes.EMPTY_PROFILE_FORM,
+      ) => boolean;
+    }).isProfileFormDirty;
+    const initial = { ...clientTypes.EMPTY_PROFILE_FORM, specialNotes: '需要多鼓励' };
+
+    expect(isProfileFormDirty?.({ ...initial }, initial)).toBe(false);
+    expect(isProfileFormDirty?.({ ...initial, specialNotes: '需要更多鼓励' }, initial)).toBe(true);
   });
 });

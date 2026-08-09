@@ -131,6 +131,7 @@ export interface ConversationDetail {
     mode: 'subject' | 'selflearn-profiling' | 'selflearn-daily';
     title: string;
     deepThinking: boolean;
+    generating: boolean;
   };
   messages: Message[];
 }
@@ -209,6 +210,23 @@ export const EMPTY_PROFILE_FORM: ProfileFormData = {
   forbidden: [],
   specialNotes: '',
 };
+
+export function hasProfileFormContent(form: ProfileFormData): boolean {
+  return Object.values(form).some((value) =>
+    Array.isArray(value) ? value.length > 0 : value.trim().length > 0,
+  );
+}
+
+export function isProfileFormDirty(current: ProfileFormData, initial: ProfileFormData): boolean {
+  return (Object.keys(EMPTY_PROFILE_FORM) as Array<keyof ProfileFormData>).some((key) => {
+    const currentValue = current[key];
+    const initialValue = initial[key];
+    if (Array.isArray(currentValue) && Array.isArray(initialValue)) {
+      return currentValue.length !== initialValue.length || currentValue.some((value, index) => value !== initialValue[index]);
+    }
+    return currentValue !== initialValue;
+  });
+}
 
 export interface SelfLearnOverview {
   profile: { profile_text: string; form_json: string; ready: number; updated_at: string } | null;

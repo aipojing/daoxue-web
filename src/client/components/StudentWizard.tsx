@@ -5,10 +5,13 @@ import {
   PROVINCES,
   splitRegion,
   joinRegion,
+  hasProfileFormContent,
+  isProfileFormDirty,
   EMPTY_PROFILE_FORM,
   type ProfileFormData,
   type Student,
 } from '../types';
+import { useDialogFocus } from '../lib/modal';
 
 const COLOR_OPTIONS: Array<{ value: string; name: string }> = [
   { value: '#1e5b4a', name: '墨绿' },
@@ -124,6 +127,7 @@ export default function StudentWizard({ mode, studentId, student, initialForm, o
   const [province, setProvince] = useState(initialRegion.province);
   const [city, setCity] = useState(initialRegion.city);
   const [form, setForm] = useState<ProfileFormData>(initialForm ?? EMPTY_PROFILE_FORM);
+  const initialProfileForm = initialForm ?? EMPTY_PROFILE_FORM;
 
   const setField = <K extends keyof ProfileFormData>(key: K, val: ProfileFormData[K]) =>
     setForm((prev) => ({ ...prev, [key]: val }));
@@ -163,30 +167,34 @@ export default function StudentWizard({ mode, studentId, student, initialForm, o
 
   // 表单填了内容时，误点遮罩不能直接丢弃
   const requestClose = () => {
-    const hasContent =
-      basic.name.trim() ||
-      form.directions.length > 0 ||
-      form.goal.trim() ||
-      form.mainProblem.trim() ||
-      form.preferredStyles.length > 0;
+    const hasContent = isCreate
+      ? Boolean(
+          basic.name.trim() ||
+            basic.textbook.trim() ||
+            basic.notes.trim() ||
+            province ||
+            city.trim() ||
+            hasProfileFormContent(form),
+        )
+      : isProfileFormDirty(form, initialProfileForm);
     if (hasContent && !window.confirm('放弃已填写的内容？')) return;
     onClose();
   };
+  const dialogRef = useDialogFocus<HTMLDivElement>(requestClose);
 
   return (
     <div className="modal-backdrop" onClick={requestClose}>
       <div
+        ref={dialogRef}
         className="modal wizard-modal"
         role="dialog"
         aria-modal="true"
-        aria-label={isCreate ? '添加学生' : '编辑孩子画像'}
+        aria-labelledby="student-wizard-title"
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') requestClose();
-        }}
       >
         <div className="wizard-header">
-          <h2 className="modal-title">{isCreate ? '添加学生' : '编辑孩子画像'}</h2>
+          <h2 id="student-wizard-title" className="modal-title">{isCreate ? '添加学生' : '编辑孩子画像'}</h2>
           <div className="wizard-steps">
             {stepTitles.map((title, i) => (
               <span

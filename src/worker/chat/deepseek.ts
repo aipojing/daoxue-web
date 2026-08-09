@@ -12,8 +12,8 @@ export interface ParsedDelta {
 }
 
 export function parseSSELine(line: string): ParsedDelta | null {
-  if (!line.startsWith('data: ')) return null;
-  const payload = line.slice(6).trim();
+  if (!line.startsWith('data:')) return null;
+  const payload = line.slice(5).trimStart();
   if (payload === '[DONE]') return { done: true };
   try {
     const json = JSON.parse(payload) as {
@@ -97,6 +97,7 @@ export async function streamChat(
   let content = '';
   let reasoningContent = '';
   let buffer = '';
+  let sawDone = false;
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
 
@@ -109,7 +110,10 @@ export async function streamChat(
     for (const rawLine of lines) {
       const parsed = parseSSELine(rawLine.trim());
       if (!parsed) continue;
-      if (parsed.done) continue;
+      if (parsed.done) {
+        sawDone = true;
+        break;
+      }
       if (parsed.reasoning) {
         reasoningContent += parsed.reasoning;
       }
@@ -118,20 +122,30 @@ export async function streamChat(
       }
       await dispatchDeltaCallbacks(parsed, callbacks);
     }
+    if (sawDone) {
+      await reader.cancel().catch(() => {});
+      break;
+    }
   }
 
   // 上游最后一块可能不以换行结尾，补处理残留，避免丢最后一个增量
-  buffer += decoder.decode();
-  const tail = parseSSELine(buffer.trim());
-  if (tail && !tail.done) {
-    if (tail.reasoning) {
-      reasoningContent += tail.reasoning;
+  if (!sawDone) {
+    buffer += decoder.decode();
+    const tail = parseSSELine(buffer.trim());
+    if (tail?.done) {
+      sawDone = true;
+    } else if (tail) {
+      if (tail.reasoning) {
+        reasoningContent += tail.reasoning;
+      }
+      if (tail.content) {
+        content += tail.content;
+      }
+      await dispatchDeltaCallbacks(tail, callbacks);
     }
-    if (tail.content) {
-      content += tail.content;
-    }
-    await dispatchDeltaCallbacks(tail, callbacks);
   }
+
+  if (!sawDone) throw new UserFacingError('AI 服务连接中断，请重试');
 
   return { content, reasoningContent };
 }

@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "daoxue-web-test",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-05-03",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "daoxue-test-db",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "rules": [{ "type": "Text", "globs": ["**/*.md"], "fallthrough": true }]
+}

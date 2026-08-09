@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { apiPost, apiPut, ApiError } from '../api';
 import { GRADES, PROVINCES, splitRegion, joinRegion, type Student } from '../types';
+import { useDialogFocus } from '../lib/modal';
 
 const COLOR_OPTIONS = ['#1e5b4a', '#b8432f', '#33648f', '#b0782a', '#635c9b', '#3a7d5c'];
 
@@ -21,6 +22,7 @@ export default function StudentFormModal({ student, onClose, onSaved }: Props) {
   const [notes, setNotes] = useState(student?.notes ?? '');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const dialogRef = useDialogFocus<HTMLFormElement>(onClose);
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -42,8 +44,17 @@ export default function StudentFormModal({ student, onClose, onSaved }: Props) {
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={onSubmit}>
-        <h2 className="modal-title">{student ? '编辑学生' : '添加学生'}</h2>
+      <form
+        ref={dialogRef}
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="student-form-title"
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={onSubmit}
+      >
+        <h2 id="student-form-title" className="modal-title">{student ? '编辑学生' : '添加学生'}</h2>
         {error && <div className="form-error">{error}</div>}
         <label className="form-label">
           姓名 *

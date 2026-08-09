@@ -1,24 +1,37 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import type { ReactNode } from 'react';
+import { lazy, Suspense, type ReactNode } from 'react';
 import { AuthProvider, useAuth } from './AuthContext';
 import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
-import StudentsPage from './pages/StudentsPage';
-import StudentDetailPage from './pages/StudentDetailPage';
-import ChatPage from './pages/ChatPage';
-import MistakesPage from './pages/MistakesPage';
-import SelfLearnPage from './pages/SelfLearnPage';
-import TutoringPage from './pages/TutoringPage';
-import SettingsPage from './pages/SettingsPage';
+
+const StudentsPage = lazy(() => import('./pages/StudentsPage'));
+const StudentDetailPage = lazy(() => import('./pages/StudentDetailPage'));
+const ChatPage = lazy(() => import('./pages/ChatPage'));
+const MistakesPage = lazy(() => import('./pages/MistakesPage'));
+const SelfLearnPage = lazy(() => import('./pages/SelfLearnPage'));
+const TutoringPage = lazy(() => import('./pages/TutoringPage'));
+const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 
 function RequireAuth({ children }: { children: ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, loading, error, refresh } = useAuth();
   if (loading) {
     return (
       <div className="page-loading">
         <div className="spinner" />
+      </div>
+    );
+  }
+  if (!user && error) {
+    return (
+      <div className="page">
+        <div className="empty-state">
+          <p>{error}</p>
+          <button className="btn btn-primary" onClick={() => void refresh()}>
+            重试
+          </button>
+        </div>
       </div>
     );
   }
@@ -28,11 +41,23 @@ function RequireAuth({ children }: { children: ReactNode }) {
 
 /** 已登录用户不该再看到登录/注册表单 */
 function RedirectIfAuthed({ children }: { children: ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, loading, error, refresh } = useAuth();
   if (loading) {
     return (
       <div className="page-loading">
         <div className="spinner" />
+      </div>
+    );
+  }
+  if (!user && error) {
+    return (
+      <div className="auth-page">
+        <div className="auth-card">
+          <div className="form-error">{error}</div>
+          <button className="btn btn-primary btn-block" onClick={() => void refresh()}>
+            重试
+          </button>
+        </div>
       </div>
     );
   }
@@ -42,7 +67,14 @@ function RedirectIfAuthed({ children }: { children: ReactNode }) {
 
 function AppRoutes() {
   return (
-    <Routes>
+    <Suspense
+      fallback={
+        <div className="page-loading">
+          <div className="spinner" />
+        </div>
+      }
+    >
+      <Routes>
       <Route
         path="/login"
         element={
@@ -127,8 +159,9 @@ function AppRoutes() {
           </RequireAuth>
         }
       />
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </Suspense>
   );
 }
 

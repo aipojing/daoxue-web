@@ -7,6 +7,8 @@ const DEFAULT_REFINE_INTERVAL_MINUTES = 10;
 const DEFAULT_DAILY_LIMIT = 0;
 const RECENT_MESSAGE_LIMIT = 30;
 const MAX_PROFILE_LENGTH = 500;
+// 与模型的 120 秒超时保持足够间隔，避免旧提炼仍运行时被新任务接管。
+const REFINE_LEASE_MINUTES = 5;
 
 export function shouldRefine(updatedAt: string | null, intervalMinutes: number, now: Date): boolean {
   if (!updatedAt) return true;
@@ -27,21 +29,64 @@ function resolveRefineSettings(settings: Record<string, string>): { intervalMinu
   };
 }
 
-async function countTodayRefines(
+export async function tryAcquireProfileRefineLease(
+  db: D1Database,
+  studentId: number,
+  subject: Subject,
+  leaseToken: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `INSERT INTO profile_refine_leases (student_id, subject, lease_token, expires_at)
+       VALUES (?, ?, ?, datetime('now', '+${REFINE_LEASE_MINUTES} minutes'))
+       ON CONFLICT(student_id, subject) DO UPDATE SET
+         lease_token = excluded.lease_token,
+         expires_at = excluded.expires_at
+       WHERE profile_refine_leases.expires_at <= datetime('now')
+       RETURNING lease_token`,
+    )
+    .bind(studentId, subject, leaseToken)
+    .first<{ lease_token: string }>();
+  return row?.lease_token === leaseToken;
+}
+
+async function releaseProfileRefineLease(
+  db: D1Database,
+  studentId: number,
+  subject: Subject,
+  leaseToken: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM profile_refine_leases
+       WHERE student_id = ? AND subject = ? AND lease_token = ?`,
+    )
+    .bind(studentId, subject, leaseToken)
+    .run();
+}
+
+async function reserveProfileRefineBudget(
   db: D1Database,
   studentId: number,
   subject: Subject,
   today: string,
-): Promise<number> {
-  // D1 的 datetime('now') 是 UTC，按北京时间计日需要 +8 小时
+  dailyLimit: number,
+): Promise<boolean> {
+  // 将付费调用的预算在请求上游之前占用；失败的上游尝试也计入成本上限。
   const row = await db
     .prepare(
-      `SELECT COUNT(*) AS n FROM profile_refine_log
-       WHERE student_id = ? AND subject = ? AND date(datetime(created_at, '+8 hours')) = ?`,
+      `INSERT INTO profile_refine_log (student_id, subject)
+       SELECT ?1, ?2
+       WHERE ?4 = 0 OR (
+         SELECT COUNT(*) FROM profile_refine_log
+         WHERE student_id = ?1 AND subject = ?2
+           AND date(datetime(created_at, '+8 hours')) = ?3
+       ) < ?4
+       RETURNING id`,
     )
-    .bind(studentId, subject, today)
-    .first<{ n: number }>();
-  return row?.n ?? 0;
+    .bind(studentId, subject, today, dailyLimit)
+    .first<{ id: number }>();
+  return !!row;
 }
 
 function buildRefineMessages(
@@ -78,21 +123,19 @@ export async function maybeRefineProfile(
   subject: Subject,
   settings: Record<string, string> = {},
 ): Promise<void> {
+  let leaseToken: string | null = null;
   try {
     const { intervalMinutes, dailyLimit } = resolveRefineSettings(settings);
+    const candidateToken = crypto.randomUUID();
+    if (!(await tryAcquireProfileRefineLease(db, studentId, subject, candidateToken))) return;
+    leaseToken = candidateToken;
+
     const existing = await db
       .prepare('SELECT profile_text, updated_at FROM student_profiles WHERE student_id = ? AND subject = ?')
       .bind(studentId, subject)
       .first<{ profile_text: string; updated_at: string }>();
 
     if (existing && !shouldRefine(existing.updated_at, intervalMinutes, new Date())) return;
-
-    // dailyLimit === 0 表示不限；否则按北京日期计日
-    if (dailyLimit > 0) {
-      const today = beijingToday();
-      const todayCount = await countTodayRefines(db, studentId, subject, today);
-      if (todayCount >= dailyLimit) return;
-    }
 
     const { results: recent } = await db
       .prepare(
@@ -107,6 +150,8 @@ export async function maybeRefineProfile(
       .all<{ role: string; content: string }>();
 
     if (recent.length < 2) return;
+
+    if (!(await reserveProfileRefineBudget(db, studentId, subject, beijingToday(), dailyLimit))) return;
 
     const transcript = recent
       .map((m) => `${m.role === 'user' ? '学生' : '老师'}：${m.content.slice(0, 500)}`)
@@ -129,12 +174,13 @@ export async function maybeRefineProfile(
       .bind(studentId, subject, profileText)
       .run();
 
-    // 记录本次提炼，用于每日上限统计
-    await db
-      .prepare('INSERT INTO profile_refine_log (student_id, subject) VALUES (?, ?)')
-      .bind(studentId, subject)
-      .run();
   } catch (e) {
     console.error('profile refine failed (ignored):', e);
+  } finally {
+    if (leaseToken) {
+      await releaseProfileRefineLease(db, studentId, subject, leaseToken).catch((e) => {
+        console.error('profile refine lease release failed (ignored):', e);
+      });
+    }
   }
 }

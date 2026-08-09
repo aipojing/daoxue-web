@@ -1,14 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { apiGet, apiPost, apiPut, streamChatRequest, ApiError } from '../api';
+import { apiDelete, apiGet, apiPost, apiPut, streamChatRequest, ApiError } from '../api';
 import { useAuth } from '../AuthContext';
 import {
   isNearBottom,
   isPersistedMessage,
+  isStreamReconciliationExpired,
+  finishPending,
+  getOrCreatePendingRequest,
   markPersistedMessages,
+  nextStickToBottom,
+  resolveChatRequestId,
   shouldApplyConversationDetail,
+  shouldApplyAsyncResult,
   shouldCommitAssistantMessage,
+  shouldDiscardCancelledCreation,
+  shouldSubmitChatOnKeyDown,
+  streamErrorRecovery,
+  streamReconciliationDecision,
   subscribeToMobileMediaQuery,
+  tryStartPending,
 } from '../lib/chat';
 import { compressImageToDataUrl } from '../lib/image';
 import {
@@ -43,6 +54,8 @@ interface StreamingState {
 }
 
 const IDLE_STREAM: StreamingState = { active: false, content: '', reasoning: '' };
+const waitForReconciliation = (milliseconds: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
 export default function ChatPage() {
   const { studentId, conversationId } = useParams();
@@ -59,6 +72,8 @@ export default function ChatPage() {
   const [error, setError] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [saveStates, setSaveStates] = useState<Record<number, 'saving' | 'saved'>>({});
+  const [deepThinkingPendingId, setDeepThinkingPendingId] = useState<number | null>(null);
+  const [reconcilingStream, setReconcilingStream] = useState(false);
   const [toast, setToast] = useState('');
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -68,9 +83,18 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const loadGenRef = useRef(0);
   const routeConversationIdRef = useRef(conversationId);
-  const creatingRef = useRef(false);
+  const routeKeyRef = useRef(`${studentId ?? ''}:${conversationId ?? ''}`);
+  const asyncGenRef = useRef(0);
+  const creationRequestsRef = useRef(new Map<string, Promise<Conversation>>());
+  const currentCreationKeyRef = useRef('');
+  const deletingOrphanIdsRef = useRef(new Set<number>());
+  const mountedRef = useRef(false);
+  const restoredRequestRef = useRef<{ content: string; requestId: string } | null>(null);
+  const pendingActionsRef = useRef(new Set<string>());
   const stickToBottomRef = useRef(true);
   const streamBufRef = useRef({ content: '', reasoning: '' });
+  const detailRef = useRef(detail);
+  const messagesRef = useRef(messages);
   const [ocrLoading, setOcrLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [savedMistakeToast, setSavedMistakeToast] = useState(false);
@@ -79,7 +103,19 @@ export default function ChatPage() {
   );
 
   const isNew = conversationId === 'new';
+  const requestedSubject = searchParams.get('subject') ?? 'math';
+  const requestedMode =
+    requestedSubject === 'selflearn'
+      ? searchParams.get('mode') === 'profiling'
+        ? 'selflearn-profiling'
+        : 'selflearn-daily'
+      : 'subject';
+  const requestedCreationKey = `${studentId ?? ''}:${requestedSubject}:${requestedMode}`;
   routeConversationIdRef.current = conversationId;
+  routeKeyRef.current = `${studentId ?? ''}:${conversationId ?? ''}`;
+  currentCreationKeyRef.current = isNew ? requestedCreationKey : '';
+  detailRef.current = detail;
+  messagesRef.current = messages;
 
   const loadConversations = useCallback(async () => {
     try {
@@ -91,7 +127,7 @@ export default function ChatPage() {
 
   const loadDetail = useCallback(async () => {
     const requestedConversationId = conversationId;
-    if (isNew || !requestedConversationId) return;
+    if (isNew || !requestedConversationId) return null;
     // 世代号：切换会话后旧请求的响应到达时直接丢弃，避免显示错会话的内容
     const gen = ++loadGenRef.current;
     setLoadFailed(false);
@@ -103,10 +139,20 @@ export default function ChatPage() {
           requestedConversationId,
           currentGeneration: loadGenRef.current,
           requestGeneration: gen,
+          routeStudentId: studentId,
+          responseStudentId: data.conversation.studentId,
         })
-      ) return;
+      ) {
+        const sameConversationRequest =
+          routeConversationIdRef.current === requestedConversationId && loadGenRef.current === gen;
+        if (sameConversationRequest && studentId && Number(studentId) !== data.conversation.studentId) {
+          navigate(`/students/${data.conversation.studentId}/chat/${data.conversation.id}`, { replace: true });
+        }
+        return null;
+      }
       setDetail(data.conversation);
       setMessages(markPersistedMessages(data.messages));
+      return data;
     } catch (e) {
       if (
         !shouldApplyConversationDetail({
@@ -115,39 +161,63 @@ export default function ChatPage() {
           currentGeneration: loadGenRef.current,
           requestGeneration: gen,
         })
-      ) return;
+      ) return null;
       setError(e instanceof ApiError ? e.message : '加载会话失败');
       setLoadFailed(true);
+      return null;
     }
-  }, [conversationId, isNew]);
+  }, [conversationId, isNew, navigate, studentId]);
 
   useEffect(() => {
-    stickToBottomRef.current = true;
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    stickToBottomRef.current = nextStickToBottom(stickToBottomRef.current, 'route');
     loadGenRef.current += 1;
+    asyncGenRef.current += 1;
     setDetail(null);
     setMessages([]);
+    setInput('');
+    restoredRequestRef.current = null;
     setError('');
     setStreaming(IDLE_STREAM);
+    setReconcilingStream(false);
+    setOcrLoading(false);
     setLoadFailed(false);
     if (isNew) {
-      if (creatingRef.current) return;
-      creatingRef.current = true;
       let cancelled = false;
-      const subject = searchParams.get('subject') ?? 'math';
-      const modeParam = searchParams.get('mode');
-      const body: { subject: string; mode?: string } = { subject };
-      if (subject === 'selflearn') {
-        body.mode = modeParam === 'profiling' ? 'selflearn-profiling' : 'selflearn-daily';
+      const body: { subject: string; mode?: string } = { subject: requestedSubject };
+      if (requestedSubject === 'selflearn') {
+        body.mode = requestedMode;
       }
-      apiPost<Conversation>(`/api/students/${studentId}/conversations`, body)
+      const creationKey = requestedCreationKey;
+      getOrCreatePendingRequest(creationRequestsRef.current, creationKey, () =>
+        apiPost<Conversation>(`/api/students/${studentId}/conversations`, body),
+      )
         .then((cv) => {
-          if (!cancelled) navigate(`/students/${studentId}/chat/${cv.id}`, { replace: true });
+          if (!cancelled) {
+            navigate(`/students/${studentId}/chat/${cv.id}`, { replace: true });
+          } else if (
+            shouldDiscardCancelledCreation(
+              cancelled,
+              creationKey,
+              currentCreationKeyRef.current,
+              mountedRef.current,
+            ) &&
+            !deletingOrphanIdsRef.current.has(cv.id)
+          ) {
+            deletingOrphanIdsRef.current.add(cv.id);
+            void apiDelete(`/api/conversations/${cv.id}`)
+              .catch(() => {})
+              .finally(() => deletingOrphanIdsRef.current.delete(cv.id));
+          }
         })
         .catch((e) => {
           if (!cancelled) setError(e instanceof ApiError ? e.message : '创建会话失败');
-        })
-        .finally(() => {
-          creatingRef.current = false;
         });
       return () => {
         cancelled = true;
@@ -155,7 +225,24 @@ export default function ChatPage() {
     }
     void loadDetail();
     void loadConversations();
-  }, [isNew, conversationId, studentId, searchParams, navigate, loadDetail, loadConversations]);
+  }, [
+    isNew,
+    conversationId,
+    studentId,
+    searchParams,
+    navigate,
+    loadDetail,
+    loadConversations,
+    requestedCreationKey,
+    requestedMode,
+    requestedSubject,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      asyncGenRef.current += 1;
+    };
+  }, [studentId, conversationId]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(max-width: 767px)');
@@ -201,9 +288,17 @@ export default function ChatPage() {
   const send = async (override?: string) => {
     const content = (override ?? input).trim();
     if (isNew || !content || streamingRef.current || !detail) return;
+    const requestId = resolveChatRequestId(
+      restoredRequestRef.current,
+      content,
+      () => crypto.randomUUID(),
+    );
+    restoredRequestRef.current = null;
     streamingRef.current = true;
     setError('');
     setInput('');
+    const previousLatestUserId =
+      [...messages].reverse().find((message) => message.role === 'user' && isPersistedMessage(message))?.id ?? null;
     const optimisticId = -Date.now();
     setMessages((prev) => [
       ...prev,
@@ -214,7 +309,7 @@ export default function ChatPage() {
     const controller = new AbortController();
     abortRef.current = controller;
     streamBufRef.current = { content: '', reasoning: '' };
-    stickToBottomRef.current = true;
+    stickToBottomRef.current = nextStickToBottom(stickToBottomRef.current, 'send');
 
     // 把流内容落成一条正式消息（updater 保持纯函数，不在里面套 setState）
     const commitStreamed = (messageId: number | null) => {
@@ -254,22 +349,96 @@ export default function ChatPage() {
           if (controller.signal.aborted) return;
           streamingRef.current = false;
           abortRef.current = null;
+          setReconcilingStream(false);
           commitStreamed(messageId);
           void loadConversations();
         },
-        onError: (message) => {
+        onError: (message, metadata) => {
           if (controller.signal.aborted) return;
-          streamingRef.current = false;
-          abortRef.current = null;
           setStreaming(IDLE_STREAM);
           setError(message);
-          // 失败时把内容还给用户，并撤掉乐观插入的气泡，避免辛苦打的题目丢失
-          setMessages((prev) => prev.filter((m) => m.id !== optimisticId));
-          setInput((prev) => (prev.trim() ? prev : content));
           streamBufRef.current = { content: '', reasoning: '' };
+          if (streamErrorRecovery(metadata) === 'reconcile') {
+            if (metadata) {
+              // 服务端已明确返回落库 ID，直接用历史对账。
+              streamingRef.current = false;
+              abortRef.current = null;
+              setReconcilingStream(false);
+              void loadDetail();
+            } else {
+              // 无元数据的网络中断无法立即确定 Worker 是否已接收。
+              // 等待服务端会话租约结束后再决定是否恢复草稿，避免重复计费。
+              const requestedRouteKey = routeKeyRef.current;
+              setReconcilingStream(true);
+              setError(`${message}，正在确认发送状态…`);
+              void (async () => {
+                let consecutiveRestores = 0;
+                let loadFailureStartedAt: number | null = null;
+                await waitForReconciliation(300);
+                while (
+                  mountedRef.current &&
+                  routeKeyRef.current === requestedRouteKey &&
+                  !controller.signal.aborted
+                ) {
+                  const data = await loadDetail();
+                  if (!data) {
+                    loadFailureStartedAt ??= Date.now();
+                    if (isStreamReconciliationExpired(loadFailureStartedAt, Date.now())) {
+                      restoredRequestRef.current = { content, requestId };
+                      setInput((prev) => (prev.trim() ? prev : content));
+                      setError('暂时无法确认发送状态；可以重试，系统会用同一请求编号避免重复提交');
+                      break;
+                    }
+                    await waitForReconciliation(1500);
+                    continue;
+                  }
+                  loadFailureStartedAt = null;
+                  const decision = streamReconciliationDecision(
+                    data.messages,
+                    content,
+                    previousLatestUserId,
+                    data.conversation.generating,
+                  );
+                  if (decision === 'settled') {
+                    setError('连接曾中断，已同步服务端记录');
+                    break;
+                  }
+                  if (decision === 'restore') {
+                    consecutiveRestores += 1;
+                    if (consecutiveRestores >= 2) {
+                      restoredRequestRef.current = { content, requestId };
+                      setInput((prev) => (prev.trim() ? prev : content));
+                      setError(message);
+                      break;
+                    }
+                  } else {
+                    consecutiveRestores = 0;
+                    setError(`${message}，正在确认发送状态…`);
+                  }
+                  await waitForReconciliation(decision === 'wait' ? 1000 : 500);
+                }
+              })().finally(() => {
+                if (abortRef.current === controller) abortRef.current = null;
+                streamingRef.current = false;
+                if (mountedRef.current && routeKeyRef.current === requestedRouteKey) {
+                  setReconcilingStream(false);
+                }
+              });
+            }
+            void loadConversations();
+          } else {
+            // 请求未落库时把内容还给用户，并撤掉乐观气泡。
+            streamingRef.current = false;
+            abortRef.current = null;
+            setReconcilingStream(false);
+            setMessages((prev) => prev.filter((m) => m.id !== optimisticId));
+            restoredRequestRef.current = { content, requestId };
+            setInput((prev) => (prev.trim() ? prev : content));
+          }
         },
       },
       controller.signal,
+      requestId,
     );
   };
 
@@ -298,40 +467,65 @@ export default function ChatPage() {
 
   const toggleDeepThinking = async () => {
     if (!detail) return;
+    const conversationIdToUpdate = detail.id;
+    const pendingKey = `deep-thinking:${conversationIdToUpdate}`;
+    if (!tryStartPending(pendingActionsRef.current, pendingKey)) return;
     const next = !detail.deepThinking;
-    setDetail((prev) => (prev ? { ...prev, deepThinking: next } : prev));
+    setDeepThinkingPendingId(conversationIdToUpdate);
+    setDetail((prev) =>
+      prev?.id === conversationIdToUpdate ? { ...prev, deepThinking: next } : prev,
+    );
     try {
-      await apiPut(`/api/conversations/${detail.id}`, { deepThinking: next });
+      await apiPut(`/api/conversations/${conversationIdToUpdate}`, { deepThinking: next });
     } catch {
-      setDetail((prev) => (prev ? { ...prev, deepThinking: !next } : prev));
-      setToast('设置未能保存，请重试');
+      setDetail((prev) =>
+        prev?.id === conversationIdToUpdate ? { ...prev, deepThinking: !next } : prev,
+      );
+      if (detailRef.current?.id === conversationIdToUpdate) setToast('设置未能保存，请重试');
+    } finally {
+      finishPending(pendingActionsRef.current, pendingKey);
+      setDeepThinkingPendingId((current) => (current === conversationIdToUpdate ? null : current));
     }
   };
 
-  const saveMistake = async (messageId: number) => {
-    if (!detail) return;
+  const saveMistake = useCallback(async (messageId: number) => {
+    const currentDetail = detailRef.current;
+    if (!currentDetail) return;
+    const requestedRouteKey = routeKeyRef.current;
+    const pendingKey = `save-mistake:${currentDetail.id}:${messageId}`;
+    if (!tryStartPending(pendingActionsRef.current, pendingKey)) return;
     setSaveStates((prev) => ({ ...prev, [messageId]: 'saving' }));
     try {
-      const message = messages.find((m) => m.id === messageId);
+      const message = messagesRef.current.find((m) => m.id === messageId);
       const realId = message && isPersistedMessage(message) ? messageId : undefined;
-      await apiPost(`/api/conversations/${detail.id}/mistake-card`, realId !== undefined ? { messageId: realId } : {});
+      await apiPost(
+        `/api/conversations/${currentDetail.id}/mistake-card`,
+        realId !== undefined ? { messageId: realId } : {},
+      );
+      if (routeKeyRef.current !== requestedRouteKey) return;
       setSaveStates((prev) => ({ ...prev, [messageId]: 'saved' }));
       setSavedMistakeToast(true);
     } catch (e) {
+      if (routeKeyRef.current !== requestedRouteKey) return;
       setSaveStates((prev) => {
         const { [messageId]: _removed, ...rest } = prev;
         return rest;
       });
       setToast(e instanceof ApiError ? e.message : '保存失败');
+    } finally {
+      finishPending(pendingActionsRef.current, pendingKey);
     }
-  };
+  }, []);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // 中文输入法选字时按回车是确认候选词，不能当作发送
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-    // 手机软键盘的回车用于换行，只能点发送按钮
-    if (isMobile) return;
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (
+      shouldSubmitChatOnKeyDown({
+        key: e.key,
+        shiftKey: e.shiftKey,
+        isComposing: e.nativeEvent.isComposing,
+        isMobile,
+      })
+    ) {
       e.preventDefault();
       void send();
     }
@@ -341,19 +535,52 @@ export default function ChatPage() {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file || !detail || ocrLoading) return;
+    const requestedRouteKey = routeKeyRef.current;
+    const requestGeneration = ++asyncGenRef.current;
     setOcrLoading(true);
     setError('');
     try {
       const dataUrl = await compressImageToDataUrl(file);
+      if (
+        !shouldApplyAsyncResult({
+          currentRouteKey: routeKeyRef.current,
+          requestedRouteKey,
+          currentGeneration: asyncGenRef.current,
+          requestGeneration,
+        })
+      ) return;
       const result = await apiPost<{ text: string }>(`/api/conversations/${detail.id}/ocr`, {
         image: dataUrl,
       });
+      if (
+        !shouldApplyAsyncResult({
+          currentRouteKey: routeKeyRef.current,
+          requestedRouteKey,
+          currentGeneration: asyncGenRef.current,
+          requestGeneration,
+        })
+      ) return;
       setInput((prev) => (prev.trim() ? `${prev}\n${result.text}` : result.text));
       setToast('已识别题目，请核对无误后发送 ✓');
     } catch (err2) {
+      if (
+        !shouldApplyAsyncResult({
+          currentRouteKey: routeKeyRef.current,
+          requestedRouteKey,
+          currentGeneration: asyncGenRef.current,
+          requestGeneration,
+        })
+      ) return;
       setToast(err2 instanceof ApiError ? err2.message : err2 instanceof Error ? err2.message : '图片识别失败');
     } finally {
-      setOcrLoading(false);
+      if (
+        shouldApplyAsyncResult({
+          currentRouteKey: routeKeyRef.current,
+          requestedRouteKey,
+          currentGeneration: asyncGenRef.current,
+          requestGeneration,
+        })
+      ) setOcrLoading(false);
     }
   };
 
@@ -404,9 +631,10 @@ export default function ChatPage() {
               type="checkbox"
               checked={detail?.deepThinking ?? false}
               onChange={() => void toggleDeepThinking()}
-              disabled={!detail}
+              disabled={!detail || deepThinkingPendingId === detail.id}
+              aria-busy={detail !== null && deepThinkingPendingId === detail.id}
             />
-            <span>深度思考</span>
+            <span>{deepThinkingPendingId === detail?.id ? '保存中…' : '深度思考'}</span>
           </label>
         </header>
 
@@ -427,16 +655,20 @@ export default function ChatPage() {
               </p>
             </div>
           )}
-          {messages.map((m) => (
-            <MessageBubble
-              key={m.id}
-              role={m.role}
-              content={m.content}
-              reasoning={m.reasoning_content}
-              onSaveMistake={m.role === 'assistant' && !isSelfLearn ? () => void saveMistake(m.id) : undefined}
-              saveState={saveStates[m.id] ?? 'idle'}
-            />
-          ))}
+          {messages.map((m) => {
+            const canSaveMistake = m.role === 'assistant' && !isSelfLearn;
+            return (
+              <MessageBubble
+                key={m.id}
+                role={m.role}
+                content={m.content}
+                reasoning={m.reasoning_content}
+                messageId={canSaveMistake ? m.id : undefined}
+                onSaveMistake={canSaveMistake ? saveMistake : undefined}
+                saveState={saveStates[m.id] ?? 'idle'}
+              />
+            );
+          })}
           {streaming.active && (
             <MessageBubble
               role="assistant"
@@ -458,7 +690,12 @@ export default function ChatPage() {
           detail?.mode === 'selflearn-daily' && (
             <div className="quick-phrases">
               {['开始今天的学习', '学完了', '今天结束'].map((phrase) => (
-                <button key={phrase} className="chip" onClick={() => void send(phrase)}>
+                <button
+                  key={phrase}
+                  className="chip"
+                  disabled={reconcilingStream}
+                  onClick={() => void send(phrase)}
+                >
                   {phrase}
                 </button>
               ))}
@@ -481,7 +718,7 @@ export default function ChatPage() {
                 className="icon-btn camera-btn"
                 title="拍照/上传题目，自动转写为文字"
                 aria-label="拍照识题"
-                disabled={isNew || !detail || streaming.active || ocrLoading}
+                disabled={isNew || !detail || streaming.active || reconcilingStream || ocrLoading}
                 onClick={() => fileInputRef.current?.click()}
               >
                 {ocrLoading ? <span className="btn-spinner" /> : <IconCamera size={20} />}
@@ -491,18 +728,23 @@ export default function ChatPage() {
           <textarea
             ref={textareaRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              if (e.target.value.trim() !== restoredRequestRef.current?.content) {
+                restoredRequestRef.current = null;
+              }
+            }}
             onKeyDown={onKeyDown}
             placeholder={
               isMobile ? '输入题目或问题…' : '输入题目或问题…（Enter 发送，Shift+Enter 换行）'
             }
             rows={1}
-            disabled={isNew || !detail || streaming.active}
+            disabled={isNew || !detail || streaming.active || reconcilingStream}
           />
           <button
             className="btn btn-primary chat-send"
             onClick={() => void send()}
-            disabled={isNew || !detail || streaming.active || !input.trim()}
+            disabled={isNew || !detail || streaming.active || reconcilingStream || !input.trim()}
           >
             发送
           </button>

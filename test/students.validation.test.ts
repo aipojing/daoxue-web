@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { studentSchema } from '../src/worker/students/validation';
+import { studentSchema, studentUpdateSchema } from '../src/worker/students/validation';
 
 describe('studentSchema', () => {
   it('接受合法输入', () => {
@@ -25,5 +25,17 @@ describe('studentSchema', () => {
 
   it('拒绝非法颜色', () => {
     expect(studentSchema.safeParse({ name: '小明', grade: '初二', color: 'red;drop' }).success).toBe(false);
+  });
+});
+
+describe('studentUpdateSchema', () => {
+  it('局部更新不会注入创建时的默认值', () => {
+    const r = studentUpdateSchema.safeParse({ name: '小红' });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data).toEqual({ name: '小红' });
+  });
+
+  it('仍会校验显式提交的字段', () => {
+    expect(studentUpdateSchema.safeParse({ color: 'red' }).success).toBe(false);
   });
 });

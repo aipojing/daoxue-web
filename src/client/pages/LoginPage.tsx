@@ -49,6 +49,7 @@ export default function LoginPage() {
             placeholder="you@example.com"
             required
             autoComplete="email"
+            autoFocus
           />
         </label>
         <label className="form-label">

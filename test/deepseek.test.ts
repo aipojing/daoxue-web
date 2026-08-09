@@ -26,6 +26,11 @@ describe('parseSSELine', () => {
     expect(parseSSELine('data: [DONE]')).toEqual({ done: true });
   });
 
+  it('接受 SSE 规范允许的无空格 data 字段', () => {
+    expect(parseSSELine('data:{"choices":[{"delta":{"content":"你"}}]}')).toEqual({ content: '你' });
+    expect(parseSSELine('data:[DONE]')).toEqual({ done: true });
+  });
+
   it('非 data 行返回 null', () => {
     expect(parseSSELine(': keep-alive')).toBeNull();
     expect(parseSSELine('')).toBeNull();
@@ -93,5 +98,40 @@ describe('streamChat 组合增量回调', () => {
       }),
     ).rejects.toBe(error);
     expect(content).toEqual(['答案']);
+  });
+
+  it('上游未发送 [DONE] 就关闭时视为中断', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('data: {"choices":[{"delta":{"content":"半句"}}]}\n', { status: 200 }),
+      ),
+    );
+
+    await expect(
+      streamChat('key', { model: 'deepseek-chat', messages: [] }, {
+        onReasoning: () => {},
+        onDelta: () => {},
+      }),
+    ).rejects.toThrow('连接中断');
+  });
+
+  it('上游发送 [DONE] 后正常完成', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          'data: {"choices":[{"delta":{"content":"完整"}}]}\n\ndata: [DONE]\n\n',
+          { status: 200 },
+        ),
+      ),
+    );
+
+    await expect(
+      streamChat('key', { model: 'deepseek-chat', messages: [] }, {
+        onReasoning: () => {},
+        onDelta: () => {},
+      }),
+    ).resolves.toEqual({ content: '完整', reasoningContent: '' });
   });
 });

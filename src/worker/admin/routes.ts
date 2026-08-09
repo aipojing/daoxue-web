@@ -107,10 +107,12 @@ adminRoutes.put('/invite-codes/:id', async (c) => {
   if (!Number.isInteger(id) || id < 1) return err(c, '邀请码不存在', 404);
   const body = (await c.req.json().catch(() => ({}))) as { disabled?: unknown };
   if (typeof body.disabled !== 'boolean') return err(c, '参数不合法');
-  const result = await c.env.DB.prepare('UPDATE invite_codes SET disabled = ? WHERE id = ?')
+  const updated = await c.env.DB.prepare(
+    'UPDATE invite_codes SET disabled = ? WHERE id = ? RETURNING id',
+  )
     .bind(body.disabled ? 1 : 0, id)
-    .run();
-  if (!result.meta.changes) return err(c, '邀请码不存在', 404);
+    .first<{ id: number }>();
+  if (!updated) return err(c, '邀请码不存在', 404);
   return ok(c, { saved: true });
 });
 
@@ -133,9 +135,11 @@ adminRoutes.put('/users/:id', async (c) => {
   if (!Number.isInteger(id) || id < 1) return err(c, '用户不存在', 404);
   const body = updateUserSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!body.success) return err(c, '每日上限需为 1-10000 的整数');
-  const result = await c.env.DB.prepare('UPDATE users SET daily_message_limit = ? WHERE id = ?')
+  const updated = await c.env.DB.prepare(
+    'UPDATE users SET daily_message_limit = ? WHERE id = ? RETURNING id',
+  )
     .bind(body.data.dailyMessageLimit, id)
-    .run();
-  if (!result.meta.changes) return err(c, '用户不存在', 404);
+    .first<{ id: number }>();
+  if (!updated) return err(c, '用户不存在', 404);
   return ok(c, { saved: true });
 });

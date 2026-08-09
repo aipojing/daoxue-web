@@ -23,6 +23,11 @@ describe('parseMistakeCard', () => {
     expect('card' in r).toBe(true);
   });
 
+  it('容忍代码围栏后的说明文字', () => {
+    const r = parseMistakeCard('```json\n' + JSON.stringify(validCard) + '\n```\n以上是整理结果。');
+    expect('card' in r).toBe(true);
+  });
+
   it('no_mistake 返回 noMistake', () => {
     const r = parseMistakeCard('{"no_mistake": true}');
     expect('noMistake' in r).toBe(true);

@@ -45,4 +45,10 @@ describe('maskTail', () => {
     expect(maskTail('sk-1234567890abcd')).toBe('abcd');
     expect(maskTail('')).toBe('');
   });
+
+  it('短密钥不直接泄露完整值', () => {
+    expect(maskTail('abc')).toBe('****');
+    expect(maskTail('abcd')).toBe('****');
+    expect(maskTail('shortkey')).toBe('****');
+  });
 });

@@ -8,11 +8,12 @@ interface Props {
   content: string;
   reasoning?: string | null;
   streaming?: boolean;
-  onSaveMistake?: () => void;
+  messageId?: number;
+  onSaveMistake?: (messageId: number) => void;
   saveState?: 'idle' | 'saving' | 'saved';
 }
 
-function MessageBubble({ role, content, reasoning, streaming, onSaveMistake, saveState }: Props) {
+function MessageBubble({ role, content, reasoning, streaming, messageId, onSaveMistake, saveState }: Props) {
   const [reasoningOpen, setReasoningOpen] = useState(false);
 
   if (role === 'user') {
@@ -47,9 +48,13 @@ function MessageBubble({ role, content, reasoning, streaming, onSaveMistake, sav
           !reasoning && streaming && <span className="typing-indicator">思考中…</span>
         )}
         {streaming && content && <span className="cursor-blink">▍</span>}
-        {!streaming && content && onSaveMistake && (
+        {!streaming && content && messageId !== undefined && onSaveMistake && (
           <div className="bubble-actions">
-            <button className="btn-link" onClick={onSaveMistake} disabled={saveState === 'saving'}>
+            <button
+              className="btn-link"
+              onClick={() => onSaveMistake(messageId)}
+              disabled={saveState === 'saving'}
+            >
               {saveState === 'saving' ? (
                 '整理错题中…'
               ) : saveState === 'saved' ? (

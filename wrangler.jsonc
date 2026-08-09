@@ -21,6 +21,6 @@
   // 根域名 aipojing.xyz 留给个人站，本项目走 xue 二级域名。
   "routes": [{ "pattern": "xue.aipojing.xyz", "custom_domain": true }],
   "workers_dev": true,
-  "rules": [{ "type": "Text", "globs": ["**/*.md"] }],
+  "rules": [{ "type": "Text", "globs": ["**/*.md"], "fallthrough": true }],
   "observability": { "enabled": true }
 }

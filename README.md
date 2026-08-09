@@ -72,13 +72,13 @@ AI 输出的每课输出、每日家长反馈、错题卡和掌握等级会被�
 | 渲染 | react-markdown + KaTeX（数学公式） |
 | 大模型 | DeepSeek（`deepseek-chat` / `deepseek-reasoner`） |
 | 视觉模型 | 智谱 GLM-4.1V-Thinking-Flash（免费）或任意 OpenAI 兼容服务 |
-| 校验 / 测试 | zod / Vitest（78 个单元测试） |
+| 校验 / 测试 | zod / Vitest（单元测试 + 真实 Worker/D1 集成测试） |
 
 ## 快速开始（本地开发）
 
 ### 准备条件
 
-- 建议使用 Node.js 20 或更高版本
+- Node.js 22（见 `.nvmrc`）
 - 一个拥有 Workers 和 D1 权限的 Cloudflare 账号
 - DeepSeek API Key；若要开启拍照识题，再准备兼容视觉模型的 API Key
 
@@ -108,11 +108,18 @@ npm run dev:worker
 常用命令：
 
 ```bash
-npm test          # 跑单元测试
+npm test          # 跑单元测试 + Worker/D1 集成测试
 npm run typecheck # 类型检查（前端 + Worker）
 npm run build     # 类型检查 + 构建前端
+npm audit         # 检查全部依赖漏洞
+npx wrangler deploy --dry-run --outdir .wrangler/dry-run # 只验证 Worker 打包，不部署
 npm run deploy    # 构建并部署到 Cloudflare
 ```
+
+本项目使用 Node.js 22（见 `.nvmrc`）；使用 nvm 时先运行 `nvm use`。
+
+GitHub Actions 会在 push 和 pull request 时执行依赖安装、测试、构建、全部依赖审计及
+Wrangler dry-run。dry-run 只在本地生成打包产物，不会部署 Worker，也不会连接或修改远程 D1。
 
 ## 安全与隐私
 

@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { apiGet, apiPost, apiPut, ApiError } from '../api';
+import { apiGet, apiPost, apiPut, ApiError, performLogout } from '../api';
 import { useAuth } from '../AuthContext';
 import type { InviteCode, AdminUser, AdminSettings } from '../types';
+import { finishPending, tryStartPending } from '../lib/chat';
 
 export default function SettingsPage() {
   const { user, clear } = useAuth();
@@ -23,18 +24,26 @@ export default function SettingsPage() {
   const [profileRefineIntervalInput, setProfileRefineIntervalInput] = useState('10');
   const [profileRefineDailyLimitInput, setProfileRefineDailyLimitInput] = useState('0');
   const [savingKeys, setSavingKeys] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [creatingInvite, setCreatingInvite] = useState(false);
+  const [pendingInviteIds, setPendingInviteIds] = useState<Set<number>>(() => new Set());
+  const [pendingLimitIds, setPendingLimitIds] = useState<Set<number>>(() => new Set());
+  const pendingActionsRef = useRef(new Set<string>());
+  const loadAdminGenRef = useRef(0);
 
   const isAdmin = user?.isAdmin ?? false;
 
   const loadAdmin = useCallback(
     async (syncInputs = false) => {
       if (!isAdmin) return;
+      const generation = ++loadAdminGenRef.current;
       try {
         const [inviteData, userData, settingsData] = await Promise.all([
           apiGet<InviteCode[]>('/api/admin/invite-codes'),
           apiGet<AdminUser[]>('/api/admin/users'),
           apiGet<AdminSettings>('/api/admin/settings'),
         ]);
+        if (generation !== loadAdminGenRef.current) return;
         setInvites(inviteData);
         setUsers(userData);
         setAiSettings(settingsData);
@@ -46,6 +55,7 @@ export default function SettingsPage() {
           setProfileRefineDailyLimitInput(String(settingsData.profileRefineDailyLimit));
         }
       } catch (e) {
+        if (generation !== loadAdminGenRef.current) return;
         setError(e instanceof ApiError ? e.message : '加载失败');
       }
     },
@@ -114,27 +124,57 @@ export default function SettingsPage() {
   }, [toast]);
 
   const logout = async () => {
-    await apiPost('/api/auth/logout').catch(() => {});
-    clear();
-    navigate('/login', { replace: true });
+    if (!tryStartPending(pendingActionsRef.current, 'logout')) return;
+    setLoggingOut(true);
+    setError('');
+    try {
+      await performLogout(() => apiPost('/api/auth/logout'), clear);
+      navigate('/login', { replace: true });
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : '退出失败，请检查网络后重试');
+    } finally {
+      finishPending(pendingActionsRef.current, 'logout');
+      setLoggingOut(false);
+    }
   };
 
   const createInvite = async () => {
+    if (!tryStartPending(pendingActionsRef.current, 'create-invite')) return;
+    setCreatingInvite(true);
+    setError('');
     try {
       await apiPost('/api/admin/invite-codes', { note: inviteNote, maxUses: 1 });
       setInviteNote('');
       await loadAdmin();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : '生成失败');
+    } finally {
+      finishPending(pendingActionsRef.current, 'create-invite');
+      setCreatingInvite(false);
     }
   };
 
   const toggleInvite = async (invite: InviteCode) => {
+    const pendingKey = `toggle-invite:${invite.id}`;
+    if (!tryStartPending(pendingActionsRef.current, pendingKey)) return;
+    setPendingInviteIds((current) => {
+      const next = new Set(current);
+      next.add(invite.id);
+      return next;
+    });
+    setError('');
     try {
       await apiPut(`/api/admin/invite-codes/${invite.id}`, { disabled: !invite.disabled });
       await loadAdmin();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : '操作失败');
+    } finally {
+      finishPending(pendingActionsRef.current, pendingKey);
+      setPendingInviteIds((current) => {
+        const next = new Set(current);
+        next.delete(invite.id);
+        return next;
+      });
     }
   };
 
@@ -154,6 +194,14 @@ export default function SettingsPage() {
       setError('每日上限需为 1-10000 的整数');
       return;
     }
+    const pendingKey = `save-limit:${u.id}`;
+    if (!tryStartPending(pendingActionsRef.current, pendingKey)) return;
+    setPendingLimitIds((current) => {
+      const next = new Set(current);
+      next.add(u.id);
+      return next;
+    });
+    setError('');
     try {
       await apiPut(`/api/admin/users/${u.id}`, { dailyMessageLimit: value });
       setLimitEdits((prev) => {
@@ -164,6 +212,13 @@ export default function SettingsPage() {
       await loadAdmin();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : '保存失败');
+    } finally {
+      finishPending(pendingActionsRef.current, pendingKey);
+      setPendingLimitIds((current) => {
+        const next = new Set(current);
+        next.delete(u.id);
+        return next;
+      });
     }
   };
 
@@ -180,8 +235,8 @@ export default function SettingsPage() {
           登录邮箱：<strong>{user?.email}</strong>
           {isAdmin && <span className="badge badge-primary settings-admin-badge">管理员</span>}
         </p>
-        <button className="btn btn-danger-ghost" onClick={() => void logout()}>
-          退出登录
+        <button className="btn btn-danger-ghost" disabled={loggingOut} onClick={() => void logout()}>
+          {loggingOut ? '退出中…' : '退出登录'}
         </button>
       </div>
 
@@ -291,8 +346,8 @@ export default function SettingsPage() {
                 placeholder="备注（给谁用，可留空）"
                 maxLength={50}
               />
-              <button className="btn btn-primary" onClick={() => void createInvite()}>
-                生成邀请码
+              <button className="btn btn-primary" disabled={creatingInvite} onClick={() => void createInvite()}>
+                {creatingInvite ? '生成中…' : '生成邀请码'}
               </button>
             </div>
             {invites.length === 0 ? (
@@ -331,8 +386,12 @@ export default function SettingsPage() {
                           )}
                         </td>
                         <td>
-                          <button className="btn btn-sm" onClick={() => void toggleInvite(inv)}>
-                            {inv.disabled ? '启用' : '停用'}
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => void toggleInvite(inv)}
+                            disabled={pendingInviteIds.has(inv.id)}
+                          >
+                            {pendingInviteIds.has(inv.id) ? '处理中…' : inv.disabled ? '启用' : '停用'}
                           </button>
                         </td>
                       </tr>
@@ -371,15 +430,16 @@ export default function SettingsPage() {
                           value={limitEdits[u.id] ?? String(u.daily_message_limit)}
                           onChange={(e) => setLimitEdits((prev) => ({ ...prev, [u.id]: e.target.value }))}
                           inputMode="numeric"
+                          disabled={pendingLimitIds.has(u.id)}
                         />
                       </td>
                       <td>
                         <button
                           className="btn btn-sm"
                           onClick={() => void saveLimit(u)}
-                          disabled={limitEdits[u.id] === undefined}
+                          disabled={limitEdits[u.id] === undefined || pendingLimitIds.has(u.id)}
                         >
-                          保存
+                          {pendingLimitIds.has(u.id) ? '保存中…' : '保存'}
                         </button>
                       </td>
                     </tr>

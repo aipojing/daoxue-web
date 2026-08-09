@@ -4,8 +4,9 @@
  */
 function parseUtc(ts: string): Date | null {
   if (!ts) return null;
-  const iso = ts.includes('T') ? ts : `${ts.replace(' ', 'T')}Z`;
-  const d = new Date(iso.endsWith('Z') ? iso : `${iso}Z`);
+  const iso = ts.includes('T') ? ts : ts.replace(' ', 'T');
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso);
+  const d = new Date(hasTimezone ? iso : `${iso}Z`);
   return Number.isNaN(d.getTime()) ? null : d;
 }
 

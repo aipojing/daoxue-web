@@ -4,6 +4,7 @@ import { localToday } from '../lib/datetime';
 
 interface Props {
   card: MistakeCard;
+  busy?: boolean;
   onAction: (card: MistakeCard, action: 'pass' | 'fail') => void;
   onDelete: (card: MistakeCard) => void;
 }
@@ -17,7 +18,7 @@ function parseTags(raw: string): string[] {
   }
 }
 
-export default function MistakeCardItem({ card, onAction, onDelete }: Props) {
+export default function MistakeCardItem({ card, busy = false, onAction, onDelete }: Props) {
   const [expanded, setExpanded] = useState(false);
   const tags = parseTags(card.error_tags);
   const isDue = card.review_status === 'pending' && card.next_review_date <= localToday();
@@ -91,15 +92,15 @@ export default function MistakeCardItem({ card, onAction, onDelete }: Props) {
           <div className="mistake-actions">
             {card.review_status === 'pending' && (
               <>
-                <button className="btn btn-sm btn-success" onClick={() => onAction(card, 'pass')}>
+                <button className="btn btn-sm btn-success" disabled={busy} onClick={() => onAction(card, 'pass')}>
                   ✓ 复测通过
                 </button>
-                <button className="btn btn-sm" onClick={() => onAction(card, 'fail')}>
+                <button className="btn btn-sm" disabled={busy} onClick={() => onAction(card, 'fail')}>
                   ✗ 未通过（顺延 3 天）
                 </button>
               </>
             )}
-            <button className="btn btn-sm btn-danger-ghost" onClick={() => onDelete(card)}>
+            <button className="btn btn-sm btn-danger-ghost" disabled={busy} onClick={() => onDelete(card)}>
               删除
             </button>
           </div>

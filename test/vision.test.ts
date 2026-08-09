@@ -1,10 +1,15 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   getVisionConfig,
   validateImageDataUrl,
   buildVisionRequestBody,
   parseVisionResponse,
+  transcribeImage,
 } from '../src/worker/chat/vision';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('getVisionConfig', () => {
   it('未配置 Key 返回 null', () => {
@@ -88,5 +93,26 @@ describe('buildVisionRequestBody / parseVisionResponse', () => {
         choices: [{ message: { content: '<think>先看图里的数字</think>题目：1/2 + 1/3 = ?' } }],
       }),
     ).toBe('题目：1/2 + 1/3 = ?');
+  });
+});
+
+describe('transcribeImage', () => {
+  it('视觉服务长时无响应时主动超时', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+        }),
+      ),
+    );
+
+    await expect(
+      transcribeImage(
+        { apiKey: 'key', url: 'https://vision.example.test', model: 'vision' },
+        'data:image/png;base64,AAAA',
+        5,
+      ),
+    ).rejects.toThrow('超时');
   });
 });

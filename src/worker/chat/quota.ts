@@ -52,6 +52,108 @@ export async function checkAndIncrementQuota(
   return row ? { allowed: true, used: row.message_count } : { allowed: false, used: limit };
 }
 
+function quotaReservationStatement(
+  db: D1Database,
+  userId: number,
+  today: string,
+  limit: number,
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO usage_log (user_id, date, message_count)
+       SELECT ?1, ?2, 1 WHERE ?3 >= 1
+       ON CONFLICT(user_id, date) DO UPDATE SET message_count = message_count + 1
+         WHERE ?3 >= 1 AND message_count < ?3
+       RETURNING message_count`,
+    )
+    .bind(userId, today, limit);
+}
+
+/** 原子地占额度并插入 user 消息，避免 Worker 中断落下“已扣费但无请求记录”的窗口。 */
+export async function reserveQuotaAndInsertChatMessage(
+  db: D1Database,
+  args: {
+    userId: number;
+    limit: number;
+    today: string;
+    conversationId: number;
+    content: string;
+    clientRequestId: string | null;
+  },
+): Promise<number | null> {
+  const [, messageResult] = await db.batch([
+    quotaReservationStatement(db, args.userId, args.today, args.limit),
+    db
+      .prepare(
+        `INSERT INTO messages
+           (conversation_id, role, content, client_request_id, quota_charged)
+         SELECT ?, 'user', ?, ?, 1 WHERE changes() = 1
+         RETURNING id`,
+      )
+      .bind(args.conversationId, args.content, args.clientRequestId),
+  ]);
+  return (messageResult?.results as Array<{ id: number }> | undefined)?.[0]?.id ?? null;
+}
+
+/** 已有 user 消息的恢复调用：只在额度成功预占时将持久化状态改为 charged。 */
+export async function reserveQuotaForExistingChatMessage(
+  db: D1Database,
+  args: { userId: number; limit: number; today: string; messageId: number },
+): Promise<boolean> {
+  const [messageResult, quotaResult] = await db.batch([
+    db
+      .prepare(
+        `UPDATE messages SET quota_charged = 1
+         WHERE id = ?1 AND quota_charged = 0 AND ?2 >= 1
+           AND COALESCE((
+             SELECT message_count FROM usage_log WHERE user_id = ?3 AND date = ?4
+           ), 0) < ?2
+         RETURNING id`,
+      )
+      .bind(args.messageId, args.limit, args.userId, args.today),
+    db
+      .prepare(
+        `INSERT INTO usage_log (user_id, date, message_count)
+         SELECT ?1, ?2, 1 WHERE changes() = 1
+         ON CONFLICT(user_id, date) DO UPDATE SET message_count = message_count + 1
+           WHERE message_count < ?3
+         RETURNING message_count`,
+      )
+      .bind(args.userId, args.today, args.limit),
+  ]);
+  return (
+    !!(messageResult?.results as Array<{ id: number }> | undefined)?.[0] &&
+    !!(quotaResult?.results as Array<{ message_count: number }> | undefined)?.[0]
+  );
+}
+
+/** 退款与 request 状态在同一事务中更新，恢复调用可据此决定是否重新占额度。 */
+export async function refundChatMessageQuota(
+  db: D1Database,
+  userId: number,
+  today: string,
+  messageId: number,
+): Promise<void> {
+  try {
+    await db.batch([
+      db
+        .prepare(
+          `UPDATE usage_log SET message_count = message_count - 1
+           WHERE user_id = ? AND date = ? AND message_count > 0`,
+        )
+        .bind(userId, today),
+      db
+        .prepare(
+          `UPDATE messages SET quota_charged = 0
+           WHERE id = ? AND quota_charged = 1 AND changes() = 1`,
+        )
+        .bind(messageId),
+    ]);
+  } catch (e) {
+    console.error('refund chat quota failed:', e);
+  }
+}
+
 /** 上游调用失败时退还额度，避免服务故障期间白扣 */
 export async function refundQuota(db: D1Database, userId: number, today: string): Promise<void> {
   try {

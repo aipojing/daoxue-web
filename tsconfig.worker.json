@@ -11,5 +11,5 @@
     "isolatedModules": true,
     "types": ["@cloudflare/workers-types"]
   },
-  "include": ["src/worker/**/*.ts", "test/**/*.ts"]
+  "include": ["src/worker/**/*.ts"]
 }

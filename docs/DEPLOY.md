@@ -14,10 +14,13 @@
 
 ```bash
 cd daoxue-web
+nvm use  # 使用项目要求的 Node.js 22
 
-# 1. 自检：类型 + 测试必须全过
-npm run typecheck
+# 1. 自检：测试、构建、全部依赖审计与 Worker 打包必须全过
 npm test
+npm run build
+npm audit
+npx wrangler deploy --dry-run --outdir .wrangler/dry-run
 
 # 2. 如果改了 migrations/ 下的文件，先应用到线上库
 npx wrangler d1 migrations apply daoxue-db --remote
@@ -28,12 +31,19 @@ npm run deploy
 
 发布成功会输出线上地址和 Version ID。**改动会立即生效**（全球边缘节点约 30 秒内同步完成）。
 
+仓库的 GitHub Actions 会在 push 和 pull request 时执行同一套门禁。`wrangler deploy --dry-run`
+只验证生产 Worker 能否正确打包，不会部署、不会读取或修改远程 D1；只有显式运行上面的
+`d1 migrations apply --remote` 和最后的 `npm run deploy` 才会改变线上状态。
+
 浏览器看不到新版本时，强制刷新：Mac `Cmd + Shift + R`，Windows `Ctrl + F5`。
 
 ### 发布前检查清单
 
 - [ ] `npm test` 全绿
-- [ ] `npm run typecheck` 无报错
+- [ ] `npm run build` 无报错
+- [ ] `npm audit` 无已知依赖漏洞
+- [ ] `wrangler deploy --dry-run` 无配置或打包告警
+- [ ] GitHub Actions CI 全绿
 - [ ] 本地 `npm run dev:worker` 跑通改动涉及的页面
 - [ ] 改了数据库结构 → 新建了 migration 文件（不要改已应用过的旧文件）
 - [ ] 没有把 API Key 写进代码（`.dev.vars` 已 gitignore）

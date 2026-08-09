@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { apiGet, apiPut, apiDelete, ApiError } from '../api';
 import { SUBJECTS, SUBJECT_NAMES, type MistakeCard, type ConversationSubject } from '../types';
 import MistakeCardItem from '../components/MistakeCardItem';
 import { IconNotebook } from '../components/icons';
+import { finishPending, tryStartPending } from '../lib/chat';
 
 export default function MistakesPage() {
   const { studentId } = useParams();
@@ -11,39 +12,59 @@ export default function MistakesPage() {
   const [subjectFilter, setSubjectFilter] = useState<ConversationSubject | null>(null);
   const [statusFilter, setStatusFilter] = useState<'pending' | 'passed' | null>('pending');
   const [error, setError] = useState('');
+  const [pendingCardIds, setPendingCardIds] = useState<Set<number>>(() => new Set());
+  const loadGenRef = useRef(0);
+  const pendingCardIdsRef = useRef(new Set<number>());
+  const latestLoadRef = useRef<() => Promise<void>>(async () => {});
 
   const load = useCallback(async () => {
+    const gen = ++loadGenRef.current;
     try {
       const params = new URLSearchParams();
       if (subjectFilter) params.set('subject', subjectFilter);
       if (statusFilter) params.set('status', statusFilter);
       const qs = params.toString();
-      setCards(await apiGet<MistakeCard[]>(`/api/students/${studentId}/mistake-cards${qs ? `?${qs}` : ''}`));
+      const next = await apiGet<MistakeCard[]>(`/api/students/${studentId}/mistake-cards${qs ? `?${qs}` : ''}`);
+      if (gen !== loadGenRef.current) return;
+      setCards(next);
+      setError('');
     } catch (e) {
+      if (gen !== loadGenRef.current) return;
       setError(e instanceof ApiError ? e.message : '加载失败');
     }
   }, [studentId, subjectFilter, statusFilter]);
+  latestLoadRef.current = load;
 
   useEffect(() => {
     void load();
   }, [load]);
 
   const onAction = async (card: MistakeCard, action: 'pass' | 'fail') => {
+    if (!tryStartPending(pendingCardIdsRef.current, card.id)) return;
+    setPendingCardIds(new Set(pendingCardIdsRef.current));
     try {
       await apiPut(`/api/mistake-cards/${card.id}`, { action });
-      await load();
+      await latestLoadRef.current();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : '操作失败');
+    } finally {
+      finishPending(pendingCardIdsRef.current, card.id);
+      setPendingCardIds(new Set(pendingCardIdsRef.current));
     }
   };
 
   const onDelete = async (card: MistakeCard) => {
     if (!window.confirm(`删除错题「${card.title}」？`)) return;
+    if (!tryStartPending(pendingCardIdsRef.current, card.id)) return;
+    setPendingCardIds(new Set(pendingCardIdsRef.current));
     try {
       await apiDelete(`/api/mistake-cards/${card.id}`);
-      await load();
+      await latestLoadRef.current();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : '删除失败');
+    } finally {
+      finishPending(pendingCardIdsRef.current, card.id);
+      setPendingCardIds(new Set(pendingCardIdsRef.current));
     }
   };
 
@@ -131,7 +152,13 @@ export default function MistakesPage() {
       ) : (
         <div className="mistake-list">
           {cards.map((card) => (
-            <MistakeCardItem key={card.id} card={card} onAction={(c, a) => void onAction(c, a)} onDelete={(c) => void onDelete(c)} />
+            <MistakeCardItem
+              key={card.id}
+              card={card}
+              busy={pendingCardIds.has(card.id)}
+              onAction={(c, a) => void onAction(c, a)}
+              onDelete={(c) => void onDelete(c)}
+            />
           ))}
         </div>
       )}
