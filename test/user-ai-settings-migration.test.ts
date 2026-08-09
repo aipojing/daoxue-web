@@ -17,6 +17,7 @@ const MIGRATIONS = [
   '0007_chat_request_id.sql',
   '0008_chat_request_recovery.sql',
   '0009_user_ai_settings.sql',
+  '0010_user_profile_refine_settings.sql',
 ] as const;
 
 function runSql(dbPath: string, sql: string): string {
@@ -70,6 +71,8 @@ describe('0009 user_ai_settings 迁移', () => {
         'vision_key_tail',
         'vision_provider',
         'vision_model',
+        'profile_refine_interval_minutes',
+        'profile_refine_daily_limit',
         'encryption_version',
         'updated_at',
       ]),
@@ -154,5 +157,95 @@ describe('0009 user_ai_settings 迁移', () => {
       "SELECT value FROM app_settings WHERE key = 'shared_ai_fallback_enabled';",
     );
     expect(setting[0]?.value).toBe('0');
+  });
+});
+
+describe('0010 账户级画像提炼设置迁移', () => {
+  it('新列使用 10 分钟与每日不限作为默认值，并拒绝越界写入', () => {
+    const dbPath = freshDatabase();
+    runSql(dbPath, `INSERT INTO user_ai_settings (user_id) VALUES (1);`);
+
+    expect(
+      queryJson<{
+        profile_refine_interval_minutes: number;
+        profile_refine_daily_limit: number;
+      }>(
+        dbPath,
+        `SELECT profile_refine_interval_minutes, profile_refine_daily_limit
+         FROM user_ai_settings WHERE user_id = 1;`,
+      ),
+    ).toEqual([{ profile_refine_interval_minutes: 10, profile_refine_daily_limit: 0 }]);
+
+    expect(() =>
+      runSql(
+        dbPath,
+        `UPDATE user_ai_settings SET profile_refine_interval_minutes = 0 WHERE user_id = 1;`,
+      ),
+    ).toThrow(/CHECK constraint failed/);
+    expect(() =>
+      runSql(
+        dbPath,
+        `UPDATE user_ai_settings SET profile_refine_daily_limit = 1001 WHERE user_id = 1;`,
+      ),
+    ).toThrow(/CHECK constraint failed/);
+  });
+
+  it('保留 0009 的个人密文、视觉配置和旧全站画像键', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'daoxue-user-ai-upgrade-'));
+    tempDirs.push(dir);
+    const dbPath = join(dir, 'test.sqlite3');
+    applyMigrations(dbPath, MIGRATIONS.slice(0, -1));
+    runSql(
+      dbPath,
+      `INSERT INTO users (id, email, password_hash) VALUES (1, 'user-a@example.com', 'hash');
+       INSERT INTO user_ai_settings (
+         user_id, deepseek_key_ciphertext, deepseek_key_iv, deepseek_key_tail,
+         vision_key_ciphertext, vision_key_iv, vision_key_tail, vision_provider, vision_model
+       ) VALUES (
+         1, 'deep-cipher', 'deep-iv', 'tail',
+         'vision-cipher', 'vision-iv', 'vail', 'dashscope', 'qwen-vl-plus'
+       );
+       INSERT INTO app_settings (key, value) VALUES
+         ('profile_refine_interval_minutes', '30'),
+         ('profile_refine_daily_limit', '2');`,
+    );
+
+    applyMigrations(dbPath, ['0010_user_profile_refine_settings.sql']);
+
+    expect(
+      queryJson<Record<string, string | number>>(
+        dbPath,
+        `SELECT deepseek_key_ciphertext, deepseek_key_iv, deepseek_key_tail,
+                vision_key_ciphertext, vision_key_iv, vision_key_tail,
+                vision_provider, vision_model,
+                profile_refine_interval_minutes, profile_refine_daily_limit
+         FROM user_ai_settings WHERE user_id = 1;`,
+      ),
+    ).toEqual([
+      {
+        deepseek_key_ciphertext: 'deep-cipher',
+        deepseek_key_iv: 'deep-iv',
+        deepseek_key_tail: 'tail',
+        vision_key_ciphertext: 'vision-cipher',
+        vision_key_iv: 'vision-iv',
+        vision_key_tail: 'vail',
+        vision_provider: 'dashscope',
+        vision_model: 'qwen-vl-plus',
+        profile_refine_interval_minutes: 10,
+        profile_refine_daily_limit: 0,
+      },
+    ]);
+    expect(
+      queryJson<{ key: string; value: string }>(
+        dbPath,
+        `SELECT key, value FROM app_settings
+         WHERE key IN ('profile_refine_interval_minutes', 'profile_refine_daily_limit')
+         ORDER BY key;`,
+      ),
+    ).toEqual([
+      { key: 'profile_refine_daily_limit', value: '2' },
+      { key: 'profile_refine_interval_minutes', value: '30' },
+    ]);
+    expect(queryJson(dbPath, 'PRAGMA foreign_key_check;')).toEqual([]);
   });
 });
