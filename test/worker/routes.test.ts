@@ -1093,6 +1093,19 @@ describe('用户 AI 设置', () => {
       await api('/api/admin/settings', {}, admin.cookie),
     );
     expect(initial.data?.sharedFallbackEnabled).toBe(false);
+    expect(initial.data).not.toHaveProperty('profileRefineIntervalMinutes');
+    expect(initial.data).not.toHaveProperty('profileRefineDailyLimit');
+
+    const legacyProfileUpdate = await api('/api/admin/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ profileRefineIntervalMinutes: 30 }),
+    }, admin.cookie);
+    expect(legacyProfileUpdate.status).toBe(400);
+    expect(
+      await env.DB.prepare(
+        `SELECT value FROM app_settings WHERE key = 'profile_refine_interval_minutes'`,
+      ).first(),
+    ).toBeNull();
 
     const first = await api('/api/admin/settings', {
       method: 'PUT',

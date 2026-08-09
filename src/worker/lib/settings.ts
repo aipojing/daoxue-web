@@ -5,8 +5,6 @@ export const SETTING_KEYS = {
   visionApiKey: 'vision_api_key',
   visionApiUrl: 'vision_api_url',
   visionModel: 'vision_model',
-  profileRefineIntervalMinutes: 'profile_refine_interval_minutes',
-  profileRefineDailyLimit: 'profile_refine_daily_limit',
   /** 管理员显式控制的站点共享兜底开关；'1' 允许无个人 Key 的用户使用共享服务 */
   sharedAIFallbackEnabled: 'shared_ai_fallback_enabled',
 } as const;
