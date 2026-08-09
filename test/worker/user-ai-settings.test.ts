@@ -33,7 +33,14 @@ describe('resolveUserAIConfig 优先级', () => {
   it('个人 Key 优先于共享 Key，且只在本人账户生效', async () => {
     await insertUser(1, 'user-a@example.com');
     await insertUser(2, 'user-b@example.com');
-    await setSetting(env.DB, SETTING_KEYS.deepseekApiKey, 'sk-shared');
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'sk-shared')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')`,
+      ),
+    ]);
     await saveUserAISettings(env.DB, env.AI_SETTINGS_ENCRYPTION_KEY!, 1, {
       deepseekApiKey: 'sk-user-a',
     });
@@ -50,7 +57,14 @@ describe('resolveUserAIConfig 优先级', () => {
   it('关闭共享兜底后未配置个人 Key 的用户来源为 none', async () => {
     await insertUser(1, 'user-a@example.com');
     await insertUser(2, 'user-b@example.com');
-    await setSetting(env.DB, SETTING_KEYS.deepseekApiKey, 'sk-shared');
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'sk-shared')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')`,
+      ),
+    ]);
     await saveUserAISettings(env.DB, env.AI_SETTINGS_ENCRYPTION_KEY!, 1, {
       deepseekApiKey: 'sk-user-a',
     });
@@ -66,6 +80,26 @@ describe('resolveUserAIConfig 优先级', () => {
     // 兜底关闭不影响已有个人 Key 的账户
     const userA = await resolveUserAIConfig(env.DB, env, 1);
     expect(userA.deepseekSource).toBe('personal');
+  });
+
+  it('兜底开关记录缺失时按关闭处理（fail closed）', async () => {
+    await insertUser(1, 'user-a@example.com');
+    // 只有共享 Key、没有任何开关记录（模拟记录被误删或读取异常返回空配置）
+    await setSetting(env.DB, SETTING_KEYS.deepseekApiKey, 'sk-shared');
+
+    const resolved = await resolveUserAIConfig(env.DB, env, 1);
+    expect(resolved.deepseekSource).toBe('none');
+    expect(resolved.deepseekKey).toBe('');
+    expect(resolved.vision).toBeNull();
+    expect(resolved.visionSource).toBe('none');
+
+    // 开关记录缺失不影响个人 Key，也不会让共享 Key 被误用
+    await saveUserAISettings(env.DB, env.AI_SETTINGS_ENCRYPTION_KEY!, 1, {
+      deepseekApiKey: 'sk-user-a',
+    });
+    const withPersonal = await resolveUserAIConfig(env.DB, env, 1);
+    expect(withPersonal.deepseekSource).toBe('personal');
+    expect(withPersonal.deepseekKey).toBe('sk-user-a');
   });
 
   it('个人密文损坏时 fail closed，不回退共享 Key', async () => {
@@ -114,9 +148,14 @@ describe('resolveUserAIConfig 优先级', () => {
 
   it('没有个人视觉 Key 时按兜底开关使用或拒绝共享视觉服务', async () => {
     await insertUser(1, 'user-a@example.com');
-    await env.DB.prepare(
-      `INSERT INTO app_settings (key, value) VALUES ('vision_api_key', 'vk-shared')`,
-    ).run();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('vision_api_key', 'vk-shared')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')`,
+      ),
+    ]);
 
     const withFallback = await resolveUserAIConfig(env.DB, env, 1);
     expect(withFallback.visionSource).toBe('shared');
@@ -128,12 +167,21 @@ describe('resolveUserAIConfig 优先级', () => {
     expect(withoutFallback.vision).toBeNull();
   });
 
-  it('复用调用方已读取的 app_settings，不重复查询', async () => {
+  it('复用调用方已读取的 app_settings，不再次查询数据库', async () => {
     await insertUser(1, 'user-a@example.com');
-    const appSettings = { [SETTING_KEYS.deepseekApiKey]: 'sk-shared' };
+    const appSettings = {
+      [SETTING_KEYS.deepseekApiKey]: 'sk-shared',
+      [SETTING_KEYS.sharedAIFallbackEnabled]: '1',
+    };
     const resolved = await resolveUserAIConfig(env.DB, env, 1, appSettings);
     expect(resolved.deepseekSource).toBe('shared');
     expect(resolved.deepseekKey).toBe('sk-shared');
+
+    // 调用方传入的配置缺少开关记录时同样按关闭处理
+    const withoutToggle = await resolveUserAIConfig(env.DB, env, 1, {
+      [SETTING_KEYS.deepseekApiKey]: 'sk-shared',
+    });
+    expect(withoutToggle.deepseekSource).toBe('none');
   });
 });
 
@@ -195,7 +243,14 @@ describe('getUserAISettingsStatus', () => {
   it('反映个人/共享/未配置三种生效来源', async () => {
     await insertUser(1, 'user-a@example.com');
     const masterKey = env.AI_SETTINGS_ENCRYPTION_KEY!;
-    await setSetting(env.DB, SETTING_KEYS.deepseekApiKey, 'sk-shared');
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'sk-shared')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')`,
+      ),
+    ]);
 
     let status = await getUserAISettingsStatus(env.DB, env, 1);
     expect(status.effective).toMatchObject({

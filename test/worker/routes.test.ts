@@ -411,6 +411,7 @@ describe('资源归属、局部更新与聊天额度', () => {
     const conversation = (await json<{ id: number }>(conversationResponse)).data!;
     await env.DB.batch([
       env.DB.prepare("INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'test-key')"),
+      env.DB.prepare("INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')"),
       env.DB.prepare('UPDATE users SET daily_message_limit = 1 WHERE id = ?').bind(admin.body.data!.id),
       env.DB.prepare(
         'INSERT INTO usage_log (user_id, date, message_count) VALUES (?, ?, 1)',
@@ -441,9 +442,14 @@ describe('资源归属、局部更新与聊天额度', () => {
       method: 'POST', body: JSON.stringify({ subject: 'math' }),
     }, admin.cookie);
     const conversation = (await json<{ id: number }>(conversationResponse)).data!;
-    await env.DB.prepare(
-      `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'test-key')`,
-    ).run();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'test-key')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')`,
+      ),
+    ]);
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('上游失败', { status: 500 })));
 
     const response = await api(`/api/conversations/${conversation.id}/chat`, {
@@ -472,6 +478,9 @@ describe('资源归属、局部更新与聊天额度', () => {
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'test-key')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')`,
       ),
       env.DB.prepare(
         `INSERT INTO student_profiles (student_id, subject, profile_text)
@@ -509,6 +518,9 @@ describe('资源归属、局部更新与聊天额度', () => {
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'test-key')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')`,
       ),
       env.DB.prepare(
         `INSERT INTO student_profiles (student_id, subject, profile_text)
@@ -560,6 +572,9 @@ describe('资源归属、局部更新与聊天额度', () => {
         `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'test-key')`,
       ),
       env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')`,
+      ),
+      env.DB.prepare(
         `INSERT INTO student_profiles (student_id, subject, profile_text)
          VALUES (?, 'math', '已有画像')`,
       ).bind(student.id),
@@ -609,6 +624,9 @@ describe('资源归属、局部更新与聊天额度', () => {
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'test-key')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')`,
       ),
       env.DB.prepare(
         `INSERT INTO student_profiles (student_id, subject, profile_text)
@@ -803,6 +821,9 @@ describe('错题本与自学路由', () => {
       env.DB.prepare(
         `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'test-key')`,
       ),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')`,
+      ),
     ]);
     const assistant = await env.DB.prepare(
       `SELECT id FROM messages WHERE conversation_id = ? AND role = 'assistant'`,
@@ -992,18 +1013,19 @@ describe('用户 AI 设置', () => {
       body: JSON.stringify({ sharedFallbackEnabled: false }),
     }, member.cookie)).status).toBe(403);
 
+    // 测试库未执行迁移种子行，开关记录缺失时按关闭处理（生产由 migration 种子为开启）
     const initial = await json<{ sharedFallbackEnabled: boolean }>(
       await api('/api/admin/settings', {}, admin.cookie),
     );
-    expect(initial.data?.sharedFallbackEnabled).toBe(true);
+    expect(initial.data?.sharedFallbackEnabled).toBe(false);
 
     const first = await api('/api/admin/settings', {
       method: 'PUT',
-      body: JSON.stringify({ sharedFallbackEnabled: false }),
+      body: JSON.stringify({ sharedFallbackEnabled: true }),
     }, admin.cookie);
     const second = await api('/api/admin/settings', {
       method: 'PUT',
-      body: JSON.stringify({ sharedFallbackEnabled: false }),
+      body: JSON.stringify({ sharedFallbackEnabled: true }),
     }, admin.cookie);
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
@@ -1011,16 +1033,16 @@ describe('用户 AI 设置', () => {
     const after = await json<{ sharedFallbackEnabled: boolean }>(
       await api('/api/admin/settings', {}, admin.cookie),
     );
-    expect(after.data?.sharedFallbackEnabled).toBe(false);
+    expect(after.data?.sharedFallbackEnabled).toBe(true);
 
     await api('/api/admin/settings', {
       method: 'PUT',
-      body: JSON.stringify({ sharedFallbackEnabled: true }),
+      body: JSON.stringify({ sharedFallbackEnabled: false }),
     }, admin.cookie);
-    const reenabled = await json<{ sharedFallbackEnabled: boolean }>(
+    const disabled = await json<{ sharedFallbackEnabled: boolean }>(
       await api('/api/admin/settings', {}, admin.cookie),
     );
-    expect(reenabled.data?.sharedFallbackEnabled).toBe(true);
+    expect(disabled.data?.sharedFallbackEnabled).toBe(false);
   });
 
   it('保存或清除后立即返回最新生效来源', async () => {
@@ -1090,9 +1112,12 @@ describe('账户级 AI 调用链', () => {
   it('无个人 Key 且兜底开启时使用共享 Key', async () => {
     const admin = await createAdmin();
     const { conversation } = await createStudentAndConversation(admin.cookie);
-    await env.DB.prepare(
-      `INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'sk-shared')`,
-    ).run();
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'sk-shared')`),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')`,
+      ),
+    ]);
     const upstream = vi.fn().mockImplementation(async () =>
       new Response('data: {"choices":[{"delta":{"content":"答案"}}]}\n\ndata: [DONE]\n\n', { status: 200 }),
     );
@@ -1258,6 +1283,9 @@ describe('账户级 AI 调用链', () => {
     await env.DB.batch([
       env.DB.prepare(`INSERT INTO app_settings (key, value) VALUES ('deepseek_api_key', 'sk-shared')`),
       env.DB.prepare(`INSERT INTO app_settings (key, value) VALUES ('vision_api_key', 'vk-shared')`),
+      env.DB.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('shared_ai_fallback_enabled', '1')`,
+      ),
     ]);
     const me = async () =>
       (await json<{

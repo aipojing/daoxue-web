@@ -99,9 +99,14 @@ async function decryptPresentKey(
   }
 }
 
-/** 兜底默认开启（迁移种子值为 '1'），只有管理员显式写入 '0' 才关闭。 */
+/**
+ * 共享兜底只有管理员显式写入 '1' 才开启（fail closed）：
+ * 记录被误删、读取异常返回空配置等任何"取值不确定"的情况都按关闭处理，
+ * 避免在管理员不知情时消耗站点共享 Key 的费用。
+ * 生产首启不断流：migration 0009 会种子写入 '1'。
+ */
 export function isSharedFallbackEnabled(settings: Record<string, string>): boolean {
-  return settings[SETTING_KEYS.sharedAIFallbackEnabled] !== '0';
+  return settings[SETTING_KEYS.sharedAIFallbackEnabled] === '1';
 }
 
 function resolveFromParts(
