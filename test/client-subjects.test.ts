@@ -3,11 +3,14 @@ import { SUBJECTS, SUBJECT_NAMES, SUBJECT_COLORS, isSubject, splitRegion } from 
 import * as clientTypes from '../src/client/types';
 
 describe('client subjects', () => {
-  it('将化学作为第五个完整学科', () => {
-    expect(SUBJECTS).toEqual(['math', 'chinese', 'physics', 'english', 'chemistry']);
+  it('将历史作为第六个完整学科', () => {
+    expect(SUBJECTS).toEqual(['math', 'chinese', 'physics', 'english', 'chemistry', 'history']);
     expect(SUBJECT_NAMES.chemistry).toBe('化学');
     expect(SUBJECT_COLORS.chemistry).toBe('#7b4f8c');
     expect(isSubject('chemistry')).toBe(true);
+    expect(SUBJECT_NAMES.history).toBe('历史');
+    expect(SUBJECT_COLORS.history).toBe('#8a5a44');
+    expect(isSubject('history')).toBe(true);
   });
 
   it('继续拒绝未知学科和自学代码', () => {

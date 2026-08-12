@@ -29,16 +29,18 @@ describe('buildSystemPrompt', () => {
 
 describe('subjects', () => {
   it('学科枚举与名称一致', () => {
-    expect(SUBJECTS).toEqual(['math', 'chinese', 'physics', 'english', 'chemistry']);
+    expect(SUBJECTS).toEqual(['math', 'chinese', 'physics', 'english', 'chemistry', 'history']);
     expect(SUBJECT_NAMES.math).toBe('数学');
     expect(SUBJECT_NAMES.english).toBe('英语');
     expect(SUBJECT_NAMES.chemistry).toBe('化学');
+    expect(SUBJECT_NAMES.history).toBe('历史');
   });
 
   it('isSubject 校验', () => {
     expect(isSubject('math')).toBe(true);
     expect(isSubject('physics')).toBe(true);
     expect(isSubject('chemistry')).toBe(true);
+    expect(isSubject('history')).toBe(true);
     expect(isSubject('biology')).toBe(false);
     expect(isSubject('')).toBe(false);
   });
@@ -54,5 +56,17 @@ describe('subjects', () => {
     expect(prompt).toContain('full_solution');
     expect(prompt).toContain('【当前只需要完成的一步】');
     expect(prompt).toContain('危险、有毒、强腐蚀或产生有害气体');
+  });
+
+  it('历史提示词包含核心导学约束', () => {
+    const prompt = getBasePrompt('history');
+    expect(prompt).toContain('校内历史独立版');
+    expect(prompt).toContain('定时空');
+    expect(prompt).toContain('观点—证据—解释');
+    expect(prompt).toContain('史料性质');
+    expect(prompt).toContain('guided');
+    expect(prompt).toContain('full_solution');
+    expect(prompt).toContain('五个失分定位维度');
+    expect(prompt).toContain('不编造人物、年代、事件、出处、数据和引文');
   });
 });
