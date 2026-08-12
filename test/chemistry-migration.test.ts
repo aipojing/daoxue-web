@@ -17,6 +17,8 @@ const MIGRATIONS = [
   '0007_chat_request_id.sql',
   '0008_chat_request_recovery.sql',
   '0009_user_ai_settings.sql',
+  '0010_user_profile_refine_settings.sql',
+  '0011_add_history_subject.sql',
 ] as const;
 
 function runSql(dbPath: string, sql: string): string {
