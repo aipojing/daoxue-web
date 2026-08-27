@@ -62,6 +62,8 @@ describe('客户端关键交互结构', () => {
     expect(adminCatalogSource).toContain('服务商与模型目录');
     expect(adminCatalogSource).toContain('Base URL');
     expect(adminCatalogSource).toContain('停用');
+    expect(adminCatalogSource).toContain('lifecycleRef.current.activate()');
+    expect(adminCatalogSource).toContain('lifecycleRef.current.cleanup()');
   });
 
   it('课件设置逐项管理异步请求、预览和错误关联', () => {

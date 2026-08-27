@@ -7,10 +7,9 @@ const source = readFileSync(
 );
 
 describe('courseware AI administrator atomic SQL', () => {
-  it('guards endpoint protocol changes in the UPDATE statement that performs the write', () => {
+  it('guards immutable endpoint identity in the UPDATE statement that performs the write', () => {
     const statement = source.match(/`UPDATE ai_provider_endpoints[\s\S]*?RETURNING id`/)?.[0] ?? '';
-    expect(statement).toContain('NOT EXISTS');
-    expect(statement).toContain('ai_models');
+    expect(statement).toMatch(/provider_id\s*=\s*\?/);
     expect(statement).toMatch(/capability\s*=\s*\?/);
     expect(statement).toMatch(/adapter_type\s*=\s*\?/);
   });

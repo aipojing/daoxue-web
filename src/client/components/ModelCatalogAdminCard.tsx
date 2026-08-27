@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost, apiPut, ApiError } from '../api';
+import { CatalogAdminLoadLifecycle } from '../lib/catalog-admin-lifecycle';
 
 type Capability = 'structured_text' | 'speech_synthesis' | 'image_generation';
 type AdapterType = 'openai_text' | 'token_plan_tts' | 'token_plan_image';
@@ -129,40 +130,35 @@ export default function ModelCatalogAdminCard() {
   const [providerNames, setProviderNames] = useState<Record<number, string>>({});
   const [endpointDraft, setEndpointDraft] = useState<EndpointDraft>(EMPTY_ENDPOINT);
   const [modelDraft, setModelDraft] = useState<ModelDraft>(EMPTY_MODEL);
-  const requestRef = useRef<AbortController | null>(null);
-  const loadVersionRef = useRef(0);
-  const mountedRef = useRef(true);
+  const lifecycleRef = useRef(new CatalogAdminLoadLifecycle());
 
   const load = useCallback(async () => {
-    requestRef.current?.abort();
-    const controller = new AbortController();
-    requestRef.current = controller;
-    const version = ++loadVersionRef.current;
+    const request = lifecycleRef.current.begin();
     setLoading(true);
     setError('');
     try {
       const [nextStatus, nextProviders] = await Promise.all([
-        apiGet<FeatureStatus>('/api/admin/courseware/status', { signal: controller.signal }),
-        apiGet<CatalogProvider[]>('/api/admin/ai-catalog/providers', { signal: controller.signal }),
+        apiGet<FeatureStatus>('/api/admin/courseware/status', { signal: request.controller.signal }),
+        apiGet<CatalogProvider[]>('/api/admin/ai-catalog/providers', { signal: request.controller.signal }),
       ]);
-      if (!mountedRef.current || controller.signal.aborted || version !== loadVersionRef.current) return;
+      if (!lifecycleRef.current.isCurrent(request)) return;
       setStatus(nextStatus);
       setProviders(nextProviders);
       setProviderNames(Object.fromEntries(nextProviders.map((provider) => [provider.id, provider.displayName])));
       setEndpointDraft((current) => current.providerId ? current : { ...current, providerId: nextProviders[0]?.id ?? 0 });
     } catch (caught) {
-      if (!mountedRef.current || controller.signal.aborted || version !== loadVersionRef.current) return;
+      if (!lifecycleRef.current.isCurrent(request)) return;
       setError(errorMessage(caught, '目录加载失败，请稍后重试'));
     } finally {
-      if (mountedRef.current && version === loadVersionRef.current) setLoading(false);
+      if (lifecycleRef.current.isCurrent(request)) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    lifecycleRef.current.activate();
     void load();
     return () => {
-      mountedRef.current = false;
-      requestRef.current?.abort();
+      lifecycleRef.current.cleanup();
     };
   }, [load]);
 
@@ -173,13 +169,13 @@ export default function ModelCatalogAdminCard() {
     setNotice('');
     try {
       await action();
-      if (!mountedRef.current) return;
+      if (!lifecycleRef.current.isActive()) return;
       setNotice(success);
       await load();
     } catch (caught) {
-      if (mountedRef.current) setError(errorMessage(caught, '保存失败，请检查输入后重试'));
+      if (lifecycleRef.current.isActive()) setError(errorMessage(caught, '保存失败，请检查输入后重试'));
     } finally {
-      if (mountedRef.current) setPending(false);
+      if (lifecycleRef.current.isActive()) setPending(false);
     }
   };
 
@@ -310,7 +306,7 @@ export default function ModelCatalogAdminCard() {
             <form className="catalog-admin-form" aria-describedby={error ? 'catalog-admin-error' : undefined} onSubmit={(event) => { event.preventDefault(); void saveEndpoint(); }}>
               <h3>{endpointDraft.id === null ? '添加端点' : '编辑端点'}</h3>
               <label htmlFor="catalog-endpoint-provider">服务商</label>
-              <select id="catalog-endpoint-provider" value={endpointDraft.providerId} onChange={(event) => setEndpointDraft((draft) => ({ ...draft, providerId: Number(event.target.value) }))} required disabled={pending}>
+              <select id="catalog-endpoint-provider" value={endpointDraft.providerId} onChange={(event) => setEndpointDraft((draft) => ({ ...draft, providerId: Number(event.target.value) }))} required disabled={pending || endpointDraft.id !== null}>
                 <option value={0}>请选择服务商</option>
                 {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.displayName}</option>)}
               </select>
@@ -318,7 +314,7 @@ export default function ModelCatalogAdminCard() {
               <select id="catalog-endpoint-capability" value={endpointDraft.capability} onChange={(event) => {
                 const capability = event.target.value as Capability;
                 setEndpointDraft((draft) => ({ ...draft, capability, adapterType: adapterForCapability[capability] }));
-              }} disabled={pending}>
+              }} disabled={pending || endpointDraft.id !== null}>
                 {(Object.keys(capabilityLabel) as Capability[]).map((capability) => <option key={capability} value={capability}>{capabilityLabel[capability]}</option>)}
               </select>
               <label htmlFor="catalog-endpoint-url">Base URL</label>
@@ -328,7 +324,7 @@ export default function ModelCatalogAdminCard() {
                 <input id="catalog-media-suffixes" value={endpointDraft.mediaHostSuffixes} onChange={(event) => setEndpointDraft((draft) => ({ ...draft, mediaHostSuffixes: event.target.value }))} placeholder="media.example.com, cdn.example.com" required disabled={pending} />
               </>}
               <label className="catalog-inline-checkbox"><input type="checkbox" checked={endpointDraft.enabled} onChange={(event) => setEndpointDraft((draft) => ({ ...draft, enabled: event.target.checked }))} disabled={pending} />启用端点</label>
-              <p className="form-hint">适配器：{endpointDraft.adapterType}。媒体域名使用小写 DNS 后缀，以英文逗号分隔。</p>
+              <p className="form-hint">适配器：{endpointDraft.adapterType}。媒体域名使用小写 DNS 后缀，以英文逗号分隔。编辑已有端点时，服务商、能力和适配器不可更改。</p>
               <button type="submit" className="btn" disabled={pending || endpointDraft.providerId === 0}>{endpointDraft.id === null ? '添加端点' : '保存端点'}</button>
             </form>
           </div>

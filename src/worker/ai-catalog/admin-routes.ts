@@ -6,9 +6,10 @@ import { ok, err } from '../lib/envelope';
 import {
   adminEndpointSchema,
   adminModelConfigSchema,
+  normalizeAdminEndpointUrl,
   validateModelConfig,
 } from './validation';
-import { COMPILED_ADAPTER_TYPES } from '../courseware/adapters/registry';
+import { getCompiledAdapter, type AdapterType } from '../courseware/adapters/registry';
 import { getCoursewareFeatureStatus, setCoursewareFeatureEnabled } from './feature-settings';
 
 const providerCreateSchema = z
@@ -51,12 +52,6 @@ const modelSchema = z
   })
   .strict();
 
-const ADAPTER_CAPABILITY = {
-  openai_text: 'structured_text',
-  token_plan_tts: 'speech_synthesis',
-  token_plan_image: 'image_generation',
-} as const satisfies Record<(typeof COMPILED_ADAPTER_TYPES)[number], AICapability>;
-
 interface ProviderRow {
   id: number;
   slug: string;
@@ -68,7 +63,7 @@ interface EndpointRow {
   id: number;
   provider_id: number;
   capability: AICapability;
-  adapter_type: keyof typeof ADAPTER_CAPABILITY;
+  adapter_type: AdapterType;
   base_url: string;
   config_json: string;
   enabled: number;
@@ -142,7 +137,7 @@ function resourceId(value: string): number | null {
 
 interface EndpointProtocol {
   capability: AICapability;
-  adapterType: keyof typeof ADAPTER_CAPABILITY;
+  adapterType: AdapterType;
 }
 
 async function endpointProtocol(
@@ -154,7 +149,7 @@ async function endpointProtocol(
     .bind(endpointId)
     .first<{
       capability: AICapability;
-      adapter_type: keyof typeof ADAPTER_CAPABILITY;
+      adapter_type: AdapterType;
     }>();
   return endpoint
     ? { capability: endpoint.capability, adapterType: endpoint.adapter_type }
@@ -277,9 +272,7 @@ adminAICatalogRoutes.put('/providers/:id', async (c) => {
 adminAICatalogRoutes.post('/endpoints', async (c) => {
   const parsed = adminEndpointSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
-  if (ADAPTER_CAPABILITY[parsed.data.adapterType] !== parsed.data.capability) {
-    return err(c, '适配器能力与端点能力不匹配');
-  }
+  const baseUrl = normalizeAdminEndpointUrl(parsed.data.baseUrl);
   const provider = await c.env.DB.prepare('SELECT id FROM ai_providers WHERE id = ?')
     .bind(parsed.data.providerId)
     .first<{ id: number }>();
@@ -294,7 +287,7 @@ adminAICatalogRoutes.post('/endpoints', async (c) => {
         parsed.data.providerId,
         parsed.data.capability,
         parsed.data.adapterType,
-        parsed.data.baseUrl,
+        baseUrl,
         JSON.stringify(parsed.data.config),
         parsed.data.enabled ? 1 : 0,
       )
@@ -309,49 +302,40 @@ adminAICatalogRoutes.put('/endpoints/:id', async (c) => {
   if (!id) return err(c, '端点不存在', 404);
   const parsed = adminEndpointSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
-  if (ADAPTER_CAPABILITY[parsed.data.adapterType] !== parsed.data.capability) {
-    return err(c, '适配器能力与端点能力不匹配');
+  const existing = await c.env.DB.prepare(
+    'SELECT provider_id, capability, adapter_type FROM ai_provider_endpoints WHERE id = ?',
+  ).bind(id).first<{ provider_id: number; capability: AICapability; adapter_type: AdapterType }>();
+  if (!existing) return err(c, '端点不存在', 404);
+  if (existing.provider_id !== parsed.data.providerId ||
+      existing.capability !== parsed.data.capability ||
+      existing.adapter_type !== parsed.data.adapterType) {
+    return err(c, '端点所属服务商、能力和适配器创建后不可更改', 409);
   }
-  const provider = await c.env.DB.prepare('SELECT id FROM ai_providers WHERE id = ?')
-    .bind(parsed.data.providerId)
-    .first<{ id: number }>();
-  if (!provider) return err(c, '服务商不存在', 404);
+  const baseUrl = normalizeAdminEndpointUrl(parsed.data.baseUrl);
   const endpoint = await catalogWrite(() =>
     c.env.DB.prepare(
       `UPDATE ai_provider_endpoints
-       SET provider_id = ?, capability = ?, adapter_type = ?, base_url = ?,
-           config_json = ?, enabled = ?, updated_at = datetime('now')
-       WHERE id = ?
-         AND (
-           (capability = ? AND adapter_type = ?)
-           OR NOT EXISTS (
-             SELECT 1 FROM ai_models m WHERE m.endpoint_id = ai_provider_endpoints.id
-           )
-         )
+       SET base_url = ?, config_json = ?, enabled = ?, updated_at = datetime('now')
+       WHERE id = ? AND provider_id = ? AND capability = ? AND adapter_type = ?
        RETURNING id`,
     )
       .bind(
-        parsed.data.providerId,
-        parsed.data.capability,
-        parsed.data.adapterType,
-        parsed.data.baseUrl,
+        baseUrl,
         JSON.stringify(parsed.data.config),
         parsed.data.enabled ? 1 : 0,
         id,
-        parsed.data.capability,
-        parsed.data.adapterType,
+        existing.provider_id,
+        existing.capability,
+        existing.adapter_type,
       )
       .first<{ id: number }>(),
   );
   if (endpoint === UNIQUE_CONFLICT) return err(c, '相同能力的适配器端点已存在', 409);
   if (!endpoint) {
-    const stillExists = await c.env.DB.prepare(
-      'SELECT id FROM ai_provider_endpoints WHERE id = ?',
-    )
-      .bind(id)
-      .first<{ id: number }>();
+    const stillExists = await c.env.DB.prepare('SELECT id FROM ai_provider_endpoints WHERE id = ?')
+      .bind(id).first<{ id: number }>();
     return stillExists
-      ? err(c, '已有模型的端点不能更改能力或适配器', 409)
+      ? err(c, '端点所属服务商、能力和适配器创建后不可更改', 409)
       : err(c, '端点不存在', 404);
   }
   return ok(c, endpoint);
@@ -362,7 +346,7 @@ adminAICatalogRoutes.post('/models', async (c) => {
   if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
   const protocol = await endpointProtocol(c.env.DB, parsed.data.endpointId);
   if (!protocol) return err(c, '端点不存在', 404);
-  if (ADAPTER_CAPABILITY[protocol.adapterType] !== protocol.capability) {
+  if (getCompiledAdapter(protocol.adapterType).capability !== protocol.capability) {
     return err(c, '目标端点协议配置不一致', 409);
   }
   const validatedConfig = validateModelConfig(protocol.capability, parsed.data.config);
@@ -405,7 +389,7 @@ adminAICatalogRoutes.put('/models/:id', async (c) => {
   if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
   const protocol = await endpointProtocol(c.env.DB, parsed.data.endpointId);
   if (!protocol) return err(c, '端点不存在', 404);
-  if (ADAPTER_CAPABILITY[protocol.adapterType] !== protocol.capability) {
+  if (getCompiledAdapter(protocol.adapterType).capability !== protocol.capability) {
     return err(c, '目标端点协议配置不一致', 409);
   }
   const validatedConfig = validateModelConfig(protocol.capability, parsed.data.config);

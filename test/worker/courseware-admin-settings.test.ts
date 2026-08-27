@@ -1,5 +1,6 @@
 import { env, exports } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { resolvePreference, saveUserModelPreferences } from '../../src/worker/ai-catalog/repository';
 
 interface Envelope<T> {
   success: boolean;
@@ -140,6 +141,121 @@ describe('courseware catalog administration', () => {
       api('/api/admin/courseware/status', { method: 'PUT', body: JSON.stringify({ enabled: true, extra: true }) }, admin.cookie),
     ]);
     expect(responses.map((response) => response.status)).toEqual([400, 400, 400]);
+  });
+
+  it('normalizes only query-free and fragment-free public endpoint URLs before storing them', async () => {
+    const admin = await createAdmin();
+    const provider = await createProvider('task-12-normalize');
+    const created = await api('/api/admin/ai-catalog/endpoints', {
+      method: 'POST', body: JSON.stringify({
+        providerId: provider, capability: 'structured_text', adapterType: 'openai_text',
+        baseUrl: 'https://catalog.example./v1', config: {}, enabled: true,
+      }),
+    }, admin.cookie);
+    expect(created.status).toBe(200);
+    const endpointId = (await json<{ id: number }>(created)).data?.id;
+    const storedCreate = await env.DB.prepare('SELECT base_url FROM ai_provider_endpoints WHERE id = ?')
+      .bind(endpointId).first<{ base_url: string }>();
+    expect(storedCreate?.base_url).toBe('https://catalog.example/v1');
+
+    const updated = await api(`/api/admin/ai-catalog/endpoints/${endpointId}`, {
+      method: 'PUT', body: JSON.stringify({
+        providerId: provider, capability: 'structured_text', adapterType: 'openai_text',
+        baseUrl: 'https://catalog.example./v2', config: {}, enabled: false,
+      }),
+    }, admin.cookie);
+    expect(updated.status).toBe(200);
+    const storedUpdate = await env.DB.prepare('SELECT base_url FROM ai_provider_endpoints WHERE id = ?')
+      .bind(endpointId).first<{ base_url: string }>();
+    expect(storedUpdate?.base_url).toBe('https://catalog.example/v2');
+
+    for (const baseUrl of [
+      'https://catalog.example/v1?target=https://private.example',
+      'https://catalog.example/v1#fragment',
+      'https://user:pass@catalog.example/v1',
+      'https://catalog.example/v1%2Fprivate',
+    ]) {
+      const response = await api('/api/admin/ai-catalog/endpoints', {
+        method: 'POST', body: JSON.stringify({
+          providerId: await createProvider(`task-12-url-${crypto.randomUUID()}`), capability: 'structured_text',
+          adapterType: 'openai_text', baseUrl, config: {}, enabled: true,
+        }),
+      }, admin.cookie);
+      expect(response.status).toBe(400);
+    }
+  });
+
+  it('rejects literal and malformed media suffixes on the matching TTS and image protocol paths', async () => {
+    const admin = await createAdmin();
+    const invalidSuffixes = ['*.example.com', '8.8.8.8', '127.0.0.1', '2001:4860:4860::8888', 'Media.Example.com'];
+    for (const [index, suffix] of invalidSuffixes.entries()) {
+      const imageResponse = await api('/api/admin/ai-catalog/endpoints', {
+        method: 'POST', body: JSON.stringify({
+          providerId: await createProvider(`task-12-image-suffix-${index}`), capability: 'image_generation', adapterType: 'token_plan_image',
+          baseUrl: 'https://catalog.example/api/v1/services/aigc/multimodal-generation/generation',
+          config: { mediaHostSuffixes: [suffix] }, enabled: true,
+        }),
+      }, admin.cookie);
+      const ttsResponse = await api('/api/admin/ai-catalog/endpoints', {
+        method: 'POST', body: JSON.stringify({
+          providerId: await createProvider(`task-12-tts-suffix-${index}`), capability: 'speech_synthesis', adapterType: 'token_plan_tts',
+          baseUrl: 'https://catalog.example/api/v1/services/audio/tts/SpeechSynthesizer',
+          config: { mediaHostSuffixes: [suffix] }, enabled: true,
+        }),
+      }, admin.cookie);
+      expect(imageResponse.status).toBe(400);
+      expect(ttsResponse.status).toBe(400);
+    }
+  });
+
+  it('keeps endpoint identity stable while allowing an endpoint configuration update', async () => {
+    const admin = await createAdmin();
+    const provider = await createProvider('task-12-identity-a');
+    const otherProvider = await createProvider('task-12-identity-b');
+    const created = await api('/api/admin/ai-catalog/endpoints', {
+      method: 'POST', body: JSON.stringify({
+        providerId: provider, capability: 'structured_text', adapterType: 'openai_text',
+        baseUrl: 'https://identity.example/v1', config: { allowCustomModelId: true }, enabled: true,
+      }),
+    }, admin.cookie);
+    const endpointId = (await json<{ id: number }>(created)).data?.id;
+    await saveUserModelPreferences(env.DB, admin.body.data?.id ?? 0, {
+      preferences: [{
+        purpose: 'courseware_text', endpointId: endpointId ?? 0, modelCatalogId: null,
+        customModelId: 'private-history-model', voiceId: '', params: {},
+      }],
+    });
+    const changedIdentity = await api(`/api/admin/ai-catalog/endpoints/${endpointId}`, {
+      method: 'PUT', body: JSON.stringify({
+        providerId: otherProvider, capability: 'structured_text', adapterType: 'openai_text',
+        baseUrl: 'https://identity.example/v2', config: { allowCustomModelId: true }, enabled: true,
+      }),
+    }, admin.cookie);
+    expect(changedIdentity.status).toBe(409);
+    const changedProtocol = await api(`/api/admin/ai-catalog/endpoints/${endpointId}`, {
+      method: 'PUT', body: JSON.stringify({
+        providerId: provider, capability: 'speech_synthesis', adapterType: 'token_plan_tts',
+        baseUrl: 'https://identity.example/api/v1/services/audio/tts/SpeechSynthesizer',
+        config: { mediaHostSuffixes: ['media.example'] }, enabled: true,
+      }),
+    }, admin.cookie);
+    expect(changedProtocol.status).toBe(409);
+    expect(await resolvePreference(env.DB, admin.body.data?.id ?? 0, 'courseware_text')).toMatchObject({
+      endpointId,
+      modelId: 'private-history-model',
+      capability: 'structured_text',
+    });
+    const updated = await api(`/api/admin/ai-catalog/endpoints/${endpointId}`, {
+      method: 'PUT', body: JSON.stringify({
+        providerId: provider, capability: 'structured_text', adapterType: 'openai_text',
+        baseUrl: 'https://identity.example/v2', config: { allowCustomModelId: false }, enabled: false,
+      }),
+    }, admin.cookie);
+    expect(updated.status).toBe(200);
+    const stored = await env.DB.prepare(
+      'SELECT provider_id, capability, adapter_type, base_url, enabled FROM ai_provider_endpoints WHERE id = ?',
+    ).bind(endpointId).first<{ provider_id: number; capability: string; adapter_type: string; base_url: string; enabled: number }>();
+    expect(stored).toEqual({ provider_id: provider, capability: 'structured_text', adapter_type: 'openai_text', base_url: 'https://identity.example/v2', enabled: 0 });
   });
 
   it('forbids non-administrators from catalog and rollout mutations', async () => {
