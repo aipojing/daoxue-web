@@ -2,6 +2,8 @@ import { memo, useState } from 'react';
 import MarkdownContent from './MarkdownContent';
 import ErrorBoundary from './ErrorBoundary';
 import { IconSpark, IconNotebook } from './icons';
+import CoursewareDraftCard from './CoursewareDraftCard';
+import type { SelfLearnCoursewareDraft } from '../types';
 
 interface Props {
   role: 'user' | 'assistant';
@@ -11,9 +13,13 @@ interface Props {
   messageId?: number;
   onSaveMistake?: (messageId: number) => void;
   saveState?: 'idle' | 'saving' | 'saved';
+  coursewareDraft?: SelfLearnCoursewareDraft;
+  studentId?: number;
+  sourceConversationId?: number;
 }
 
-function MessageBubble({ role, content, reasoning, streaming, messageId, onSaveMistake, saveState }: Props) {
+function MessageBubble({ role, content, reasoning, streaming, messageId, onSaveMistake, saveState,
+  coursewareDraft, studentId, sourceConversationId }: Props) {
   const [reasoningOpen, setReasoningOpen] = useState(false);
 
   if (role === 'user') {
@@ -48,6 +54,9 @@ function MessageBubble({ role, content, reasoning, streaming, messageId, onSaveM
           !reasoning && streaming && <span className="typing-indicator">思考中…</span>
         )}
         {streaming && content && <span className="cursor-blink">▍</span>}
+        {!streaming && coursewareDraft && studentId && sourceConversationId && (
+          <CoursewareDraftCard studentId={studentId} sourceConversationId={sourceConversationId} draft={coursewareDraft} />
+        )}
         {!streaming && content && messageId !== undefined && onSaveMistake && (
           <div className="bubble-actions">
             <button

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useOutletContext, useParams } from 'react-router-dom';
+import { Link, useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import type { CoursewareDetail } from '../../shared/courseware';
-import { apiGet, ApiError } from '../api';
+import { apiGet, apiPost, ApiError } from '../api';
 import type { StudentWorkspaceContext } from '../components/StudentWorkspaceLayout';
 import CoursewareGenerationStatus from '../components/CoursewareGenerationStatus';
 import CoursewarePlayer from '../components/CoursewarePlayer';
@@ -10,6 +10,7 @@ import { isTerminalCoursewareLoadStatus } from '../lib/courseware-player';
 
 export default function CoursewarePlayerPage() {
   const { studentId, coursewareId } = useParams();
+  const navigate = useNavigate();
   const { student } = useOutletContext<StudentWorkspaceContext>();
   const [courseware, setCourseware] = useState<CoursewareDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -18,12 +19,23 @@ export default function CoursewarePlayerPage() {
   const [routeToken, setRouteToken] = useState(0);
   const [routeSignal, setRouteSignal] = useState<AbortSignal>(() => new AbortController().signal);
   const routeEpochRef = useRef(0);
+  const assessmentPendingRef = useRef(false);
+  const assessmentControllerRef = useRef<AbortController | null>(null);
+  const coursewareIdRef = useRef(coursewareId);
+  const [assessmentPending, setAssessmentPending] = useState(false);
+  const [assessmentError, setAssessmentError] = useState('');
 
   const isRouteCurrent = useCallback((token: number) => token === routeEpochRef.current && !routeSignal.aborted, [routeSignal]);
 
   useEffect(() => {
     const parsedId = Number(coursewareId);
     const controller = new AbortController();
+    coursewareIdRef.current = coursewareId;
+    assessmentControllerRef.current?.abort();
+    assessmentControllerRef.current = null;
+    assessmentPendingRef.current = false;
+    setAssessmentPending(false);
+    setAssessmentError('');
     const token = ++routeEpochRef.current;
     let hasLoaded = false;
     let active = false;
@@ -95,6 +107,9 @@ export default function CoursewarePlayerPage() {
       disposed = true;
       routeEpochRef.current += 1;
       controller.abort();
+      assessmentControllerRef.current?.abort();
+      assessmentControllerRef.current = null;
+      assessmentPendingRef.current = false;
       chain.stop();
       window.removeEventListener('focus', onFocus);
     };
@@ -118,6 +133,34 @@ export default function CoursewarePlayerPage() {
   }
 
   const ready = courseware.status === 'ready';
+  const startAssessment = async () => {
+    if (!ready || courseware.id !== Number(coursewareId) || assessmentPendingRef.current) return;
+    const requestedCoursewareId = courseware.id;
+    const controller = new AbortController();
+    assessmentControllerRef.current?.abort();
+    assessmentControllerRef.current = controller;
+    assessmentPendingRef.current = true;
+    setAssessmentPending(true);
+    setAssessmentError('');
+    try {
+      const assessment = await apiPost<{ conversationId: number; requestId: string; starterText: string }>(
+        `/api/coursewares/${courseware.id}/assessment`,
+        undefined,
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted || requestedCoursewareId !== Number(coursewareIdRef.current)) return;
+      navigate(`/students/${studentId}/chat/${assessment.conversationId}`, {
+        state: { starterText: assessment.starterText, requestId: assessment.requestId },
+      });
+    } catch (cause) {
+      if (controller.signal.aborted || requestedCoursewareId !== Number(coursewareIdRef.current)) return;
+      assessmentPendingRef.current = false;
+      setAssessmentPending(false);
+      setAssessmentError(cause instanceof ApiError ? cause.message : '正式测验暂时无法开始，请稍后重试');
+    } finally {
+      if (assessmentControllerRef.current === controller) assessmentControllerRef.current = null;
+    }
+  };
   return (
     <div className="courseware-player-page">
       <nav className="courseware-breadcrumb" aria-label="课件位置">
@@ -171,9 +214,13 @@ export default function CoursewarePlayerPage() {
             <div>
               <p className="courseware-eyebrow">学完以后</p>
               <h2>用一次正式测验巩固知识</h2>
-              <p>正式测验会记录到学习档案。当前版本先完成课件学习，测验入口将在下一步接通。</p>
+              <p>正式测验会在自学会话中一题一答进行，并把结果记录到学习档案。</p>
             </div>
-            <button type="button" className="btn btn-primary" disabled title="正式测验功能即将开放">开始正式测验</button>
+            <div>
+              {assessmentError && <p className="form-error" role="alert">{assessmentError}</p>}
+              <button type="button" className="btn btn-primary" disabled={assessmentPending}
+                onClick={() => void startAssessment()}>{assessmentPending ? '正在进入测验…' : '开始正式测验'}</button>
+            </div>
           </section>
         </>
       )}

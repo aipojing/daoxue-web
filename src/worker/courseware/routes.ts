@@ -23,6 +23,7 @@ import {
   getCoursewareMediaResponse,
   isCoursewareMediaKeyForLogicalKey,
 } from './media';
+import { getOrCreateCoursewareAssessment } from './assessment';
 
 const createSchema = z.object({
   subject: z.string().trim().min(1).max(40),
@@ -282,6 +283,12 @@ coursewareRoutes.get('/:coursewareId/progress', async (c) => {
     checkpointAnswers: parseObject(detail.checkpoint_answers_json),
     updatedAt: isoTimestamp(detail.updated_at),
   });
+});
+
+coursewareRoutes.post('/:coursewareId/assessment', async (c) => {
+  const coursewareId = parseId(c.req.param('coursewareId'));
+  if (!coursewareId) return err(c, '无权访问该课件', 403);
+  return ok(c, await getOrCreateCoursewareAssessment(c.env, c.get('user').id, coursewareId));
 });
 
 coursewareRoutes.patch('/:coursewareId/progress', async (c) => {

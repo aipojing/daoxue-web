@@ -233,6 +233,16 @@ describe('courseware player approved controls and safety', () => {
     expect(vite).toContain("'^/api/'");
   });
 
+  it('aborts assessment requests when the player route changes and rejects stale results', () => {
+    const page = readFileSync(new URL('../src/client/pages/CoursewarePlayerPage.tsx', import.meta.url), 'utf8');
+    const cleanup = page.match(/return \(\) => \{\n\s+disposed = true;[\s\S]*?\n\s+};/)?.[0] ?? '';
+    const startAssessment = page.match(/const startAssessment = async \(\) => \{[\s\S]*?\n\s+};/)?.[0] ?? '';
+    expect(cleanup).toContain('assessmentControllerRef.current?.abort()');
+    expect(cleanup).toContain('assessmentControllerRef.current = null');
+    expect(startAssessment).toContain('{ signal: controller.signal }');
+    expect(startAssessment).toContain('requestedCoursewareId !== Number(coursewareIdRef.current)');
+  });
+
   it('does not generate or POST from the alternate explanation path', () => {
     const player = readFileSync(new URL('../src/client/components/CoursewarePlayer.tsx', import.meta.url), 'utf8');
     const handler = player.match(/const playAlternate[\s\S]*?\n\s*};/)?.[0] ?? '';

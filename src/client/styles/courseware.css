@@ -20,6 +20,13 @@
 .courseware-form-wide { grid-column: 1 / -1; }
 .courseware-image-toggle { min-height: 44px; display: flex !important; align-items: center; gap: 9px; padding-top: 5px; }
 .courseware-image-toggle input { width: 20px; height: 20px; flex: 0 0 auto; }
+.courseware-draft-card { margin-top: 16px; padding: 18px; border: 1px solid var(--line); background: var(--paper-warm, #f8f4e8); }
+.courseware-draft-card h3 { margin: 4px 0 12px; font-family: var(--font-display); }
+.courseware-draft-card dl { display: grid; gap: 8px; margin: 0 0 12px; }
+.courseware-draft-card dl div { display: grid; grid-template-columns: 72px 1fr; gap: 8px; }
+.courseware-draft-card dt { color: var(--text-secondary); }
+.courseware-draft-card dd { margin: 0; }
+.courseware-draft-card .btn { margin-top: 10px; }
 .courseware-form-actions { display: flex; justify-content: flex-end; }
 .courseware-form-actions .btn { min-height: 44px; }
 .courseware-library { margin-top: 24px; padding: 24px; }

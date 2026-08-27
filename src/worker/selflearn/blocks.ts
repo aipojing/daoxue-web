@@ -1,5 +1,56 @@
 import { z } from 'zod';
 
+export const COURSEWARE_TASK_MARKER = '【语音课件任务】';
+
+const unsafeCoursewareValue = /https?:\/\/|javascript:|<\/?[a-z][^>]*>|[\w.+-]+@[\w.-]+\.[a-z]{2,}|(?:\+?86[- ]?)?1[3-9]\d{9}|服务商|模型|音色|密钥|姓名|名字|联系方式|联系电话|手机号|邮箱|电子邮件|\b(?:api[_ -]?key|base[_ -]?url|user[_ -]?id|student[_ -]?id|provider|model|voice)\b/i;
+const safeDraftText = (maximum: number) => z.string().trim().min(1).max(maximum)
+  .refine((value) => !unsafeCoursewareValue.test(value), '课件任务包含不安全配置');
+
+const selfLearnCoursewareDraftSchema = z.object({
+  subject: safeDraftText(40),
+  topic: safeDraftText(80),
+  learningGoal: safeDraftText(240),
+  sourceText: safeDraftText(2_000),
+}).strict();
+
+export interface SelfLearnCoursewareDraft {
+  subject: string;
+  topic: string;
+  learningGoal: string;
+  sourceText: string;
+}
+
+export function parseStoredCoursewareDraft(raw: string): SelfLearnCoursewareDraft | null {
+  if (!raw) return null;
+  try {
+    const parsed = selfLearnCoursewareDraftSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+export function extractCoursewareDraft(text: string): {
+  visibleText: string;
+  draft: SelfLearnCoursewareDraft | null;
+} {
+  const firstMarker = text.indexOf(COURSEWARE_TASK_MARKER);
+  if (firstMarker < 0) return { visibleText: text, draft: null };
+  // Even a partial or malformed machine suffix is never persisted or returned to message history.
+  const visibleText = text.slice(0, firstMarker).trimEnd();
+  const secondMarker = text.indexOf(COURSEWARE_TASK_MARKER, firstMarker + COURSEWARE_TASK_MARKER.length);
+  if (secondMarker >= 0) return { visibleText, draft: null };
+  const suffix = text.slice(firstMarker + COURSEWARE_TASK_MARKER.length);
+  const fenced = suffix.match(/^\s*```json[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*\s*$/);
+  if (!fenced?.[1]) return { visibleText, draft: null };
+  try {
+    const parsed = selfLearnCoursewareDraftSchema.safeParse(JSON.parse(fenced[1]));
+    return { visibleText, draft: parsed.success ? parsed.data : null };
+  } catch {
+    return { visibleText, draft: null };
+  }
+}
+
 const TOP_MARKERS = ['【每课输出】', '【每日家长反馈】', '【错题卡】', '【孩子学习画像摘要】'] as const;
 
 export interface SelfLearnBlocks {

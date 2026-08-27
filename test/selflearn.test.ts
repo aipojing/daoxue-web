@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { detectSelfLearnBlocks, parseSelfLearnExtraction } from '../src/worker/selflearn/blocks';
-import { buildSelfLearnMemory } from '../src/worker/selflearn/prompt-builder';
+import { detectSelfLearnBlocks, extractCoursewareDraft, parseSelfLearnExtraction } from '../src/worker/selflearn/blocks';
+import { buildSelfLearnMemory, buildSelfLearnSystemPrompt } from '../src/worker/selflearn/prompt-builder';
 
 describe('detectSelfLearnBlocks', () => {
   it('识别并切出每课输出块（含系统判断与调度指令）', () => {
@@ -130,5 +130,58 @@ describe('buildSelfLearnMemory', () => {
       pendingMistakes: [],
     });
     expect(memory).toContain('暂无');
+  });
+});
+
+describe('selflearn courseware handoff', () => {
+  const draft = {
+    subject: '数学', topic: '一次函数', learningGoal: '能判断一次函数并解释斜率',
+    sourceText: '已经完成前置诊断，整数运算稳定；讲解需先连接正比例函数。',
+  };
+
+  it('leaves the existing OpenMAIC fourth stage unchanged while the flag is off', () => {
+    const base = '第三阶段：拆解知识\n第四阶段：生成 OpenMAIC 提示词并打开 https://open.maic.chat/';
+    const prompt = buildSelfLearnSystemPrompt(base, { name: '小明', grade: '初二', notes: '' }, '暂无', false);
+    expect(prompt).toContain('OpenMAIC');
+    expect(prompt).toContain('https://open.maic.chat/');
+    expect(prompt).not.toContain('本项目语音课件模式');
+  });
+
+  it('appends a higher-priority internal courseware instruction while the flag is on', () => {
+    const prompt = buildSelfLearnSystemPrompt('旧指令包含 OpenMAIC', { name: '小明', grade: '初二', notes: '' }, '暂无', true);
+    expect(prompt).toContain('本项目语音课件模式：已开启');
+    expect(prompt).toContain('第四阶段不要提供 OpenMAIC、外部网址');
+    expect(prompt).toContain('【语音课件任务】');
+    expect(prompt).toContain('课件内的检查不判定 L1-L4');
+  });
+
+  it('accepts exactly one strict final JSON block and strips it from visible markdown', () => {
+    const raw = `课程已经准备好。\n\n【语音课件任务】\n\`\`\`json\n${JSON.stringify(draft)}\n\`\`\``;
+    expect(extractCoursewareDraft(raw)).toEqual({ visibleText: '课程已经准备好。', draft });
+  });
+
+  it('rejects extra fields, unsafe configuration text, multiple blocks, and overlong fields', () => {
+    const blocks = [
+      { ...draft, apiKey: 'secret' },
+      { ...draft, sourceText: '调用 https://provider.example/v1 并使用 API Key secret' },
+      { ...draft, sourceText: '服务商阿里云，模型 qwen，音色 longan，家长邮箱 parent@example.com' },
+      { ...draft, sourceText: '联系电话 13800138000' },
+      { ...draft, topic: '题'.repeat(81) },
+    ];
+    for (const item of blocks) {
+      const raw = `可见说明\n【语音课件任务】\n\`\`\`json\n${JSON.stringify(item)}\n\`\`\``;
+      const parsed = extractCoursewareDraft(raw);
+      expect(parsed.draft).toBeNull();
+      expect(parsed.visibleText).toBe('可见说明');
+      expect(parsed.visibleText).not.toContain('provider.example');
+      expect(parsed.visibleText).not.toContain('secret');
+    }
+    const valid = `说明\n【语音课件任务】\n\`\`\`json\n${JSON.stringify(draft)}\n\`\`\``;
+    expect(extractCoursewareDraft(`${valid}\n${valid}`).draft).toBeNull();
+  });
+
+  it('strips a partial trailing machine block without exposing raw fields', () => {
+    const partial = '给孩子看的说明\n【语音课件任务】\n```json\n{"subject":"数学","sourceText":"Base URL https://secret';
+    expect(extractCoursewareDraft(partial)).toEqual({ visibleText: '给孩子看的说明', draft: null });
   });
 });

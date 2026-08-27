@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  consumeAssessmentRouteState,
+  hideCoursewareMachineBlock,
   isNearBottom,
   isPersistedMessage,
   markPersistedMessages,
@@ -7,10 +9,42 @@ import {
   shouldCommitAssistantMessage,
   subscribeToMobileMediaQuery,
 } from '../src/client/lib/chat';
+import { buildCoursewareDraftCreateRequest } from '../src/client/components/CoursewareDraftCard';
 import type { Message } from '../src/client/types';
 import * as chatHelpers from '../src/client/lib/chat';
 
 describe('client chat helpers', () => {
+  it('hides a complete or partial courseware machine block from the live stream', () => {
+    expect(hideCoursewareMachineBlock('课程准备好了\n【语音课件任务】\n```json\n{"apiKey":"secret"}'))
+      .toBe('课程准备好了');
+    expect(hideCoursewareMachineBlock('普通自学回答')).toBe('普通自学回答');
+  });
+
+  it('consumes valid assessment route state exactly once for the target conversation', () => {
+    const consumed = new Set<string>();
+    const state = {
+      starterText: '已学习一次函数，请开始一题一答正式测验。',
+      requestId: 'courseware-assessment-42',
+    };
+    expect(consumeAssessmentRouteState(state, 9, consumed)).toEqual(state);
+    expect(consumeAssessmentRouteState(state, 9, consumed)).toBeNull();
+    expect(consumeAssessmentRouteState({ ...state, requestId: 'bad external id' }, 9, new Set())).toBeNull();
+  });
+
+  it('builds only an internal sanitized courseware creation request from a draft card', () => {
+    const request = buildCoursewareDraftCreateRequest(7, 11, {
+      subject: '数学', topic: '一次函数', learningGoal: '能判断一次函数', sourceText: '前置诊断摘要',
+    }, true);
+    expect(request).toEqual({
+      path: '/api/students/7/coursewares',
+      body: {
+        subject: '数学', topic: '一次函数', learningGoal: '能判断一次函数', sourceText: '前置诊断摘要',
+        sourceConversationId: 11, includeImages: true,
+      },
+    });
+    expect(JSON.stringify(request)).not.toMatch(/https?:\/\/|apiKey|baseUrl/i);
+  });
+
   it('仅在距离底部小于默认阈值时视为贴底', () => {
     expect(isNearBottom({ scrollHeight: 1000, scrollTop: 670, clientHeight: 200 })).toBe(false);
     expect(isNearBottom({ scrollHeight: 1000, scrollTop: 680, clientHeight: 200 })).toBe(false);

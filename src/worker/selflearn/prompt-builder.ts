@@ -76,6 +76,7 @@ export function buildSelfLearnSystemPrompt(
   basePrompt: string,
   student: { name: string; grade: string; notes: string },
   memory: string,
+  coursewareEnabled = false,
 ): string {
   const studentSection = [
     '## 当前学生',
@@ -85,5 +86,16 @@ export function buildSelfLearnSystemPrompt(
   ];
   if (student.notes) studentSection.push(`- 家长备注：${student.notes}`);
 
-  return [basePrompt.trim(), studentSection.join('\n'), memory].join('\n\n');
+  const coursewareInstruction = coursewareEnabled ? [
+    '【本项目语音课件模式：已开启】',
+    '第四阶段不要提供 OpenMAIC、外部网址、复制粘贴提示词或直接授课。完成任务确认、知识保温和知识拆解后，先用孩子能看懂的话说明课程已经准备好，再在回复末尾输出且只输出一个机器块：',
+    '【语音课件任务】',
+    '```json',
+    '{"subject":"学科或方向","topic":"今日末端知识点","learningGoal":"可观察的完成标准","sourceText":"不超过2000字的前置衔接、保温结果和教学约束摘要"}',
+    '```',
+    '机器块不能包含姓名、联系方式、服务商、模型、Base URL、API Key、HTML 或额外字段。课件内的检查不判定 L1-L4；正式测验仍在本会话一题一答完成。',
+  ].join('\n') : '';
+
+  return [basePrompt.trim(), studentSection.join('\n'), memory, coursewareInstruction]
+    .filter(Boolean).join('\n\n');
 }

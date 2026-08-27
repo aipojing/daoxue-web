@@ -132,4 +132,14 @@ describe('客户端关键交互结构', () => {
     expect(timeline).toContain('visual.altText');
     expect(timeline).not.toContain('dangerouslySetInnerHTML');
   });
+
+  it('自学页只在配置明确关闭时展示旧流程，并区分配置加载失败', () => {
+    const page = clientSource('pages/SelfLearnPage.tsx');
+    const draft = clientSource('components/CoursewareDraftCard.tsx');
+    expect(page).toContain("type CoursewareSettingsState = 'loading' | 'ready' | 'error'");
+    expect(page).toContain("coursewareSettingsState === 'ready' && coursewareSettings?.featureEnabled === false");
+    expect(page).toContain('无法确认语音课件状态');
+    expect(draft).toContain('无法读取课件配置，请重试');
+    expect(draft).not.toContain("reason: '正在读取课件配置'");
+  });
 });

@@ -1,5 +1,34 @@
 import type { Message } from '../types';
 
+const COURSEWARE_TASK_MARKER = '【语音课件任务】';
+
+export function hideCoursewareMachineBlock(text: string): string {
+  const marker = text.indexOf(COURSEWARE_TASK_MARKER);
+  return marker < 0 ? text : text.slice(0, marker).trimEnd();
+}
+
+export interface AssessmentRouteState {
+  starterText: string;
+  requestId: string;
+}
+
+export function consumeAssessmentRouteState(
+  value: unknown,
+  conversationId: number,
+  consumed: Set<string>,
+): AssessmentRouteState | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.starterText !== 'string' || !candidate.starterText.trim()
+      || candidate.starterText.length > 1_000
+      || typeof candidate.requestId !== 'string'
+      || !/^courseware-assessment-[1-9]\d*$/.test(candidate.requestId)) return null;
+  const key = `${conversationId}:${candidate.requestId}`;
+  if (consumed.has(key)) return null;
+  consumed.add(key);
+  return { starterText: candidate.starterText.trim(), requestId: candidate.requestId };
+}
+
 export interface ScrollMetrics {
   scrollHeight: number;
   scrollTop: number;

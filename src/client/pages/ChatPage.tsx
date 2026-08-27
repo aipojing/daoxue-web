@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { apiDelete, apiGet, apiPost, apiPut, streamChatRequest, ApiError } from '../api';
 import { useAuth } from '../AuthContext';
 import {
@@ -8,6 +8,8 @@ import {
   isStreamReconciliationExpired,
   finishPending,
   getOrCreatePendingRequest,
+  consumeAssessmentRouteState,
+  hideCoursewareMachineBlock,
   markPersistedMessages,
   nextStickToBottom,
   resolveChatRequestId,
@@ -62,6 +64,7 @@ const waitForReconciliation = (milliseconds: number) =>
 export default function ChatPage() {
   const { studentId, conversationId } = useParams();
   const [searchParams] = useSearchParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
 
@@ -93,6 +96,7 @@ export default function ChatPage() {
   const mountedRef = useRef(false);
   const restoredRequestRef = useRef<{ content: string; requestId: string } | null>(null);
   const pendingActionsRef = useRef(new Set<string>());
+  const consumedAssessmentRef = useRef(new Set<string>());
   const stickToBottomRef = useRef(true);
   const streamBufRef = useRef({ content: '', reasoning: '' });
   const detailRef = useRef(detail);
@@ -287,13 +291,11 @@ export default function ChatPage() {
     };
   }, [conversationId]);
 
-  const send = async (override?: string) => {
+  const send = async (override?: string, fixedRequestId?: string) => {
     const content = (override ?? input).trim();
     if (isNew || !content || streamingRef.current || !detail) return;
-    const requestId = resolveChatRequestId(
-      restoredRequestRef.current,
-      content,
-      () => crypto.randomUUID(),
+    const requestId = fixedRequestId ?? resolveChatRequestId(
+      restoredRequestRef.current, content, () => crypto.randomUUID(),
     );
     restoredRequestRef.current = null;
     streamingRef.current = true;
@@ -340,7 +342,10 @@ export default function ChatPage() {
         onDelta: (text) => {
           if (controller.signal.aborted) return;
           streamBufRef.current.content += text;
-          setStreaming((prev) => ({ ...prev, content: prev.content + text }));
+          const visible = detail.subject === 'selflearn'
+            ? hideCoursewareMachineBlock(streamBufRef.current.content)
+            : streamBufRef.current.content;
+          setStreaming((prev) => ({ ...prev, content: visible }));
         },
         onReasoning: (text) => {
           if (controller.signal.aborted) return;
@@ -352,7 +357,13 @@ export default function ChatPage() {
           streamingRef.current = false;
           abortRef.current = null;
           setReconcilingStream(false);
-          commitStreamed(messageId);
+          if (detail.subject === 'selflearn') {
+            streamBufRef.current = { content: '', reasoning: '' };
+            setStreaming(IDLE_STREAM);
+            void loadDetail();
+          } else {
+            commitStreamed(messageId);
+          }
           void loadConversations();
         },
         onError: (message, metadata) => {
@@ -444,19 +455,30 @@ export default function ChatPage() {
     );
   };
 
+  useEffect(() => {
+    if (!detail || detail.id !== Number(conversationId)) return;
+    const assessment = consumeAssessmentRouteState(location.state, detail.id, consumedAssessmentRef.current);
+    if (!assessment) return;
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+    void send(assessment.starterText, assessment.requestId);
+    // send is intentionally gated by the consumed set and the synchronous streaming ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId, detail?.id, location.pathname, location.search, location.state, navigate]);
+
   const stopStreaming = () => {
     const { content: text, reasoning } = streamBufRef.current;
     abortRef.current?.abort();
     abortRef.current = null;
     streamingRef.current = false;
     streamBufRef.current = { content: '', reasoning: '' };
-    if (shouldCommitAssistantMessage(text, reasoning)) {
+    const visibleText = detail?.subject === 'selflearn' ? hideCoursewareMachineBlock(text) : text;
+    if (shouldCommitAssistantMessage(visibleText, reasoning)) {
       setMessages((msgs) => [
         ...msgs,
         {
           id: Date.now(),
           role: 'assistant',
-          content: text,
+          content: visibleText,
           reasoning_content: reasoning || null,
           created_at: '',
           persisted: false,
@@ -668,6 +690,9 @@ export default function ChatPage() {
                 messageId={canSaveMistake ? m.id : undefined}
                 onSaveMistake={canSaveMistake ? saveMistake : undefined}
                 saveState={saveStates[m.id] ?? 'idle'}
+                coursewareDraft={m.coursewareDraft}
+                studentId={detail?.studentId}
+                sourceConversationId={detail?.id}
               />
             );
           })}

@@ -29,6 +29,7 @@ import {
   type MemoryKnowledgePoint,
 } from '../selflearn/prompt-builder';
 import { releaseConversationChatLease, tryAcquireConversationChatLease } from './lease';
+import { extractCoursewareDraft, parseStoredCoursewareDraft } from '../selflearn/blocks';
 
 const CONTEXT_MESSAGE_LIMIT = 30;
 const SELFLEARN_CONTEXT_MESSAGE_LIMIT = 40;
@@ -87,7 +88,7 @@ export async function getOwnedConversation(
     .first<OwnedConversation>();
 }
 
-async function buildSelfLearnPrompt(db: D1Database, conv: OwnedConversation): Promise<string> {
+async function buildSelfLearnPrompt(db: D1Database, conv: OwnedConversation, coursewareEnabled: boolean): Promise<string> {
   const [profile, knowledgePoints, instructions, lastReport, pendingMistakes] = await Promise.all([
     db
       .prepare('SELECT profile_text, ready FROM selflearn_profiles WHERE student_id = ?')
@@ -129,6 +130,7 @@ async function buildSelfLearnPrompt(db: D1Database, conv: OwnedConversation): Pr
     getSelfLearnBasePrompt(conv.mode),
     { name: conv.student_name, grade: conv.student_grade, notes: conv.student_notes },
     memory,
+    coursewareEnabled,
   );
 }
 
@@ -187,10 +189,14 @@ conversationRoutes.get('/:id/messages', async (c) => {
   const conv = await getOwnedConversation(c.env.DB, user.id, Number(c.req.param('id')));
   if (!conv) return err(c, '会话不存在', 404);
   const { results } = await c.env.DB.prepare(
-    'SELECT id, role, content, reasoning_content, created_at FROM messages WHERE conversation_id = ? ORDER BY id ASC',
+    `SELECT id, role, content, reasoning_content, courseware_draft_json, created_at
+     FROM messages WHERE conversation_id = ? ORDER BY id ASC`,
   )
     .bind(conv.id)
-    .all();
+    .all<{
+      id: number; role: 'user' | 'assistant'; content: string; reasoning_content: string | null;
+      courseware_draft_json: string; created_at: string;
+    }>();
   return ok(c, {
     conversation: {
       id: conv.id,
@@ -201,7 +207,18 @@ conversationRoutes.get('/:id/messages', async (c) => {
       deepThinking: !!conv.deep_thinking,
       generating: !!conv.generating,
     },
-    messages: results,
+    messages: results.map((message) => {
+      const isCoursewareAssistant = conv.subject === 'selflearn' && message.role === 'assistant';
+      const draft = isCoursewareAssistant ? parseStoredCoursewareDraft(message.courseware_draft_json) : null;
+      return {
+        id: message.id,
+        role: message.role,
+        content: isCoursewareAssistant ? extractCoursewareDraft(message.content).visibleText : message.content,
+        reasoning_content: message.reasoning_content,
+        created_at: message.created_at,
+        ...(draft ? { coursewareDraft: draft } : {}),
+      };
+    }),
   });
 });
 
@@ -379,13 +396,17 @@ conversationRoutes.post('/:id/chat', async (c) => {
 
     const persistAssistant = async () => {
       if (!hasAssistantOutput(acc.content, acc.reasoning) || savedMessageId !== null) return;
+      const courseware = conv.subject === 'selflearn'
+        ? extractCoursewareDraft(acc.content)
+        : { visibleText: acc.content, draft: null };
       const row = await db
         .prepare(
           `INSERT INTO messages
-             (conversation_id, role, content, reasoning_content, client_request_id)
-           VALUES (?, ?, ?, ?, ?) RETURNING id`,
+             (conversation_id, role, content, reasoning_content, client_request_id, courseware_draft_json)
+           VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
         )
-        .bind(conv.id, 'assistant', acc.content, acc.reasoning || null, clientRequestId)
+        .bind(conv.id, 'assistant', courseware.visibleText, acc.reasoning || null, clientRequestId,
+          courseware.draft ? JSON.stringify(courseware.draft) : '')
         .first<{ id: number }>();
       savedMessageId = row?.id ?? null;
       await db
@@ -393,9 +414,9 @@ conversationRoutes.post('/:id/chat', async (c) => {
         .bind(conv.id)
         .run();
 
-      if (acc.content && conv.subject === 'selflearn') {
+      if (courseware.visibleText && conv.subject === 'selflearn') {
         executionCtx.waitUntil(
-          processSelfLearnMessage(db, apiKey, conv.student_id, conv.id, conv.mode, acc.content),
+          processSelfLearnMessage(db, apiKey, conv.student_id, conv.id, conv.mode, courseware.visibleText),
         );
       } else if (acc.content && isSubject(conv.subject)) {
         executionCtx.waitUntil(maybeRefineProfile(db, apiKey, conv.student_id, conv.subject, aiConfig.profileRefine));
@@ -445,7 +466,7 @@ conversationRoutes.post('/:id/chat', async (c) => {
       let systemPrompt: string;
 
       if (isSelfLearn) {
-        systemPrompt = await buildSelfLearnPrompt(db, conv);
+        systemPrompt = await buildSelfLearnPrompt(db, conv, appSettings.courseware_enabled === '1');
       } else {
         if (!isSubject(conv.subject)) {
           await sendError('会话学科数据异常');

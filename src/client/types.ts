@@ -166,6 +166,14 @@ export interface Message {
   reasoning_content: string | null;
   created_at: string;
   persisted?: boolean;
+  coursewareDraft?: SelfLearnCoursewareDraft;
+}
+
+export interface SelfLearnCoursewareDraft {
+  subject: string;
+  topic: string;
+  learningGoal: string;
+  sourceText: string;
 }
 
 export interface ConversationDetail {
