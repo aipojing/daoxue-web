@@ -85,10 +85,7 @@ function CoursewareDeleteModal({
         <h2 id="courseware-delete-title" className="modal-title">
           删除课件
         </h2>
-        <p id="courseware-delete-description">
-          删除「{courseware.title}
-          」会移除这节课件及其已保存的语音和配图媒体，且无法恢复。
-        </p>
+        <p id="courseware-delete-description">删除「{courseware.title}」会移除这节课件及其已保存的语音和配图媒体，且无法恢复。</p>
         <label className="form-label">
           输入课件名称以确认
           <input
@@ -160,8 +157,8 @@ export default function CoursewaresPage() {
   );
   const commitItems = useCallback(
     (next: CoursewareSummary[], wakeOnTransition = true) => {
-      coordinatorRef.current.commit(next, wakeOnTransition);
       itemsRef.current = next;
+      coordinatorRef.current.commit(next, wakeOnTransition);
       setItems(next);
     },
     [],

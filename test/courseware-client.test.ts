@@ -176,4 +176,16 @@ describe('courseware library helpers', () => {
     coordinator.commit([{ ...summary(3, 'ready'), generationStage: 'images' }]); // image retry
     expect(wakes).toBe(4);
   });
+
+  it('updates the external item reference before an idle-to-active wake observes it', () => {
+    let externalItems: CoursewareSummary[] = [];
+    let observedActive = false;
+    const coordinator = new CoursewareItemsCoordinator(() => {
+      observedActive = externalItems.some((item) => shouldPollCourseware(item));
+    });
+    const next = [summary(10, 'queued')];
+    externalItems = next;
+    coordinator.commit(next);
+    expect(observedActive).toBe(true);
+  });
 });
