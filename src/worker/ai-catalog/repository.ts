@@ -683,3 +683,26 @@ export async function recordCredentialHealthForRevision(
     revision.ciphertext, revision.iv, revision.ciphertext, revision.iv).run();
   return result.meta.changes === 1;
 }
+
+export async function reserveConnectionTest(
+  db: D1Database,
+  userId: number,
+  utcDate: string,
+  dailyLimit = 20,
+): Promise<boolean> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(utcDate) ||
+      !Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 20) {
+    throw new UserFacingError('连接测试用量配置无效', 500);
+  }
+  const reserved = await db.prepare(
+    `INSERT INTO ai_connection_test_usage
+       (user_id, utc_date, request_count, updated_at)
+     VALUES (?, ?, 1, datetime('now'))
+     ON CONFLICT(user_id, utc_date) DO UPDATE SET
+       request_count = request_count + 1,
+       updated_at = datetime('now')
+     WHERE request_count < ?
+     RETURNING request_count`,
+  ).bind(userId, utcDate, dailyLimit).first<{ request_count: number }>();
+  return reserved !== null;
+}

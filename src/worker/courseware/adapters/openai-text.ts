@@ -70,7 +70,12 @@ export const openAITextAdapter: TextGenerationAdapter = {
             { role: 'system', content: request.system },
             { role: 'user', content: request.user },
           ],
-          response_format: { type: 'json_object' },
+          ...(request.responseFormat === 'text'
+            ? {}
+            : { response_format: { type: 'json_object' } }),
+          ...(request.maxOutputTokens === undefined
+            ? {}
+            : { max_tokens: request.maxOutputTokens }),
           stream: false,
         }),
         redirect: 'error',

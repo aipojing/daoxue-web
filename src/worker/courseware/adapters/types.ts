@@ -26,6 +26,8 @@ export interface TextGenerationRequest {
   system: string;
   user: string;
   timeoutMs: number;
+  maxOutputTokens?: number;
+  responseFormat?: 'json_object' | 'text';
 }
 
 export interface TextGenerationResult {
