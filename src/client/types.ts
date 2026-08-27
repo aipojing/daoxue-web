@@ -89,6 +89,16 @@ export interface UserAISettings {
   };
 }
 
+export type {
+  AICapability,
+  AIModelOption,
+  AIProviderCatalogItem,
+  AIVoiceOption,
+  CoursewareAISettings,
+  CoursewareModelPreference,
+  CoursewareModelPurpose,
+} from '../shared/ai-catalog';
+
 export interface User {
   id: number;
   email: string;

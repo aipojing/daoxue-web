@@ -1730,6 +1730,159 @@ a {
   margin-top: 6px;
 }
 
+.settings-section {
+  margin-top: 28px;
+}
+
+.section-heading {
+  margin-bottom: 12px;
+}
+
+.section-heading h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 20px;
+  color: var(--board-deep);
+}
+
+.section-heading p {
+  margin: 6px 0 0;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.courseware-settings {
+  border: 1px solid var(--grid);
+  border-radius: 8px;
+  background: var(--paper-card);
+  padding: 18px;
+}
+
+.courseware-settings-section + .courseware-settings-section {
+  border-top: 1px solid var(--grid-soft);
+  margin-top: 22px;
+  padding-top: 22px;
+}
+
+.courseware-settings h3 {
+  margin: 0 0 10px;
+  color: var(--board-deep);
+  font-family: var(--font-display);
+  font-size: 17px;
+}
+
+.courseware-settings label {
+  display: block;
+  margin: 12px 0 5px;
+  color: var(--ink-soft);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.courseware-settings input,
+.courseware-settings select {
+  width: 100%;
+}
+
+.courseware-credential {
+  padding: 14px 0;
+}
+
+.courseware-credential + .courseware-credential {
+  border-top: 1px solid var(--grid-soft);
+}
+
+.courseware-credential-head,
+.courseware-action-row,
+.courseware-save-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.courseware-action-row {
+  margin-top: 10px;
+}
+
+.courseware-save-row {
+  border-top: 1px solid var(--grid);
+  margin-top: 22px;
+  padding-top: 18px;
+}
+
+.courseware-field .form-hint,
+.courseware-settings .form-hint {
+  margin: 5px 0 0;
+}
+
+.courseware-custom-model {
+  margin-top: 12px;
+  padding: 0 0 2px;
+}
+
+.courseware-readiness,
+.courseware-notice,
+.courseware-settings-loading {
+  margin-bottom: 16px;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.courseware-readiness {
+  border-left: 3px solid var(--board);
+  background: var(--board-wash);
+  color: var(--ink);
+}
+
+.courseware-notice {
+  border-left: 3px solid var(--success);
+  background: var(--board-wash);
+  color: var(--board-deep);
+}
+
+.field-error {
+  color: var(--redpen);
+  margin: 8px 0 0;
+  font-size: 14px;
+}
+
+.courseware-preview {
+  border-top: 1px solid var(--grid);
+  margin-top: 22px;
+  padding-top: 18px;
+}
+
+.courseware-preview audio,
+.courseware-preview img {
+  display: block;
+  max-width: 100%;
+}
+
+.courseware-preview img {
+  border: 1px solid var(--grid);
+  border-radius: 8px;
+  max-height: 320px;
+}
+
+@media (max-width: 640px) {
+  .courseware-settings {
+    padding: 14px;
+  }
+
+  .courseware-credential-head,
+  .courseware-action-row,
+  .courseware-save-row {
+    align-items: stretch;
+  }
+
+  .courseware-action-row .btn,
+  .courseware-save-row .btn {
+    width: 100%;
+  }
+}
+
 .settings-toggle-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

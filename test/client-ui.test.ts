@@ -37,4 +37,19 @@ describe('客户端关键交互结构', () => {
     expect(settings).toContain('pendingInviteIds.has(inv.id)');
     expect(settings).toContain('pendingLimitIds.has(u.id)');
   });
+
+  it('AI 设置页挂载独立的语音课件模型工作区', () => {
+    const aiSettingsSource = clientSource('pages/AISettingsPage.tsx');
+    const coursewareSettingsSource = clientSource('components/CoursewareAISettingsCard.tsx');
+
+    expect(aiSettingsSource).toContain('CoursewareAISettingsCard');
+    expect(coursewareSettingsSource).toContain('课件脚本模型');
+    expect(coursewareSettingsSource).toContain('老师语音');
+    expect(coursewareSettingsSource).toContain('AI 同学语音');
+    expect(coursewareSettingsSource).toContain('配图模型（可选）');
+    expect(coursewareSettingsSource).toContain('试听');
+    expect(coursewareSettingsSource).toContain('URL.revokeObjectURL');
+    expect(coursewareSettingsSource).toContain('autoComplete="new-password"');
+    expect(coursewareSettingsSource).not.toContain('baseUrl');
+  });
 });

@@ -3,6 +3,7 @@ import { apiGet, apiPut, ApiError } from '../api';
 import { useAuth } from '../AuthContext';
 import { buildAISettingsPatch, validateProfileRefineSettings } from '../lib/ai-settings';
 import type { AIConfigSource, UserAISettings } from '../types';
+import CoursewareAISettingsCard from '../components/CoursewareAISettingsCard';
 
 function sourceBadge(source: AIConfigSource): JSX.Element {
   const label = source === 'personal' ? '使用个人配置' : source === 'shared' ? '使用站点共享' : '未配置';
@@ -243,6 +244,14 @@ export default function AISettingsPage() {
             {saving ? '保存中…' : '保存我的配置'}
           </button>
         </div>
+      </section>
+
+      <section className="settings-section" aria-labelledby="courseware-ai-title">
+        <div className="section-heading">
+          <h2 id="courseware-ai-title">语音课件模型</h2>
+          <p>分别选择脚本、老师声音、AI 同学声音和可选配图模型。</p>
+        </div>
+        <CoursewareAISettingsCard />
       </section>
 
       {toast && <div className="toast" role="status">{toast}</div>}
