@@ -10,6 +10,7 @@ import {
   CoursewareSettingsWriteTracker,
   mergeCredentialSettings,
   mergePreferenceSettings,
+  shouldClearSettingsSyncStatus,
   modelsForPurpose,
   voicesForModel,
   type CoursewareSelectionDraft,
@@ -326,7 +327,7 @@ export default function CoursewareAISettingsCard() {
       ) {
         setSettings(refreshed);
         if (authoritative) setSyncError('');
-        if (authoritative) setSyncStatus('');
+        if (shouldClearSettingsSyncStatus(settingsWritesRef.current.hasPending())) setSyncStatus('');
       }
     } catch (error) {
       if (
@@ -337,7 +338,9 @@ export default function CoursewareAISettingsCard() {
       ) {
         if (authoritative) {
           setSyncError('设置已保存，但状态同步失败。请重新同步后再确认可用状态。');
+          setSyncStatus('');
         } else {
+          if (shouldClearSettingsSyncStatus(settingsWritesRef.current.hasPending())) setSyncStatus('');
           setErrors((current) => ({ ...current, [errorKey]: '连接已验证，但状态刷新失败，请稍后重试' }));
         }
       }

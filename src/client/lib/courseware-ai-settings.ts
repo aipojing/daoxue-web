@@ -95,6 +95,10 @@ export class CoursewareSettingsReadEpoch {
   }
 }
 
+export function shouldClearSettingsSyncStatus(hasPendingWrites: boolean): boolean {
+  return !hasPendingWrites;
+}
+
 export class CoursewareSettingsWriteTracker {
   private nextId = 1;
   private pending = new Set<number>();

@@ -6,6 +6,7 @@ import {
   CoursewareRequestGuard,
   CoursewareSettingsRevision,
   CoursewareSettingsReadEpoch,
+  shouldClearSettingsSyncStatus,
   CoursewareSettingsWriteTracker,
   mergeCredentialSettings,
   mergePreferenceSettings,
@@ -165,5 +166,10 @@ describe('courseware AI settings client', () => {
 
     expect(reads.isCurrent(authorityA)).toBe(false);
     expect(reads.isCurrent(testReadB)).toBe(true);
+  });
+
+  it('clears a superseded sync status only when no settings write remains pending', () => {
+    expect(shouldClearSettingsSyncStatus(false)).toBe(true);
+    expect(shouldClearSettingsSyncStatus(true)).toBe(false);
   });
 });
