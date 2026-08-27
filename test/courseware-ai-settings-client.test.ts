@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   buildCredentialPatch,
   buildCoursewarePreferences,
+  applyCurrentRequestResult,
+  CoursewareRequestGuard,
   modelsForPurpose,
   type CoursewareSettingsDraft,
 } from '../src/client/lib/courseware-ai-settings';
@@ -70,5 +72,37 @@ describe('courseware AI settings client', () => {
       catalog: customCatalog,
       image: { ...validDraft.image!, modelCatalogId: null, customModelId: 'not-allowed-for-images' },
     })).toThrow('请先选择兼容的模型');
+  });
+
+  it('keeps concurrent provider and voice requests in separate latest-intent scopes', () => {
+    const guard = new CoursewareRequestGuard();
+    const firstProvider = guard.begin('credential-1');
+    const secondProvider = guard.begin('credential-2');
+    const firstTeacherPreview = guard.begin('teacher_tts');
+    const studentPreview = guard.begin('student_tts');
+    const newestTeacherPreview = guard.begin('teacher_tts');
+
+    expect(guard.isCurrent('credential-1', firstProvider)).toBe(true);
+    expect(guard.isCurrent('credential-2', secondProvider)).toBe(true);
+    expect(guard.isCurrent('teacher_tts', firstTeacherPreview)).toBe(false);
+    expect(guard.isCurrent('teacher_tts', newestTeacherPreview)).toBe(true);
+    expect(guard.isCurrent('student_tts', studentPreview)).toBe(true);
+  });
+
+  it('invalidates every outstanding result after disposal', () => {
+    const guard = new CoursewareRequestGuard();
+    const token = guard.begin('image');
+    guard.dispose();
+    expect(guard.isCurrent('image', token)).toBe(false);
+  });
+
+  it('never applies a returned media result after disposal', () => {
+    const guard = new CoursewareRequestGuard();
+    const token = guard.begin('image');
+    let createdUrls = 0;
+    guard.dispose();
+
+    expect(applyCurrentRequestResult(guard, 'image', token, () => { createdUrls += 1; })).toBe(false);
+    expect(createdUrls).toBe(0);
   });
 });

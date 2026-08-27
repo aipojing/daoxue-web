@@ -23,6 +23,45 @@ export interface CoursewareSettingsDraft {
   catalog: AIProviderCatalogItem[];
 }
 
+/**
+ * Tracks the latest request per independent UI scope. A stale response is never
+ * allowed to update a mounted settings card, even if it resolves after a newer request.
+ */
+export class CoursewareRequestGuard {
+  private active = true;
+  private epochs = new Map<string, number>();
+
+  begin(scope: string): number {
+    const token = (this.epochs.get(scope) ?? 0) + 1;
+    this.epochs.set(scope, token);
+    return token;
+  }
+
+  invalidate(scope: string): void {
+    this.begin(scope);
+  }
+
+  isCurrent(scope: string, token: number): boolean {
+    return this.active && this.epochs.get(scope) === token;
+  }
+
+  dispose(): void {
+    this.active = false;
+    this.epochs.clear();
+  }
+}
+
+export function applyCurrentRequestResult(
+  guard: CoursewareRequestGuard,
+  scope: string,
+  token: number,
+  apply: () => void,
+): boolean {
+  if (!guard.isCurrent(scope, token)) return false;
+  apply();
+  return true;
+}
+
 const purposeCapability: Record<CoursewareModelPurpose, AIModelOption['capability']> = {
   courseware_text: 'structured_text',
   courseware_image: 'image_generation',

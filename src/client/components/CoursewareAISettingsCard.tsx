@@ -3,6 +3,8 @@ import { apiGet, apiPut, ApiError } from '../api';
 import {
   buildCredentialPatch,
   buildCoursewarePreferences,
+  applyCurrentRequestResult,
+  CoursewareRequestGuard,
   modelsForPurpose,
   voicesForModel,
   type CoursewareSelectionDraft,
@@ -44,7 +46,11 @@ function normalTestError(error: unknown): string {
   return '测试暂时无法完成，请检查网络后重试';
 }
 
-async function binaryTest(path: string, body: Record<string, unknown>): Promise<Blob | null> {
+async function binaryTest(
+  path: string,
+  body: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<Blob | null> {
   let response: Response;
   try {
     response = await fetch(path, {
@@ -52,6 +58,7 @@ async function binaryTest(path: string, body: Record<string, unknown>): Promise<
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       credentials: 'same-origin',
+      signal,
     });
   } catch {
     throw new ApiError('网络连接失败，请检查网络', 0);
@@ -91,6 +98,8 @@ interface ModelFieldProps {
   disabled: boolean;
   onChange: (selection: CoursewareSelectionDraft) => void;
   showVoice?: boolean;
+  error?: string;
+  errorId?: string;
 }
 
 function ModelField({
@@ -102,6 +111,8 @@ function ModelField({
   disabled,
   onChange,
   showVoice = false,
+  error = '',
+  errorId,
 }: ModelFieldProps) {
   const models = modelsForPurpose(catalog, purpose);
   const currentModel = models.find((model) => model.id === selection.modelCatalogId)
@@ -136,7 +147,7 @@ function ModelField({
   return (
     <div className="courseware-field">
       <label htmlFor={modelId}>{label}</label>
-      <select id={modelId} value={selection.modelCatalogId === null ? (currentModel ? 'custom' : '') : selection.modelCatalogId} onChange={(event) => chooseModel(event.target.value)} disabled={disabled || models.length === 0}>
+      <select id={modelId} value={selection.modelCatalogId === null ? (currentModel ? 'custom' : '') : selection.modelCatalogId} onChange={(event) => chooseModel(event.target.value)} disabled={disabled || models.length === 0} aria-invalid={error ? true : undefined} aria-describedby={error ? errorId : undefined}>
         {models.length === 0 && <option value="">当前没有可用模型</option>}
         {purpose === 'courseware_text' && currentModel?.allowCustomModelId && <option value="custom">当前端点的自定义模型</option>}
         {models.map((model) => {
@@ -155,6 +166,8 @@ function ModelField({
             placeholder="仅在需要时填写"
             autoComplete="off"
             disabled={disabled}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error ? errorId : undefined}
           />
           <p className="form-hint">仅当前服务商公开支持自定义模型时可填写。</p>
         </div>
@@ -162,7 +175,7 @@ function ModelField({
       {showVoice && (
         <>
           <label htmlFor={voiceId}>音色</label>
-          <select id={voiceId} value={selection.voiceId} onChange={(event) => onChange({ ...selection, voiceId: event.target.value })} disabled={disabled || voices.length === 0}>
+          <select id={voiceId} value={selection.voiceId} onChange={(event) => onChange({ ...selection, voiceId: event.target.value })} disabled={disabled || voices.length === 0} aria-invalid={error ? true : undefined} aria-describedby={error ? errorId : undefined}>
             {voices.length === 0 && <option value="">当前模型没有可用音色</option>}
             {voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name}</option>)}
           </select>
@@ -182,15 +195,36 @@ export default function CoursewareAISettingsCard() {
   const [studentSpeech, setStudentSpeech] = useState<CoursewareSelectionDraft>(EMPTY_SELECTION);
   const [includeImages, setIncludeImages] = useState(false);
   const [credentialInput, setCredentialInput] = useState<Record<number, string>>({});
-  const [pendingProviderId, setPendingProviderId] = useState<number | null>(null);
+  const [pendingProviderIds, setPendingProviderIds] = useState<Set<number>>(new Set());
   const [savingPreferences, setSavingPreferences] = useState(false);
   const [testing, setTesting] = useState<Set<TestKind>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState('');
-  const [audioUrl, setAudioUrl] = useState('');
+  const [credentialNotices, setCredentialNotices] = useState<Record<number, string>>({});
+  const [audioUrls, setAudioUrls] = useState<Record<'teacher_tts' | 'student_tts', string>>({
+    teacher_tts: '',
+    student_tts: '',
+  });
   const [imageUrl, setImageUrl] = useState('');
-  const audioUrlRef = useRef('');
+  const pendingProviderIdsRef = useRef(new Set<number>());
+  const pendingTestsRef = useRef(new Set<TestKind>());
+  const requestGuardRef = useRef(new CoursewareRequestGuard());
+  const requestControllersRef = useRef(new Set<AbortController>());
+  const audioUrlRefs = useRef<Partial<Record<'teacher_tts' | 'student_tts', string>>>({});
   const imageUrlRef = useRef('');
+
+  const beginRequest = () => {
+    const controller = new AbortController();
+    requestControllersRef.current.add(controller);
+    return controller;
+  };
+
+  const finishRequest = (controller: AbortController) => {
+    requestControllersRef.current.delete(controller);
+  };
+
+  const isAbort = (error: unknown, controller: AbortController) =>
+    controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError');
 
   const applyLoaded = useCallback((loadedCatalog: AIProviderCatalogItem[], loadedSettings: CoursewareAISettings) => {
     setCatalog(loadedCatalog);
@@ -203,23 +237,41 @@ export default function CoursewareAISettingsCard() {
   }, []);
 
   const load = useCallback(async () => {
+    const scope = 'load';
+    const token = requestGuardRef.current.begin(scope);
+    const controller = beginRequest();
     try {
       const [loadedCatalog, loadedSettings] = await Promise.all([
-        apiGet<AIProviderCatalogItem[]>('/api/ai-catalog'),
-        apiGet<CoursewareAISettings>('/api/courseware-ai-settings'),
+        apiGet<AIProviderCatalogItem[]>('/api/ai-catalog', { signal: controller.signal }),
+        apiGet<CoursewareAISettings>('/api/courseware-ai-settings', { signal: controller.signal }),
       ]);
+      if (!requestGuardRef.current.isCurrent(scope, token)) return;
       applyLoaded(loadedCatalog, loadedSettings);
       setErrors({});
     } catch (error) {
+      if (!requestGuardRef.current.isCurrent(scope, token) || isAbort(error, controller)) return;
       setErrors({ load: error instanceof ApiError ? error.message : '语音课件设置加载失败，请刷新后重试' });
+    } finally {
+      finishRequest(controller);
     }
   }, [applyLoaded]);
 
-  useEffect(() => { void load(); }, [load]);
-  useEffect(() => () => {
-    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
-    if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
+  useEffect(() => {
+    requestGuardRef.current = new CoursewareRequestGuard();
+    return () => {
+      requestGuardRef.current.dispose();
+      for (const controller of requestControllersRef.current) controller.abort();
+      requestControllersRef.current.clear();
+      for (const url of Object.values(audioUrlRefs.current)) {
+        if (url) URL.revokeObjectURL(url);
+      }
+      audioUrlRefs.current = {};
+      if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
+      imageUrlRef.current = '';
+    };
   }, []);
+
+  useEffect(() => { void load(); }, [load]);
 
   const readinessNotice = useMemo(() => {
     if (!settings) return '';
@@ -230,31 +282,90 @@ export default function CoursewareAISettingsCard() {
     return '';
   }, [settings]);
 
+  const refreshSettings = async (errorKey: string) => {
+    const scope = 'settings-refresh';
+    const token = requestGuardRef.current.begin(scope);
+    const controller = beginRequest();
+    try {
+      const refreshed = await apiGet<CoursewareAISettings>(
+        '/api/courseware-ai-settings',
+        { signal: controller.signal },
+      );
+      if (requestGuardRef.current.isCurrent(scope, token)) setSettings(refreshed);
+    } catch (error) {
+      if (!isAbort(error, controller) && requestGuardRef.current.isCurrent(scope, token)) {
+        setErrors((current) => ({ ...current, [errorKey]: '连接已验证，但状态刷新失败，请稍后重试' }));
+      }
+    } finally {
+      finishRequest(controller);
+    }
+  };
+
   const saveCredential = async (providerId: number, clear = false) => {
-    if (pendingProviderId !== null) return;
+    if (pendingProviderIdsRef.current.has(providerId)) return;
+    const scope = `credential-${providerId}`;
+    const token = requestGuardRef.current.begin(scope);
+    requestGuardRef.current.invalidate('load');
+    requestGuardRef.current.invalidate('settings-refresh');
+    pendingProviderIdsRef.current.add(providerId);
+    setPendingProviderIds((current) => new Set(current).add(providerId));
     setErrors((current) => ({ ...current, [`credential-${providerId}`]: '' }));
+    setCredentialNotices((current) => ({ ...current, [providerId]: '' }));
     let body: { apiKey: string | null };
     try {
       body = buildCredentialPatch(clear ? null : (credentialInput[providerId] ?? ''));
     } catch (error) {
       setErrors((current) => ({ ...current, [`credential-${providerId}`]: error instanceof Error ? error.message : '请输入完整的 API Key' }));
+      pendingProviderIdsRef.current.delete(providerId);
+      setPendingProviderIds((current) => {
+        const next = new Set(current);
+        next.delete(providerId);
+        return next;
+      });
       return;
     }
-    setPendingProviderId(providerId);
+    const controller = beginRequest();
     try {
-      const saved = await apiPut<CoursewareAISettings>(`/api/courseware-ai-settings/credentials/${providerId}`, body);
-      setSettings(saved);
+      const saved = await apiPut<CoursewareAISettings>(
+        `/api/courseware-ai-settings/credentials/${providerId}`,
+        body,
+        { signal: controller.signal },
+      );
+      if (!requestGuardRef.current.isCurrent(scope, token)) return;
+      setSettings((current) => {
+        if (!current) return saved;
+        const savedProvider = saved.providers.find((item) => item.providerId === providerId);
+        return savedProvider
+          ? { ...current, providers: current.providers.map((item) => item.providerId === providerId ? savedProvider : item) }
+          : current;
+      });
       setCredentialInput((current) => ({ ...current, [providerId]: '' }));
-      setNotice(clear ? '个人 API Key 已清除。' : '个人 API Key 已保存，可继续测试连接。');
+      setCredentialNotices((current) => ({
+        ...current,
+        [providerId]: clear ? '个人 API Key 已清除。' : '个人 API Key 已保存，可继续测试连接。',
+      }));
     } catch (error) {
+      if (!requestGuardRef.current.isCurrent(scope, token) || isAbort(error, controller)) return;
       setErrors((current) => ({ ...current, [`credential-${providerId}`]: error instanceof ApiError ? error.message : '保存 Key 失败，请稍后重试' }));
     } finally {
-      setPendingProviderId(null);
+      finishRequest(controller);
+      pendingProviderIdsRef.current.delete(providerId);
+      if (requestGuardRef.current.isCurrent(scope, token)) {
+        setPendingProviderIds((current) => {
+          const next = new Set(current);
+          next.delete(providerId);
+          return next;
+        });
+      }
     }
   };
 
   const savePreferences = async () => {
     if (savingPreferences) return;
+    const scope = 'preferences';
+    const token = requestGuardRef.current.begin(scope);
+    requestGuardRef.current.invalidate('load');
+    requestGuardRef.current.invalidate('settings-refresh');
     setErrors((current) => ({ ...current, preferences: '' }));
     let body: ReturnType<typeof buildCoursewarePreferences>;
     try {
@@ -264,23 +375,32 @@ export default function CoursewareAISettingsCard() {
       return;
     }
     setSavingPreferences(true);
+    const controller = beginRequest();
     try {
-      const saved = await apiPut<CoursewareAISettings>('/api/courseware-ai-settings/preferences', body);
+      const saved = await apiPut<CoursewareAISettings>(
+        '/api/courseware-ai-settings/preferences',
+        body,
+        { signal: controller.signal },
+      );
+      if (!requestGuardRef.current.isCurrent(scope, token)) return;
       setSettings(saved);
       setNotice('课件模型和音色已保存。');
     } catch (error) {
+      if (!requestGuardRef.current.isCurrent(scope, token) || isAbort(error, controller)) return;
       setErrors((current) => ({ ...current, preferences: error instanceof ApiError ? error.message : '模型设置保存失败，请稍后重试' }));
     } finally {
-      setSavingPreferences(false);
+      finishRequest(controller);
+      if (requestGuardRef.current.isCurrent(scope, token)) setSavingPreferences(false);
     }
   };
 
-  const replaceBlobUrl = (kind: 'audio' | 'image', blob: Blob) => {
+  const replaceBlobUrl = (kind: 'teacher_tts' | 'student_tts' | 'image', blob: Blob) => {
     const next = URL.createObjectURL(blob);
-    if (kind === 'audio') {
-      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
-      audioUrlRef.current = next;
-      setAudioUrl(next);
+    if (kind === 'teacher_tts' || kind === 'student_tts') {
+      const previous = audioUrlRefs.current[kind];
+      if (previous) URL.revokeObjectURL(previous);
+      audioUrlRefs.current[kind] = next;
+      setAudioUrls((current) => ({ ...current, [kind]: next }));
     } else {
       if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
       imageUrlRef.current = next;
@@ -289,29 +409,43 @@ export default function CoursewareAISettingsCard() {
   };
 
   const runTest = async (kind: TestKind) => {
-    if (testing.has(kind)) return;
+    if (pendingTestsRef.current.has(kind)) return;
+    const scope = `test-${kind}`;
+    const token = requestGuardRef.current.begin(scope);
+    pendingTestsRef.current.add(kind);
     const errorKey = `test-${kind}`;
     setErrors((current) => ({ ...current, [errorKey]: '' }));
     setTesting((current) => new Set(current).add(kind));
+    const controller = beginRequest();
     try {
       const path = kind === 'text'
         ? '/api/courseware-ai-settings/test/text'
         : kind === 'image'
           ? '/api/courseware-ai-settings/test/image'
           : '/api/courseware-ai-settings/test/speech';
-      const blob = await binaryTest(path, kind === 'teacher_tts' || kind === 'student_tts' ? { purpose: kind } : {});
-      if (blob) replaceBlobUrl(kind === 'image' ? 'image' : 'audio', blob);
+      const blob = await binaryTest(
+        path,
+        kind === 'teacher_tts' || kind === 'student_tts' ? { purpose: kind } : {},
+        controller.signal,
+      );
+      if (!applyCurrentRequestResult(requestGuardRef.current, scope, token, () => {
+        if (blob && kind !== 'text') replaceBlobUrl(kind, blob);
+      })) return;
       setNotice(kind === 'text' ? '文本连接正常。' : kind === 'image' ? '图片测试完成。' : '试听已准备好。');
-      const refreshed = await apiGet<CoursewareAISettings>('/api/courseware-ai-settings');
-      setSettings(refreshed);
+      await refreshSettings(errorKey);
     } catch (error) {
+      if (!requestGuardRef.current.isCurrent(scope, token) || isAbort(error, controller)) return;
       setErrors((current) => ({ ...current, [errorKey]: normalTestError(error) }));
     } finally {
-      setTesting((current) => {
-        const next = new Set(current);
-        next.delete(kind);
-        return next;
-      });
+      finishRequest(controller);
+      pendingTestsRef.current.delete(kind);
+      if (requestGuardRef.current.isCurrent(scope, token)) {
+        setTesting((current) => {
+          const next = new Set(current);
+          next.delete(kind);
+          return next;
+        });
+      }
     }
   };
 
@@ -332,29 +466,35 @@ export default function CoursewareAISettingsCard() {
         <p className="form-hint">Key 仅属于当前家长账户，保存后不会回显。替换 Key 后可立即测试连接。</p>
         {catalog.map((provider) => {
           const credential = settings?.providers.find((item) => item.providerId === provider.id);
-          const isPending = pendingProviderId === provider.id;
+          const providerId = provider.id;
+          const isPending = pendingProviderIds.has(providerId);
+          const credentialError = errors[`credential-${providerId}`];
+          const credentialErrorId = `credential-${providerId}-error`;
           return (
-            <div className="courseware-credential" key={provider.id}>
+            <div className="courseware-credential" key={providerId}>
               <div className="courseware-credential-head">
                 <strong>{provider.displayName}</strong>
                 {credential?.keySet && <span className="badge">已设置，尾号 {credential.keyTail || '****'}</span>}
                 {credential && <span className={`badge ${credential.healthStatus === 'valid' ? 'badge-success' : credential.healthStatus === 'unknown' ? '' : 'badge-danger'}`}>{healthLabel(credential.healthStatus)}</span>}
               </div>
-              <label htmlFor={`provider-key-${provider.id}`}>个人 API Key</label>
+              <label htmlFor={`provider-key-${providerId}`}>个人 API Key</label>
               <input
-                id={`provider-key-${provider.id}`}
+                id={`provider-key-${providerId}`}
                 type="password"
-                value={credentialInput[provider.id] ?? ''}
-                onChange={(event) => setCredentialInput((current) => ({ ...current, [provider.id]: event.target.value }))}
+                value={credentialInput[providerId] ?? ''}
+                onChange={(event) => setCredentialInput((current) => ({ ...current, [providerId]: event.target.value }))}
                 placeholder={credential?.keySet ? '输入新 Key 以替换' : '输入完整 API Key'}
                 autoComplete="new-password"
                 disabled={isPending}
+                aria-invalid={credentialError ? true : undefined}
+                aria-describedby={credentialError ? credentialErrorId : undefined}
               />
               <div className="courseware-action-row">
-                <button type="button" className="btn btn-primary" disabled={isPending} onClick={() => void saveCredential(provider.id)}>{isPending ? '保存中…' : credential?.keySet ? '替换 Key' : '保存 Key'}</button>
-                {credential?.keySet && <button type="button" className="btn btn-danger-ghost" disabled={isPending} onClick={() => void saveCredential(provider.id, true)}>清除 Key</button>}
+                <button type="button" className="btn btn-primary" disabled={isPending} onClick={() => void saveCredential(providerId)}>{isPending ? '保存中…' : credential?.keySet ? '替换 Key' : '保存 Key'}</button>
+                {credential?.keySet && <button type="button" className="btn btn-danger-ghost" disabled={isPending} onClick={() => void saveCredential(providerId, true)}>清除 Key</button>}
               </div>
-              {errors[`credential-${provider.id}`] && <p className="field-error" role="alert">{errors[`credential-${provider.id}`]}</p>}
+              {credentialNotices[providerId] && <p className="field-notice" role="status">{credentialNotices[providerId]}</p>}
+              {credentialError && <p id={credentialErrorId} className="field-error" role="alert">{credentialError}</p>}
             </div>
           );
         })}
@@ -363,29 +503,31 @@ export default function CoursewareAISettingsCard() {
 
       <section className="courseware-settings-section" aria-labelledby="courseware-text-title">
         <h3 id="courseware-text-title">课件脚本模型</h3>
-        <ModelField id="courseware-text" label="文本模型" purpose="courseware_text" catalog={catalog} selection={text} onChange={setText} disabled={savingPreferences} />
+        <ModelField id="courseware-text" label="文本模型" purpose="courseware_text" catalog={catalog} selection={text} onChange={setText} disabled={savingPreferences} error={errors.preferences} errorId="courseware-preferences-error" />
         <div className="courseware-action-row">
-          <button type="button" className="btn btn-secondary" disabled={testing.has('text')} onClick={() => void runTest('text')}>{testing.has('text') ? '测试中…' : '测试连接'}</button>
+          <button type="button" className="btn btn-secondary" disabled={testing.has('text')} aria-describedby={errors['test-text'] ? 'test-text-error' : undefined} onClick={() => void runTest('text')}>{testing.has('text') ? '测试中…' : '测试连接'}</button>
         </div>
-        {errors['test-text'] && <p className="field-error" role="alert">{errors['test-text']}</p>}
+        {errors['test-text'] && <p id="test-text-error" className="field-error" role="alert">{errors['test-text']}</p>}
       </section>
 
       <section className="courseware-settings-section" aria-labelledby="teacher-voice-title">
         <h3 id="teacher-voice-title">老师语音</h3>
-        <ModelField id="teacher-voice" label="语音模型" purpose="teacher_tts" catalog={catalog} selection={teacherSpeech} onChange={setTeacherSpeech} disabled={savingPreferences} showVoice />
+        <ModelField id="teacher-voice" label="语音模型" purpose="teacher_tts" catalog={catalog} selection={teacherSpeech} onChange={setTeacherSpeech} disabled={savingPreferences} showVoice error={errors.preferences} errorId="courseware-preferences-error" />
         <div className="courseware-action-row">
-          <button type="button" className="btn btn-secondary" disabled={testing.has('teacher_tts')} onClick={() => void runTest('teacher_tts')}>{testing.has('teacher_tts') ? '准备中…' : '试听'}</button>
+          <button type="button" className="btn btn-secondary" disabled={testing.has('teacher_tts')} aria-describedby={errors['test-teacher_tts'] ? 'test-teacher_tts-error' : undefined} onClick={() => void runTest('teacher_tts')}>{testing.has('teacher_tts') ? '准备中…' : '试听'}</button>
         </div>
-        {errors['test-teacher_tts'] && <p className="field-error" role="alert">{errors['test-teacher_tts']}</p>}
+        {errors['test-teacher_tts'] && <p id="test-teacher_tts-error" className="field-error" role="alert">{errors['test-teacher_tts']}</p>}
+        {audioUrls.teacher_tts && <section className="courseware-preview" aria-labelledby="teacher-audio-preview"><h4 id="teacher-audio-preview">老师语音试听</h4><audio controls src={audioUrls.teacher_tts}>当前浏览器不支持音频试听。</audio></section>}
       </section>
 
       <section className="courseware-settings-section" aria-labelledby="student-voice-title">
         <h3 id="student-voice-title">AI 同学语音</h3>
-        <ModelField id="student-voice" label="语音模型" purpose="student_tts" catalog={catalog} selection={studentSpeech} onChange={setStudentSpeech} disabled={savingPreferences} showVoice />
+        <ModelField id="student-voice" label="语音模型" purpose="student_tts" catalog={catalog} selection={studentSpeech} onChange={setStudentSpeech} disabled={savingPreferences} showVoice error={errors.preferences} errorId="courseware-preferences-error" />
         <div className="courseware-action-row">
-          <button type="button" className="btn btn-secondary" disabled={testing.has('student_tts')} onClick={() => void runTest('student_tts')}>{testing.has('student_tts') ? '准备中…' : '试听'}</button>
+          <button type="button" className="btn btn-secondary" disabled={testing.has('student_tts')} aria-describedby={errors['test-student_tts'] ? 'test-student_tts-error' : undefined} onClick={() => void runTest('student_tts')}>{testing.has('student_tts') ? '准备中…' : '试听'}</button>
         </div>
-        {errors['test-student_tts'] && <p className="field-error" role="alert">{errors['test-student_tts']}</p>}
+        {errors['test-student_tts'] && <p id="test-student_tts-error" className="field-error" role="alert">{errors['test-student_tts']}</p>}
+        {audioUrls.student_tts && <section className="courseware-preview" aria-labelledby="student-audio-preview"><h4 id="student-audio-preview">AI 同学语音试听</h4><audio controls src={audioUrls.student_tts}>当前浏览器不支持音频试听。</audio></section>}
       </section>
 
       <section className="courseware-settings-section" aria-labelledby="courseware-image-title">
@@ -395,20 +537,19 @@ export default function CoursewareAISettingsCard() {
           <span><strong>生成配图</strong><small>关闭后不影响脚本和语音课件生成。</small></span>
         </label>
         {includeImages && <>
-          <ModelField id="courseware-image" label="图片模型" purpose="courseware_image" catalog={catalog} selection={image} onChange={setImage} disabled={savingPreferences} />
+          <ModelField id="courseware-image" label="图片模型" purpose="courseware_image" catalog={catalog} selection={image} onChange={setImage} disabled={savingPreferences} error={errors.preferences} errorId="courseware-preferences-error" />
           <div className="courseware-action-row">
-            <button type="button" className="btn btn-secondary" disabled={testing.has('image')} onClick={() => void runTest('image')}>{testing.has('image') ? '生成中…' : '测试图片'}</button>
+            <button type="button" className="btn btn-secondary" disabled={testing.has('image')} aria-describedby={errors['test-image'] ? 'test-image-error' : undefined} onClick={() => void runTest('image')}>{testing.has('image') ? '生成中…' : '测试图片'}</button>
           </div>
-          {errors['test-image'] && <p className="field-error" role="alert">{errors['test-image']}</p>}
+          {errors['test-image'] && <p id="test-image-error" className="field-error" role="alert">{errors['test-image']}</p>}
         </>}
       </section>
 
-      {audioUrl && <section className="courseware-preview" aria-labelledby="courseware-audio-preview"><h3 id="courseware-audio-preview">语音试听</h3><audio controls src={audioUrl}>当前浏览器不支持音频试听。</audio></section>}
       {imageUrl && <section className="courseware-preview" aria-labelledby="courseware-image-preview"><h3 id="courseware-image-preview">图片预览</h3><img src={imageUrl} alt="测试生成的课件配图预览" /></section>}
 
       <div className="courseware-save-row">
-        <button type="button" className="btn btn-primary" disabled={savingPreferences} onClick={() => void savePreferences()}>{savingPreferences ? '保存中…' : '保存课件设置'}</button>
-        {errors.preferences && <p className="field-error" role="alert">{errors.preferences}</p>}
+        <button type="button" className="btn btn-primary" disabled={savingPreferences} aria-describedby={errors.preferences ? 'courseware-preferences-error' : undefined} onClick={() => void savePreferences()}>{savingPreferences ? '保存中…' : '保存课件设置'}</button>
+        {errors.preferences && <p id="courseware-preferences-error" className="field-error" role="alert">{errors.preferences}</p>}
       </div>
     </div>
   );

@@ -52,4 +52,16 @@ describe('客户端关键交互结构', () => {
     expect(coursewareSettingsSource).toContain('autoComplete="new-password"');
     expect(coursewareSettingsSource).not.toContain('baseUrl');
   });
+
+  it('课件设置逐项管理异步请求、预览和错误关联', () => {
+    const source = clientSource('components/CoursewareAISettingsCard.tsx');
+
+    expect(source).toContain('pendingProviderIds.has(providerId)');
+    expect(source).toContain('AbortController');
+    expect(source).toContain('signal: controller.signal');
+    expect(source).toContain('audioUrls.teacher_tts');
+    expect(source).toContain('audioUrls.student_tts');
+    expect(source).toContain('aria-invalid');
+    expect(source).toContain('aria-describedby');
+  });
 });

@@ -13,7 +13,11 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+export interface ApiRequestOptions {
+  signal?: AbortSignal;
+}
+
+async function request<T>(method: string, path: string, body?: unknown, options?: ApiRequestOptions): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, {
@@ -21,6 +25,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
       credentials: 'same-origin',
+      signal: options?.signal,
     });
   } catch {
     throw new ApiError('网络连接失败，请检查网络', 0);
@@ -38,10 +43,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return json.data as T;
 }
 
-export const apiGet = <T>(path: string) => request<T>('GET', path);
-export const apiPost = <T>(path: string, body?: unknown) => request<T>('POST', path, body);
-export const apiPut = <T>(path: string, body?: unknown) => request<T>('PUT', path, body);
-export const apiDelete = <T>(path: string) => request<T>('DELETE', path);
+export const apiGet = <T>(path: string, options?: ApiRequestOptions) => request<T>('GET', path, undefined, options);
+export const apiPost = <T>(path: string, body?: unknown, options?: ApiRequestOptions) => request<T>('POST', path, body, options);
+export const apiPut = <T>(path: string, body?: unknown, options?: ApiRequestOptions) => request<T>('PUT', path, body, options);
+export const apiDelete = <T>(path: string, options?: ApiRequestOptions) => request<T>('DELETE', path, undefined, options);
 
 export function getAuthProbeError(error: unknown): string {
   return error instanceof ApiError && error.status === 401 ? '' : '无法确认登录状态，请重试';

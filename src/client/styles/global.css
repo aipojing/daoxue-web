@@ -1848,6 +1848,12 @@ a {
   font-size: 14px;
 }
 
+.field-notice {
+  color: var(--board-deep);
+  margin: 8px 0 0;
+  font-size: 14px;
+}
+
 .courseware-preview {
   border-top: 1px solid var(--grid);
   margin-top: 22px;
