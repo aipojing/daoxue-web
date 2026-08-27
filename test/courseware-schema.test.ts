@@ -115,6 +115,15 @@ describe('courseware script schema', () => {
     ['encoded data URL', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = '[点击](d&#97;ta:text/html,boom)'; }],
     ['encoded SSML in display text', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = '&lt;speak&gt;你好&lt;/speak&gt;'; }],
     ['display URL that Markdown could autolink', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = 'https://example.test'; }],
+    ['mailto scheme inside display text', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = '请联系 mailto:teacher@example.test'; }],
+    ['email scheme inside display text', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = 'email:teacher@example.test'; }],
+    ['ftp scheme inside display text', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = '资源 ftp://example.test/a'; }],
+    ['file scheme inside display text', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = 'file:///tmp/a'; }],
+    ['tel scheme inside display text', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = '电话 tel:12345'; }],
+    ['custom valid URI scheme inside display text', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = 'custom+lesson.1:payload'; }],
+    ['bare email autolink', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = 'teacher@example.test'; }],
+    ['C1 control character', (script: CoursewareScript) => { script.segments[0]!.speechText = '你好\u0085世界'; }],
+    ['format control character', (script: CoursewareScript) => { script.segments[0]!.speechText = '你好\u202E世界'; }],
   ])('rejects %s', (_name, mutate) => {
     const script = clonedScript();
     mutate(script);
@@ -127,6 +136,27 @@ describe('courseware script schema', () => {
 
     const script = clonedScript();
     script.segments[1]!.segmentKey = 'intro';
+    expect(() => parse(script)).toThrow();
+  });
+
+  it('permits line-feed paragraph separation only in display Markdown', () => {
+    const script = clonedScript();
+    script.segments[0]!.displayMarkdown = '先观察两堆积木。\n\n再把它们合在一起。';
+    expect(parse(script)).toEqual(script);
+
+    script.segments[0]!.speechText = '先观察。\n再合并。';
+    expect(() => parse(script)).toThrow();
+  });
+
+  it.each([
+    ['unclosed fraction braces', '计算 $\\frac{1}{2$。'],
+    ['negative brace depth', '计算 $1} + {2$。'],
+    ['excessively nested braces', `计算 $${'{'.repeat(9)}1${'}'.repeat(9)}$。`],
+    ['unpaired left delimiter', '计算 $\\left(1+2$。'],
+    ['unpaired right delimiter', '计算 $1+2\\right)$。'],
+  ])('rejects malformed controlled KaTeX: %s', (_name, displayMarkdown) => {
+    const script = clonedScript();
+    script.segments[0]!.displayMarkdown = displayMarkdown;
     expect(() => parse(script)).toThrow();
   });
 

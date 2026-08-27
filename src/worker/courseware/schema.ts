@@ -11,11 +11,17 @@ const SAFE_KATEX_COMMANDS = new Set([
   'pm', 'prod', 'right', 'sqrt', 'sum', 'text', 'times', 'underline',
 ]);
 const FORMAL_ASSESSMENT = /(?:\bL[1-4]\b|正式(?:测评|测验)|掌握(?:等级|结论)|学习等级)/i;
+const CONTROL_OR_FORMAT = /[\p{Cc}\p{Cf}]/u;
+const NAMED_HTML_ENTITIES = new Map<string, string>([
+  ['amp', '&'], ['apos', "'"], ['colon', ':'], ['gt', '>'], ['lt', '<'],
+  ['newline', '\n'], ['quot', '"'], ['tab', '\t'],
+]);
+const MAX_KATEX_BRACE_DEPTH = 8;
 
-function containsControlCharacters(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code <= 0x1f || code === 0x7f) return true;
+function containsUnsafeControlOrFormat(value: string, allowLineFeeds = false): boolean {
+  for (const character of value) {
+    if (allowLineFeeds && character === '\n') continue;
+    if (CONTROL_OR_FORMAT.test(character)) return true;
   }
   return false;
 }
@@ -33,11 +39,7 @@ function decodeHtmlEntitiesOnce(value: string): string {
       continue;
     }
     const entity = value.slice(index + 1, end);
-    const named = new Map<string, string>([
-      ['amp', '&'], ['apos', "'"], ['colon', ':'], ['gt', '>'], ['lt', '<'],
-      ['newline', '\n'], ['quot', '"'], ['tab', '\t'],
-    ]);
-    let decoded = named.get(entity.toLowerCase());
+    let decoded = NAMED_HTML_ENTITIES.get(entity.toLowerCase());
     if (!decoded && entity.startsWith('#')) {
       const radix = entity[1]?.toLowerCase() === 'x' ? 16 : 10;
       const digits = entity.slice(radix === 16 ? 2 : 1);
@@ -98,16 +100,57 @@ function canonicalizeForSafetyCheck(value: string): string {
   return compact.toLowerCase();
 }
 
-function hasMarkupOrExecutableContent(value: string): boolean {
+function hasMarkupContent(value: string): boolean {
   const canonical = canonicalizeForSafetyCheck(value);
   return canonical.includes('<')
-    || canonical.includes('>')
-    || canonical.includes('javascript:')
-    || canonical.includes('vbscript:')
-    || canonical.includes('data:')
-    || canonical.includes('http:')
-    || canonical.includes('https:')
-    || canonical.includes('www.');
+    || canonical.includes('>');
+}
+
+function isAsciiLetter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isUriSchemeCharacter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return isAsciiLetter(character)
+    || (code >= 48 && code <= 57)
+    || character === '+'
+    || character === '-'
+    || character === '.';
+}
+
+function hasUriScheme(value: string): boolean {
+  const canonical = canonicalizeForSafetyCheck(value);
+  for (let index = 0; index < canonical.length; index += 1) {
+    if (!isAsciiLetter(canonical[index]!) || (index > 0 && isUriSchemeCharacter(canonical[index - 1]!))) continue;
+    let end = index + 1;
+    while (end < canonical.length && isUriSchemeCharacter(canonical[end]!)) end += 1;
+    if (canonical[end] === ':' && end + 1 < canonical.length) return true;
+    index = end;
+  }
+  return false;
+}
+
+function isEmailLocalCharacter(character: string): boolean {
+  return isUriSchemeCharacter(character) || "!#$%&'*=/ ?^_`{|}~".replace(' ', '').includes(character);
+}
+
+function isEmailDomainCharacter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return isAsciiLetter(character) || (code >= 48 && code <= 57) || character === '-' || character === '.';
+}
+
+function hasBareEmail(value: string): boolean {
+  const canonical = canonicalizeForSafetyCheck(value);
+  for (let at = 1; at < canonical.length - 2; at += 1) {
+    if (canonical[at] !== '@' || !isEmailLocalCharacter(canonical[at - 1]!)) continue;
+    let domainEnd = at + 1;
+    while (domainEnd < canonical.length && isEmailDomainCharacter(canonical[domainEnd]!)) domainEnd += 1;
+    const domain = canonical.slice(at + 1, domainEnd);
+    if (domain.length > 2 && domain.includes('.') && !domain.startsWith('.') && !domain.endsWith('.')) return true;
+  }
+  return false;
 }
 
 function hasPlainTextMarkdown(value: string): boolean {
@@ -122,8 +165,10 @@ function hasPlainTextMarkdown(value: string): boolean {
 }
 
 function isSafePlainText(value: string): boolean {
-  return !containsControlCharacters(value)
-    && !hasMarkupOrExecutableContent(value)
+  return !containsUnsafeControlOrFormat(value)
+    && !hasMarkupContent(value)
+    && !hasUriScheme(value)
+    && !hasBareEmail(value)
     && !hasPlainTextMarkdown(value);
 }
 
@@ -132,24 +177,42 @@ function isSafeSpeechText(value: string): boolean {
 }
 
 function isSafeKaTeX(value: string): boolean {
-  if (value.length === 0 || hasMarkupOrExecutableContent(value)) return false;
+  if (value.length === 0 || hasMarkupContent(value) || containsUnsafeControlOrFormat(value)) return false;
+  let braceDepth = 0;
+  let leftDelimiterDepth = 0;
   for (let index = 0; index < value.length; index += 1) {
     const character = value[index]!;
     if (!'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 +-*/=^_{}().,，。：！？'.includes(character) && character !== '\\') {
       return false;
     }
+    if (character === '{') {
+      braceDepth += 1;
+      if (braceDepth > MAX_KATEX_BRACE_DEPTH) return false;
+      continue;
+    }
+    if (character === '}') {
+      braceDepth -= 1;
+      if (braceDepth < 0) return false;
+      continue;
+    }
     if (character !== '\\') continue;
     const commandStart = index + 1;
     let commandEnd = commandStart;
-    while (commandEnd < value.length && /[A-Za-z]/.test(value[commandEnd]!)) commandEnd += 1;
+    while (commandEnd < value.length && isAsciiLetter(value[commandEnd]!)) commandEnd += 1;
     if (commandEnd === commandStart || !SAFE_KATEX_COMMANDS.has(value.slice(commandStart, commandEnd))) return false;
+    const command = value.slice(commandStart, commandEnd);
+    if (command === 'left') leftDelimiterDepth += 1;
+    if (command === 'right') {
+      leftDelimiterDepth -= 1;
+      if (leftDelimiterDepth < 0) return false;
+    }
     index = commandEnd - 1;
   }
-  return true;
+  return braceDepth === 0 && leftDelimiterDepth === 0;
 }
 
 function isSafeDisplayMarkdown(value: string): boolean {
-  if (containsControlCharacters(value) || hasMarkupOrExecutableContent(value)) return false;
+  if (containsUnsafeControlOrFormat(value, true) || hasMarkupContent(value)) return false;
   let outsideMath = '';
   for (let index = 0; index < value.length; index += 1) {
     if (value[index] !== '$') {
@@ -162,7 +225,8 @@ function isSafeDisplayMarkdown(value: string): boolean {
   }
   if (outsideMath.includes('`') || outsideMath.includes('[') || outsideMath.includes(']')
     || outsideMath.includes('\\') || outsideMath.includes('_') || outsideMath.includes('~')
-    || outsideMath.includes('#') || outsideMath.includes('>')) return false;
+    || outsideMath.includes('#') || outsideMath.includes('>') || hasUriScheme(outsideMath)
+    || hasBareEmail(outsideMath)) return false;
 
   let singleMarkers = 0;
   let doubleMarkers = 0;

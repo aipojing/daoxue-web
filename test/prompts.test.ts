@@ -80,5 +80,6 @@ describe('courseware script prompt', () => {
     expect(COURSEWARE_SCRIPT_PROMPT).toContain('alternateExplanation');
     expect(COURSEWARE_SCRIPT_PROMPT).toContain('不允许链接');
     expect(COURSEWARE_SCRIPT_PROMPT).toContain('SSML');
+    expect(COURSEWARE_SCRIPT_PROMPT).toContain('裸网址');
   });
 });
