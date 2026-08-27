@@ -5,6 +5,8 @@
 - 线上地址：https://xue.aipojing.xyz （备用 https://daoxue-web.xueban-ai.workers.dev）
 - Cloudflare 账号：使用拥有目标 D1 数据库和 Workers 权限的账号
 - D1 数据库名：`daoxue-db`
+- 私有 R2：`daoxue-courseware-media`（生产）/ `daoxue-courseware-media-preview`（preview）
+- Queue：`daoxue-courseware-generation`，DLQ：`daoxue-courseware-generation-dlq`
 
 ---
 
@@ -22,7 +24,8 @@ npm run build
 npm audit
 npx wrangler deploy --dry-run --outdir .wrangler/dry-run
 
-# 2. 如果改了 migrations/ 下的文件，先应用到线上库
+# 2. 查看并按编号应用所有待执行 additive migrations；不要挑文件或跳号
+npx wrangler d1 migrations list daoxue-db --remote
 npx wrangler d1 migrations apply daoxue-db --remote
 
 # 3. 构建并发布
@@ -47,6 +50,7 @@ npm run deploy
 - [ ] 本地 `npm run dev:worker` 跑通改动涉及的页面
 - [ ] 改了数据库结构 → 新建了 migration 文件（不要改已应用过的旧文件）
 - [ ] 没有把 API Key 写进代码（`.dev.vars` 已 gitignore）
+- [ ] 涉及语音课件 → 生产 `courseware_enabled` 仍为 `0`，直到 preview/本地完整冒烟通过
 
 ---
 
@@ -114,6 +118,118 @@ npm run deploy
 
 ---
 
+## 二（附二）、语音课件首次发布：默认关闭
+
+这是 additive、disabled rollout。严格按下面顺序执行；不要先发布依赖新表的 Worker，也不要为了回滚删除 Bucket、Queue、DLQ、迁移或课件对象。
+
+### 1. 创建私有 Standard R2
+
+名称必须与 `wrangler.jsonc` 完全一致：
+
+```bash
+npx wrangler r2 bucket create daoxue-courseware-media
+npx wrangler r2 bucket create daoxue-courseware-media-preview
+```
+
+R2 默认使用 Standard storage class。两个 Bucket 都保持 private：不要配置 public development URL、公开域名或允许浏览器直连。Worker 的 `COURSEWARE_MEDIA` binding 负责生产/preview 选择，媒体只能通过登录后的同源 API 读取。
+
+### 2. 创建 generation Queue 与 DLQ
+
+```bash
+npx wrangler queues create daoxue-courseware-generation-dlq
+npx wrangler queues create daoxue-courseware-generation
+```
+
+`wrangler.jsonc` 已声明 producer binding `COURSEWARE_QUEUE`，consumer 使用 batch size 1、最大并发 2、最大重试 3，并把耗尽的消息送到 `daoxue-courseware-generation-dlq`。不要改名后只改控制台；配置和远端资源必须一致。
+
+### 3. 备份 D1，并顺序应用 0012–0016
+
+```bash
+mkdir -p backups
+chmod 700 backups
+npx wrangler d1 export daoxue-db --remote --output backups/pre-voice-courseware.sql
+chmod 600 backups/pre-voice-courseware.sql
+
+npx wrangler d1 migrations list daoxue-db --remote
+npx wrangler d1 migrations apply daoxue-db --remote
+npx wrangler d1 migrations list daoxue-db --remote
+```
+
+Wrangler 会按文件名顺序应用所有待执行迁移。发布前必须确认下面五个 additive migration 都已执行，不能只停在 0012/0013：
+
+| migration | 内容 |
+|---|---|
+| `0012_courseware_ai_catalog.sql` | capability catalog、个人 provider credential、模型偏好、连接测试限额 |
+| `0013_voice_coursewares.sql` | 课件/段落/消息 draft，写入 `courseware_enabled = 0` 默认值 |
+| `0014_courseware_lifecycle.sql` | enqueue lease、媒体/学生清理 tombstone |
+| `0015_credential_revision.sql` | 凭证版本句柄，隔离 Key 轮换后的健康状态 |
+| `0016_courseware_progress_revision.sql` | 单调播放进度 revision |
+
+检查 flag，结果必须是 `0`：
+
+```bash
+npx wrangler d1 execute daoxue-db --remote \
+  --command "SELECT key, value FROM app_settings WHERE key = 'courseware_enabled';"
+```
+
+不要编辑已应用 migration，也不要用删除表/列模拟回滚。
+
+### 4. 配置唯一加密主密钥
+
+如果环境还没有 `AI_SETTINGS_ENCRYPTION_KEY`，只生成一次，先保存到密码管理器，再写入 Worker Secret：
+
+```bash
+openssl rand -base64 32
+npx wrangler secret put AI_SETTINGS_ENCRYPTION_KEY
+```
+
+不要为课件配置共享 provider Key。站点既有 `DEEPSEEK_API_KEY` / `VISION_API_KEY` 共享兜底只服务原聊天/OCR 路径，课件生成不会读取它们。课件测试账户必须自己在「AI 服务」页保存 provider Key。
+
+### 5. 以关闭状态部署 Worker
+
+```bash
+npm test
+npm run typecheck
+npm run build
+npm run deploy:dry-run
+npm run deploy
+```
+
+部署后再次从管理员 UI 和 D1 查询确认语音课件开关关闭。关闭状态下不能创建新课件，但新 API、绑定和 additive schema 已可接受验证；已有 `ready` 课件仍可播放和继续正式测验。
+
+### 6. 配置目录和个人测试账户
+
+1. 管理员进入「设置」的模型目录，核对 provider、endpoint capability、adapter、HTTPS base URL、模型、音色和启用状态；不要在目录中保存 Key。
+2. 使用专门的非生产家长测试账户进入「AI 服务」，分别保存自己的课件脚本、老师语音、AI 同学语音和可选图片 provider Key/偏好。
+3. 依次运行文本、语音和图片连接测试，确认页面只显示尾号/健康状态；空 Key、错误 Key、quota exhausted 都应阻止新生成且没有共享兜底。
+
+### 7. 在 preview/本地临时开启并完成 end-to-end smoke
+
+生产仍保持 `0`。在绑定 preview R2 的 preview 或完整本地环境中，通过管理员 UI 临时打开 `courseware_enabled`，仅用上面的专用测试账户执行 [冒烟清单](../scripts/smoke.md)：
+
+1. 从 `selflearn-daily` 严格任务卡创建课件；离开页面，等待 Queue consumer 完成后返回。
+2. 播放主/学生语音，拖动 seek（网络响应为 206），切换倍速，触发预生成备用解释，回答 checkpoint 并刷新确认进度。
+3. 点击正式测验，确认只创建/复用一个所属每日自学会话，重复点击不产生多个开场请求。
+4. 观察配图失败 warning、归一化失败数量、D1 writes/rows、R2 operations/storage、Queue backlog/retry/DLQ 和 provider 用量。
+5. 完成后把 preview/local flag 重新关回 `0`。
+
+### 8. 生产启用与停止新生成
+
+只有上述完整 smoke 通过后，管理员才在生产「设置」页明确开启语音课件。开启后先用同一个专用家长账户做一轮小流量生产验证，再逐步通知普通账户。
+
+发生 provider、费用或稳定性异常时，第一步是把 `courseware_enabled` 关回 `0`。这只阻止新的课件创建；已经保存的课件、私有媒体、播放进度和正式测验仍可使用。
+
+### 9. 语音课件回滚
+
+1. 管理员先关闭 `courseware_enabled`，停止新创建。
+2. 记录 Queue backlog/DLQ、失败码和当前 Worker Version ID；条件允许时让已经领取的任务完成或安全失败。
+3. 使用 `npx wrangler rollback` 回到已知稳定 Worker 版本。
+4. 保留 0012–0016 新表/列、`AI_SETTINGS_ENCRYPTION_KEY`、两个私有 R2 Bucket 及对象、generation Queue、DLQ 和所有 D1 tombstone。它们是增量资源，不是回滚目标；后续重新发布兼容 Worker 可继续恢复/清理。
+
+**禁止**通过删除 Bucket、Queue、DLQ、迁移记录、课件表或密文来回滚。这会破坏已付费媒体、用户进度、凭证可恢复性和后台清理依据。
+
+---
+
 ## 三、AI 服务与 API Key 配置
 
 AI 服务分两层，分别按配置所有者放在两个页面中（不用重新部署，随时能换）：
@@ -121,7 +237,7 @@ AI 服务分两层，分别按配置所有者放在两个页面中（不用重�
 1. **个人配置（所有登录用户）**：每个账号填自己的 DeepSeek Key 和视觉服务 Key，优先级最高，
    同账号下所有学生共用；同时设置该账号的画像提炼间隔和每日上限。Key 以 AES-256-GCM 密文存入 D1，
    页面只显示尾号不回显完整值。个人视觉服务只允许智谱 / 阿里云百炼两种白名单服务。入口为「AI 服务」。
-2. **站点共享配置（仅管理员）**：作为没有个人 Key 账号的兜底，可自定义 OpenAI 兼容地址，入口为「设置」。
+2. **站点共享配置（仅管理员）**：作为没有个人 Key 账号的聊天/OCR 兜底，可自定义 OpenAI 兼容地址，入口为「设置」。它不用于语音课件。
 
 | 配置项 | 说明 | 从哪里拿 |
 |---|---|---|
@@ -140,7 +256,7 @@ npx wrangler secret put DEEPSEEK_API_KEY
 npx wrangler secret put VISION_API_KEY
 ```
 
-共享服务优先级：**网页配置 > 环境变量**。共享与个人都没配时，对话会提示去「AI 服务」页配置。
+共享服务优先级：**网页配置 > 环境变量**。共享与个人都没配时，对话会提示去「AI 服务」页配置。语音课件无论共享开关如何都只认当前账户个人 provider credential。
 
 **必须配置的加密主密钥**
 
@@ -268,22 +384,25 @@ npx wrangler tail --status error
 | D1 读 | 500 万行/天 | 远超所需 |
 | D1 写 | 10 万行/天 | 远超所需 |
 | D1 存储 | 5 GB | 够用很多年 |
+| Queue | 以 Cloudflare 当前套餐为准 | 生成消息只含课件 ID；用量需在 smoke 后观察 |
+| 私有 R2 Standard | 以 Cloudflare 当前套餐为准 | MP3/图片是主要增量存储，按实际课件量监控 |
 | 智谱 GLM-4.1V-Thinking-Flash | 免费 | 够用 |
-| **DeepSeek** | **按量付费** | **唯一实际花钱的地方** |
+| DeepSeek / 课件文本、TTS、图片 provider | 按各 provider 套餐计费 | 严格使用账户个人套餐，发布前后都要监控 |
 
-DeepSeek 是主要成本。每条对话会带完整系统提示词（自学模式约 9 千字），按当前价格粗估每天认真学一小时约几毛钱。每日限额就是防止意外失控用的。
+聊天和课件 provider 调用是主要可变成本，R2/Queue 也会随课件量增长。对话每日限额不会替代课件 provider 自身的 quota；应分别观察 provider usage、Queue、D1 和 R2 指标，不在文档中假定某个套餐价格或免费额度长期不变。
 
 ---
 
 ## 九、备份
 
-D1 没有一键导出，需要时按表导：
+D1 可以整体 `export`；临时抽查单表时也可执行查询导出：
 
 ```bash
 npx wrangler d1 execute daoxue-db --remote --json \
   --command "SELECT * FROM students;" > backup-students.json
 ```
 
-重要的表：`users` `students` `selflearn_profiles` `knowledge_points` `mistake_cards` `lesson_outputs` `daily_reports` `messages`。
+重要的表：`users` `students` `selflearn_profiles` `knowledge_points` `mistake_cards` `lesson_outputs` `daily_reports` `messages` `ai_providers` `ai_provider_endpoints` `ai_models` `user_ai_credentials` `user_model_preferences` `coursewares` `courseware_segments` 以及课件 tombstone 表。
 
 建议每隔一段时间导一次 `selflearn_profiles`、`knowledge_points`、`mistake_cards`——这几张是孩子的学习积累，重建不回来。
+课件备份还必须把 D1 记录与私有 R2 对象作为一组考虑；只备份表而丢失 R2，`ready` 记录也无法播放。不要把 R2 object key、provider Key 或真实课件正文写进普通备份日志。

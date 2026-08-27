@@ -9,6 +9,8 @@
 | 运行时 | Cloudflare Workers，单 Worker 同时提供 API 和静态资源 |
 | 后端 | Hono 4 + TypeScript |
 | 数据库 | Cloudflare D1（SQLite） |
+| 后台任务 | Cloudflare Queues（生成队列 + DLQ） |
+| 课件媒体 | 私有 Cloudflare R2（Standard） |
 | 前端 | React 18 + Vite + React Router 7 |
 | 内容渲染 | react-markdown + KaTeX |
 | 大模型 | DeepSeek `deepseek-chat` / `deepseek-reasoner` |
@@ -20,15 +22,16 @@
 
 ```text
 浏览器（React）
-  │ HTTPS / SSE
+  │ HTTPS / SSE / authenticated Range
   ▼
 Cloudflare Worker（Hono）
-  ├─ 鉴权、学生、会话、错题、自学、管理 API
-  ├─ DeepSeek / 视觉模型调用
+  ├─ 鉴权、学生、会话、错题、自学、课件、管理 API
+  ├─ 同源私有媒体代理（不向浏览器返回 R2 key）
+  ├─ Queue producer / consumer
   └─ 静态资源
-       │
-       ▼
-Cloudflare D1
+       ├── Cloudflare D1：所有权、目录、快照、状态、租约、进度、警告和用量
+       ├── Cloudflare Queue：仅 { coursewareId }，推进后台生成
+       └── 私有 Cloudflare R2：MP3 与可选图片对象
 ```
 
 后端使用统一响应 envelope。聊天采用 SSE 流式返回，并使用请求 ID、会话租约和数据库唯一索引保证断线重试幂等；额度占用、用户消息落库以及失败退款状态通过 D1 事务保持一致。
@@ -145,9 +148,79 @@ AI 服务配置分为**个人配置**（`user_ai_settings`，按账号加密保�
 
 本地开发的 `.dev.vars` 已加入 `.gitignore`。不要把 API Key、生产数据库导出或真实学习数据提交到仓库。
 
+## 语音课件架构
+
+### Capability-driven 模型目录
+
+课件模型不在生成代码中写死。管理员维护三层目录：
+
+```text
+provider
+  └─ endpoint（capability + adapter_type + HTTPS base URL）
+       └─ model（model id、显示名、配置、可选音色、推荐顺序）
+```
+
+目录 capability 只有 `structured_text`、`speech_synthesis` 和 `image_generation`。编译进 Worker 的 adapter registry 再校验 endpoint 的 `adapter_type`，当前支持 `openai_text`、`token_plan_tts` 和 `token_plan_image`；目录记录不能让运行时执行任意代码。
+
+家长按用途保存 `courseware_text`、`teacher_tts`、`student_tts` 和可选的 `courseware_image` 偏好。语音用途必须从所选模型声明的音色中选择。创建课件时，Worker 校验 capability/adapter/voice 后把 provider、endpoint、model、voice、参数、adapter/prompt 版本写入 `model_snapshot_json`；后续 Queue 消费者使用该快照，不会偷偷换成账户刚修改的新模型，也不会跨 provider fallback。
+
+### 严格 BYOK 与凭证隔离
+
+语音课件的凭证路径与前文的聊天共享兜底是两套边界：
+
+- 课件只读取 `user_ai_credentials` 中**课件所有者当前可解密的个人 provider Key**；站点共享 DeepSeek/视觉 Key、环境变量共享 Key和浏览器语音都不在候选路径中。
+- 每个 `(user_id, provider_id)` 凭证使用 `AI_SETTINGS_ENCRYPTION_KEY` 做 AES-256-GCM 加密，API 只返回已配置状态、尾号和归一化健康状态，不返回密文、IV 或完整 Key。
+- 生成调用携带准确的 `credential_revision`。迟到的成功、401 或 quota 结果只能更新本次实际使用的凭证版本，不能污染用户刚轮换的新 Key。
+- 真实 provider 的 401/403、quota 才更新对应版本健康状态；主密钥缺失、解密失败、D1/服务配置异常按基础设施错误处理，不把用户 Key 误标为 invalid。
+- 缺 Key、invalid 或 quota exhausted 会阻止新的相应阶段；不会改用平台 Key。已经 `ready` 的课件播放不需要 provider Key。
+
+完整 Key、密文、IV、主密钥、R2 object key、完整 prompt、孩子画像正文和生成课件正文都不得进入普通日志。API 仅在通过账户归属校验的 `ready` 详情中返回播放器必需的段落 DTO；目录、列表、状态、错误和管理 DTO 不返回生成正文。
+
+### Queue、D1 与私有 R2 的职责
+
+| 资源 | 权威数据与边界 |
+|---|---|
+| D1 | 课件/学生/账户归属、严格脚本、model snapshot、段落、artifact 状态、租约、重试计数、warning/usage、安全错误、播放进度、assessment 关联和清理 tombstone。D1 状态是恢复与幂等判断的权威来源。 |
+| Queue | 消息运行时严格校验为唯一字段 `{ coursewareId: positive integer }`。消费者逐条 ack/retry，一个消息失败不影响同 batch 其他消息；Queue 只负责唤醒，不承载 prompt、Key、模型或课件正文。 |
+| 私有 R2 | 保存 attempt-scoped MP3/图片。Bucket 不开放公共域名；浏览器只能走鉴权同源媒体路由。CAS 失败或删除失败通过精确清理与 D1 tombstone 收敛孤儿对象。 |
+
+生成使用五分钟 lease、续租和 token/CAS guard。每次最多推进五个 artifact，避免单课件淹没 provider。重复或延迟 Queue 消息会先读取 D1：已完成并仍存在的 artifact 不再调用 provider；stale worker 不能覆盖删除中状态、新 attempt 或赢家对象。这里保证的是持久化状态与重复投递安全，不宣称 provider 调用跨崩溃 exactly-once。
+
+### 状态机与失败语义
+
+外层 `status` 为 `queued | generating | ready | failed | deleting`；生成阶段为：
+
+```text
+queued → scripting → speech → images → finalizing → ready
+             └──────── required failure ───────→ failed
+```
+
+- `scripting` 的 provider 输出必须通过严格 schema parser 后才写入段落；HTML/JS/代码不会执行。
+- `speech` 必须完成所有主语音和脚本要求的备用语音；缺一项都不能进入 `ready`。
+- `images` 是可选阶段。单图失败在 bounded retry 后写 warning，课件仍可进入 `ready`；管理员/家长可对失败图片单独重试。
+- timeout、rate limit、provider unavailable 和存储暂时故障执行有界重试；无效凭证、quota、模型不兼容等非瞬时错误立即写入归一化安全失败。
+- `finalizing` 会重新核验必需 R2 对象；缺失对象回到对应阶段恢复，存储检查本身失败也有持久化的有界计数，避免无限重排。
+- 删除先把课件变为 `deleting`，使旧 worker 的所有写入失效，再清理私有媒体和 D1 数据。
+
+### 媒体 Range 与播放进度
+
+详情 DTO 只包含形如 `/api/coursewares/:coursewareId/segments/:segmentId/audio` 的同源 URL。媒体路由再次沿 `students.user_id` 校验账户、课件、段落和 variant，并验证 D1 中的实际 key 只能属于预期逻辑 key；绝不接受客户端传入 object key。
+
+R2 代理支持 `Range` / `If-Range` / `If-None-Match`：完整响应为 200，合法单段 byte range 为 206（含 `Content-Range`），无效 range 为 416，缓存命中为 304；响应始终带 `Accept-Ranges: bytes` 和 private cache policy。音频拖动因此不需要把 Bucket 公开。
+
+播放器保存的是完整进度快照：当前位置、毫秒时间、课内 checkpoint 答案和单调递增 `revision`。D1 只接受 `progress_revision < incoming revision` 的归属校验 CAS，延迟的普通 PATCH 不能覆盖 `pagehide`/卸载时更新的最终快照。
+
+### 正式测验边界
+
+课内 checkpoint 只属于播放器进度，不写 L1–L4 知识证据。`POST /api/coursewares/:id/assessment` 只接受当前账户拥有且 `ready` 的课件：优先复用同一孩子、同一账户、模式为 `selflearn-daily` 的 source conversation，否则创建一个同模式会话，并用 D1 CAS 只关联一次。固定 request ID `courseware-assessment-{coursewareId}` 复用现有聊天幂等边界。
+
+正式测验的一题一答仍走原 `selflearn-daily` 消息处理，只有正式回答会沉淀知识点和错题卡。功能开关关闭、个人 Key 移除或目录模型停用不影响已保存课件的播放与 assessment 恢复。
+
 ## 数据库迁移
 
 迁移文件位于 `migrations/`，按编号顺序执行。基本原则：
+
+当前迁移链到 `0016_courseware_progress_revision.sql`。语音课件首次发布必须连续应用所有待执行的 `0012`–`0016`，不能只应用 catalog/基础课件表后跳过 lifecycle、credential revision 或 progress revision。
 
 - 已经应用过的迁移不可修改，只能新增迁移；
 - 本地验证迁移链后，再备份并应用远端迁移；
@@ -180,6 +253,8 @@ AI 服务配置分为**个人配置**（`user_ai_settings`，按账号加密保�
 - 未知 SSE 断线会查询服务端生成状态，不立即重复提交；
 - 新会话创建会复用 StrictMode 重放期间的 pending 请求；
 - 模态框支持初始焦点、焦点圈定、Escape 关闭和焦点恢复。
+- 课件列表/详情轮询和 assessment 请求使用 route epoch/AbortSignal；切换孩子或课件后，旧响应不能导航或覆盖新路由。
+- 播放进度通过单调 revision 串行化，普通保存与最终保存不会互相回退。
 
 ## 项目结构
 
@@ -190,6 +265,8 @@ src/worker/          Cloudflare Worker 后端
   chat/              会话、SSE、模型调用、OCR、额度与租约
   mistakes/          错题卡抽取与错题本
   selflearn/         自学记忆、结构化抽取与每日流程
+  courseware/        目录解析、BYOK adapter、Queue 状态机、R2 媒体、进度与正式测验
+  ai-catalog/        capability 目录、个人 provider 凭证和模型偏好
   profiles/          学科画像自动提炼
   admin/             邀请码、限额与站点共享 AI 服务配置
   settings/          登录用户个人 AI 设置（加密 Key）接口
@@ -211,7 +288,8 @@ docs/                技术、部署、域名与设计资料
 
 - 六个学科分别使用解题导学提示词，目标是定位卡点并逐步引导；
 - 自学提示词保留画像、每日流程、掌握等级和输出模板等硬规则；
-- 自学课件环节只生成供 OpenMAIC 使用的课件生产提示词；
+- `courseware_enabled = 0` 时自学每日流程保留 OpenMAIC 交接；明确开启后，只在 `selflearn-daily` 末尾接受一个严格的站内课件任务块，profiling 不注入、不解析也不显示课件卡；
+- 课件脚本预生成老师、AI 同学、误区、备用解释和 checkpoint，播放时不调用模型；
 - 图片服务需要理解几何图、电路图、函数图像等关系，因此使用视觉理解模型而不是纯 OCR。
 
 ## 发布与运维
