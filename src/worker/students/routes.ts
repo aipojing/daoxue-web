@@ -4,6 +4,8 @@ import { ok, err } from '../lib/envelope';
 import { studentSchema, studentUpdateSchema } from './validation';
 import { isSubject } from '../chat/prompt-builder';
 import { profileFormSchema, buildProfileTextFromForm } from '../selflearn/profile-form';
+import { deleteStudentCoursewareMedia } from '../courseware/media';
+import { UserFacingError } from '../lib/errors';
 
 async function saveProfileForm(
   db: D1Database,
@@ -123,6 +125,15 @@ studentRoutes.delete('/:id', async (c) => {
   const user = c.get('user');
   const student = await getOwnedStudent(c.env.DB, user.id, Number(c.req.param('id')));
   if (!student) return err(c, '学生不存在', 404);
+  await c.env.DB.prepare(
+    `UPDATE coursewares SET status = 'deleting', lease_token = NULL, lease_expires_at = NULL,
+       updated_at = datetime('now') WHERE student_id = ?`,
+  ).bind(student.id).run();
+  try {
+    await deleteStudentCoursewareMedia(c.env.COURSEWARE_MEDIA, user.id, student.id);
+  } catch {
+    throw new UserFacingError('学生课件媒体删除暂时失败，请稍后重试', 503);
+  }
   await c.env.DB.prepare('DELETE FROM students WHERE id = ?').bind(student.id).run();
   return ok(c, { deleted: true });
 });

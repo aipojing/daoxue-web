@@ -12,6 +12,7 @@ import { adminRoutes } from './admin/routes';
 import { aiCatalogRoutes, coursewareAISettingsRoutes } from './ai-catalog/routes';
 import { adminAICatalogRoutes } from './ai-catalog/admin-routes';
 import { toHttpError } from './lib/errors';
+import { coursewareRoutes, coursewareStudentRoutes } from './courseware/routes';
 
 const app = new Hono<AppContext>();
 
@@ -27,10 +28,12 @@ app.use('/api/admin/*', requireAuth, requireAdmin);
 app.route('/api/students', conversationStudentRoutes);
 app.route('/api/students', mistakeStudentRoutes);
 app.route('/api/students', selfLearnRoutes);
+app.route('/api/students', coursewareStudentRoutes);
 app.route('/api/students', studentRoutes);
 app.route('/api/conversations', mistakeExtractRoutes);
 app.route('/api/conversations', conversationRoutes);
 app.route('/api/mistake-cards', mistakeCardRoutes);
+app.route('/api/coursewares', coursewareRoutes);
 // requireAuth 已在子路由内执行一次，这里不再重复挂载
 app.route('/api/ai-settings', userAISettingsRoutes);
 app.route('/api/ai-catalog', aiCatalogRoutes);
