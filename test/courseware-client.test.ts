@@ -130,8 +130,10 @@ describe('courseware library helpers', () => {
     expect(completions).toHaveLength(1);
     completions[0]!();
     await Promise.resolve();
+    await Promise.resolve();
     expect(completions).toHaveLength(2);
     completions[1]!();
+    await Promise.resolve();
     await Promise.resolve();
     expect(scheduled.size).toBe(1);
     active = false;

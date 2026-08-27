@@ -116,5 +116,7 @@ describe('客户端关键交互结构', () => {
     expect(status).toContain('可以离开，后台会继续');
     expect(page).toContain('CoursewareDeleteModal');
     expect(page).not.toContain('window.confirm');
+    expect(page).toContain('CoursewareItemsCoordinator');
+    expect(page).toContain('commitItems(updateCoursewareList(itemsRef.current, next))');
   });
 });

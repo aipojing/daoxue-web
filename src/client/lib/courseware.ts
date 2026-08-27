@@ -146,10 +146,10 @@ export class CoursewareItemsCoordinator {
   private items: CoursewareSummary[] = [];
   constructor(private readonly onWake: () => void) {}
   current(): CoursewareSummary[] { return this.items; }
-  commit(next: CoursewareSummary[]): CoursewareSummary[] {
+  commit(next: CoursewareSummary[], wakeOnTransition = true): CoursewareSummary[] {
     const wasActive = this.items.some((item) => shouldPollCourseware(item));
     this.items = next;
-    if (!wasActive && next.some((item) => shouldPollCourseware(item))) this.onWake();
+    if (wakeOnTransition && !wasActive && next.some((item) => shouldPollCourseware(item))) this.onWake();
     return next;
   }
 }
@@ -210,7 +210,7 @@ export class CoursewarePollChain {
   private run(generation: number): void {
     if (!this.running || this.inFlight || generation !== this.generation || !this.hasActiveCourseware()) return;
     this.inFlight = true;
-    void this.poll().finally(() => {
+    void this.poll().catch(() => undefined).finally(() => {
       this.inFlight = false;
       if (!this.running || generation !== this.generation) return;
       if (this.wakeRequested) { this.wakeRequested = false; this.generation += 1; this.run(this.generation); return; }
