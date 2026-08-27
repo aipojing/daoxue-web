@@ -50,6 +50,7 @@ async function request<T>(method: string, path: string, body?: unknown, options?
 export const apiGet = <T>(path: string, options?: ApiRequestOptions) => request<T>('GET', path, undefined, options);
 export const apiPost = <T>(path: string, body?: unknown, options?: ApiRequestOptions) => request<T>('POST', path, body, options);
 export const apiPut = <T>(path: string, body?: unknown, options?: ApiRequestOptions) => request<T>('PUT', path, body, options);
+export const apiPatch = <T>(path: string, body?: unknown, options?: ApiRequestOptions) => request<T>('PATCH', path, body, options);
 export const apiDelete = <T>(path: string, options?: ApiRequestOptions) => request<T>('DELETE', path, undefined, options);
 
 export function getAuthProbeError(error: unknown): string {

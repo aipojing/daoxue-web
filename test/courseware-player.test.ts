@@ -1,0 +1,156 @@
+import { readFileSync } from 'node:fs';
+import { describe, expect, it } from 'vitest';
+import type { CoursewareProgressPatch } from '../src/shared/courseware';
+import {
+  initialPlayerState,
+  playerReducer,
+  progressPatch,
+  CoursewareProgressWriter,
+  type CoursewarePlayerInput,
+  type CoursewarePlayerState,
+} from '../src/client/lib/courseware-player';
+
+function lessonFixture(): CoursewarePlayerInput {
+  return {
+    currentSegmentPosition: 0,
+    currentTimeMs: 0,
+    checkpointAnswers: {},
+    segments: [
+      { segmentKey: 's0', kind: 'teacher_intro', audioUrl: '/audio/0', alternateAudioUrl: null },
+      { segmentKey: 's1', kind: 'teacher_explanation', audioUrl: '/audio/1', alternateAudioUrl: '/alternate-audio/1' },
+      { segmentKey: 's2', kind: 'student_question', audioUrl: '/audio/2', alternateAudioUrl: null },
+      { segmentKey: 's3', kind: 'student_misconception', audioUrl: '/audio/3', alternateAudioUrl: null },
+      { segmentKey: 's4', kind: 'checkpoint', audioUrl: '/audio/4', alternateAudioUrl: null },
+      { segmentKey: 's5', kind: 'teacher_reframe', audioUrl: '/audio/5', alternateAudioUrl: '/alternate-audio/5' },
+      { segmentKey: 's6', kind: 'summary', audioUrl: '/audio/6', alternateAudioUrl: null },
+    ],
+  };
+}
+
+function playingTeacherFixture(): CoursewarePlayerState {
+  const started = playerReducer(initialPlayerState(lessonFixture()), { type: 'START' });
+  return playerReducer(started, { type: 'NEXT' });
+}
+
+function checkpointAnsweredFixture(): CoursewarePlayerState {
+  return playerReducer(initialPlayerState(lessonFixture()), {
+    type: 'ANSWER_CHECKPOINT',
+    segmentKey: 's4',
+    optionIndex: 1,
+  });
+}
+
+describe('courseware player state', () => {
+  it('requires a user gesture before the first audio playback', () => {
+    expect(initialPlayerState(lessonFixture()).awaitingStart).toBe(true);
+  });
+
+  it('moves through segments and stops at the final segment', () => {
+    let state = playerReducer(initialPlayerState(lessonFixture()), { type: 'START' });
+    state = playerReducer(state, { type: 'AUDIO_ENDED' });
+    expect(state.segmentPosition).toBe(1);
+    state = playerReducer({ ...state, segmentPosition: 6 }, { type: 'AUDIO_ENDED' });
+    expect(state.completed).toBe(true);
+    expect(state.segmentPosition).toBe(6);
+    expect(state.isPlaying).toBe(false);
+  });
+
+  it('plays only pre-generated alternate audio for I did not understand', () => {
+    const state = playerReducer(playingTeacherFixture(), { type: 'PLAY_ALTERNATE' });
+    expect(state.mode).toBe('alternate');
+    expect(state.activeAudioUrl).toContain('/alternate-audio');
+    expect(JSON.stringify(state)).not.toContain('/generate');
+  });
+
+  it('returns from alternate audio to the same main segment without advancing', () => {
+    const atTwelveSeconds = playerReducer(playingTeacherFixture(), { type: 'TIME_UPDATE', seconds: 12 });
+    const alternate = playerReducer(atTwelveSeconds, { type: 'PLAY_ALTERNATE' });
+    const alternateAtFiveSeconds = playerReducer(alternate, { type: 'TIME_UPDATE', seconds: 5 });
+    const returned = playerReducer(alternateAtFiveSeconds, { type: 'AUDIO_ENDED' });
+    expect(returned.segmentPosition).toBe(alternate.segmentPosition);
+    expect(returned.mode).toBe('main');
+    expect(returned.activeAudioUrl).toBe('/audio/1');
+    expect(returned.currentSeconds).toBe(12);
+    expect(progressPatch(returned).currentTimeMs).toBe(12_000);
+    expect(returned.isPlaying).toBe(false);
+  });
+
+  it('waits on a checkpoint after its main audio ends', () => {
+    const checkpoint = { ...initialPlayerState(lessonFixture()), awaitingStart: false, isPlaying: true, segmentPosition: 4, activeAudioUrl: '/audio/4' };
+    const stopped = playerReducer(checkpoint, { type: 'AUDIO_ENDED' });
+    expect(stopped.segmentPosition).toBe(4);
+    expect(stopped.waitingForCheckpoint).toBe(true);
+    expect(stopped.isPlaying).toBe(false);
+  });
+
+  it('records checkpoints as local course progress without mastery fields', () => {
+    const patch = progressPatch(checkpointAnsweredFixture());
+    expect(patch.checkpointAnswers).toEqual({ s4: 1 });
+    expect(patch).not.toHaveProperty('masteryLevel');
+    expect(patch).not.toHaveProperty('knowledgeEvidence');
+  });
+
+  it('clamps restored position and time to safe non-negative values', () => {
+    const state = initialPlayerState({ ...lessonFixture(), currentSegmentPosition: 99, currentTimeMs: -10 });
+    expect(state.segmentPosition).toBe(6);
+    expect(state.currentSeconds).toBe(0);
+  });
+});
+
+describe('courseware progress writer', () => {
+  it('serializes requests and collapses queued writes to the newest complete snapshot', async () => {
+    const calls: CoursewareProgressPatch[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstPending = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const writer = new CoursewareProgressWriter(async (patch) => {
+      calls.push(patch);
+      if (calls.length === 1) await firstPending;
+    });
+    const patchAt = (position: number): CoursewareProgressPatch => ({
+      currentSegmentPosition: position,
+      currentTimeMs: position * 1_000,
+      checkpointAnswers: position > 1 ? { s1: 0 } : {},
+    });
+
+    writer.enqueue(patchAt(0));
+    writer.enqueue(patchAt(1));
+    writer.enqueue(patchAt(2));
+    expect(calls.map((patch) => patch.currentSegmentPosition)).toEqual([0]);
+    releaseFirst?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.map((patch) => patch.currentSegmentPosition)).toEqual([0, 2]);
+    expect(calls[1]?.checkpointAnswers).toEqual({ s1: 0 });
+  });
+});
+
+describe('courseware player approved controls and safety', () => {
+  it('renders every approved playback control without browser speech APIs', () => {
+    const files = [
+      '../src/client/components/CoursewarePlayer.tsx',
+      '../src/client/components/CoursewareCheckpoint.tsx',
+      '../src/client/pages/CoursewarePlayerPage.tsx',
+    ].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
+    for (const label of ['上一段', '播放', '暂停', '下一段', '倍速', '重播本句', '我没听懂', '继续学习', '开始正式测验']) {
+      expect(files).toContain(label);
+    }
+    expect(files).not.toContain('speechSynthesis');
+    expect(files).not.toContain('SpeechRecognition');
+  });
+
+  it('uses one authenticated audio element and a PATCH helper', () => {
+    const player = readFileSync(new URL('../src/client/components/CoursewarePlayer.tsx', import.meta.url), 'utf8');
+    const api = readFileSync(new URL('../src/client/api.ts', import.meta.url), 'utf8');
+    expect(player.match(/<audio\b/g)).toHaveLength(1);
+    expect(player).toContain('preload="metadata"');
+    expect(player).toContain('apiPatch');
+    expect(api).toContain("request<T>('PATCH'");
+  });
+
+  it('does not generate or POST from the alternate explanation path', () => {
+    const player = readFileSync(new URL('../src/client/components/CoursewarePlayer.tsx', import.meta.url), 'utf8');
+    const handler = player.match(/const playAlternate[\s\S]*?\n\s*};/)?.[0] ?? '';
+    expect(handler).toContain("dispatch({ type: 'PLAY_ALTERNATE' })");
+    expect(handler).not.toContain('apiPost');
+    expect(handler).not.toContain('/generate');
+  });
+});

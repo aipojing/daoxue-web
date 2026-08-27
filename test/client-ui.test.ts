@@ -119,4 +119,17 @@ describe('客户端关键交互结构', () => {
     expect(page).toContain('CoursewareItemsCoordinator');
     expect(page).toContain('commitItems(updateCoursewareList(itemsRef.current, next))');
   });
+
+  it('语音课件播放页复用安全 Markdown 并提供可识别的时间线状态', () => {
+    const app = clientSource('App.tsx');
+    const page = clientSource('pages/CoursewarePlayerPage.tsx');
+    const timeline = clientSource('components/CoursewareTimeline.tsx');
+
+    expect(app).toContain('CoursewarePlayerPage');
+    expect(page).toContain('CoursewareGenerationStatus');
+    expect(timeline).toContain('MarkdownContent');
+    expect(timeline).toContain('aria-current');
+    expect(timeline).toContain('visual.altText');
+    expect(timeline).not.toContain('dangerouslySetInnerHTML');
+  });
 });

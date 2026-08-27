@@ -25,10 +25,11 @@ export default function CoursewareGenerationStatus({ courseware, onQueued, route
       if (!isRouteCurrent(routeToken) || routeSignal.aborted) return;
       onQueued();
     } catch (cause) {
+      if (routeSignal.aborted || !isRouteCurrent(routeToken)) return;
       setError(cause instanceof ApiError ? cause.message : '操作未完成，请稍后重试');
     } finally {
       pendingRef.current = false;
-      setPending(null);
+      if (!routeSignal.aborted && isRouteCurrent(routeToken)) setPending(null);
     }
   };
   const active = courseware.status === 'queued' || courseware.status === 'generating'

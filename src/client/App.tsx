@@ -18,15 +18,7 @@ const StudentWorkspaceLayout = lazy(() => import('./components/StudentWorkspaceL
 const StudentMasteryPage = lazy(() => import('./pages/StudentMasteryPage'));
 const StudentProfilePage = lazy(() => import('./pages/StudentProfilePage'));
 const CoursewaresPage = lazy(() => import('./pages/CoursewaresPage'));
-
-function WorkspacePlaceholder({ title }: { title: string }) {
-  return (
-    <div className="page">
-      <div className="page-header"><h1>{title}</h1></div>
-      <div className="empty-state"><p>该功能正在准备中，请从左侧菜单继续使用其他学习功能。</p></div>
-    </div>
-  );
-}
+const CoursewarePlayerPage = lazy(() => import('./pages/CoursewarePlayerPage'));
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user, loading, error, refresh } = useAuth();
@@ -130,7 +122,7 @@ function AppRoutes() {
         <Route path="selflearn" element={<SelfLearnPage />} />
         <Route path="mistakes" element={<MistakesPage />} />
         <Route path="coursewares" element={<CoursewaresPage />} />
-        <Route path="coursewares/:coursewareId" element={<WorkspacePlaceholder title="语音课件" />} />
+        <Route path="coursewares/:coursewareId" element={<CoursewarePlayerPage />} />
         <Route path="mastery" element={<StudentMasteryPage />} />
         <Route path="profile" element={<StudentProfilePage />} />
       </Route>
