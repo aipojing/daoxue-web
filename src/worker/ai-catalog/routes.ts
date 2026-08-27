@@ -17,6 +17,7 @@ import {
   type ConnectionTestCapability,
 } from './connection-tests';
 import { ProviderCallError } from '../courseware/adapters/errors';
+import { ignoreCancelFailure } from '../lib/outbound-url';
 
 export const aiCatalogRoutes = new Hono<AppContext>();
 export const coursewareAISettingsRoutes = new Hono<AppContext>();
@@ -61,15 +62,73 @@ const emptyTestBodySchema = z.object({}).strict();
 const speechTestBodySchema = z.object({
   purpose: z.enum(['teacher_tts', 'student_tts']),
 }).strict();
+const MAX_CONNECTION_TEST_BODY_BYTES = 1024;
+const BODY_TOO_LARGE_MESSAGE = '连接测试请求体过大';
 
-async function readOptionalJsonBody(c: Context<AppContext>): Promise<unknown> {
-  const raw = await c.req.text();
-  if (!raw.trim()) return {};
-  try {
-    return JSON.parse(raw) as unknown;
-  } catch {
-    return undefined;
+type ConnectionTestBodyRead =
+  | { ok: true; value: unknown }
+  | { ok: false; status: 400 | 413; message: string };
+
+async function cancelRequestBody(body: ReadableStream<Uint8Array> | null): Promise<void> {
+  await ignoreCancelFailure(body ? () => body.cancel() : undefined);
+}
+
+export async function readBoundedConnectionTestBody(
+  body: ReadableStream<Uint8Array> | null,
+  contentLength: string | undefined,
+): Promise<ConnectionTestBodyRead> {
+  contentLength = contentLength?.trim();
+  if (contentLength && /^\d+$/.test(contentLength)) {
+    try {
+      if (BigInt(contentLength) > BigInt(MAX_CONNECTION_TEST_BODY_BYTES)) {
+        await cancelRequestBody(body);
+        return { ok: false, status: 413, message: BODY_TOO_LARGE_MESSAGE };
+      }
+    } catch {
+      // Invalid or forged lengths are treated as unknown and bounded while streaming below.
+    }
   }
+
+  if (!body) return { ok: true, value: {} };
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > MAX_CONNECTION_TEST_BODY_BYTES) {
+        await ignoreCancelFailure(() => reader.cancel());
+        return { ok: false, status: 413, message: BODY_TOO_LARGE_MESSAGE };
+      }
+      chunks.push(next.value);
+    }
+  } catch {
+    await ignoreCancelFailure(() => reader.cancel());
+    return { ok: false, status: 400, message: '连接测试请求体无效' };
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const raw = new TextDecoder().decode(bytes);
+  if (!raw.trim()) return { ok: true, value: {} };
+  try {
+    return { ok: true, value: JSON.parse(raw) as unknown };
+  } catch {
+    return { ok: false, status: 400, message: '连接测试请求体无效' };
+  }
+}
+
+async function readOptionalJsonBody(c: Context<AppContext>): Promise<ConnectionTestBodyRead> {
+  return readBoundedConnectionTestBody(
+    c.req.raw.body,
+    c.req.header('content-length'),
+  );
 }
 
 function safeProviderStatus(error: ProviderCallError): ContentfulStatusCode {
@@ -112,19 +171,25 @@ async function connectionTestResponse(
 }
 
 coursewareAISettingsRoutes.post('/test/text', async (c) => {
-  const parsed = emptyTestBodySchema.safeParse(await readOptionalJsonBody(c));
+  const body = await readOptionalJsonBody(c);
+  if (!body.ok) return err(c, body.message, body.status);
+  const parsed = emptyTestBodySchema.safeParse(body.value);
   if (!parsed.success) return err(c, '连接测试不接受自定义输入');
   return connectionTestResponse(c, 'text');
 });
 
 coursewareAISettingsRoutes.post('/test/speech', async (c) => {
-  const parsed = speechTestBodySchema.safeParse(await readOptionalJsonBody(c));
+  const body = await readOptionalJsonBody(c);
+  if (!body.ok) return err(c, body.message, body.status);
+  const parsed = speechTestBodySchema.safeParse(body.value);
   if (!parsed.success) return err(c, '试听参数不合法');
   return connectionTestResponse(c, parsed.data.purpose);
 });
 
 coursewareAISettingsRoutes.post('/test/image', async (c) => {
-  const parsed = emptyTestBodySchema.safeParse(await readOptionalJsonBody(c));
+  const body = await readOptionalJsonBody(c);
+  if (!body.ok) return err(c, body.message, body.status);
+  const parsed = emptyTestBodySchema.safeParse(body.value);
   if (!parsed.success) return err(c, '图片测试不接受自定义输入');
   return connectionTestResponse(c, 'image');
 });

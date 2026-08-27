@@ -42,8 +42,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function remainingTimeoutMs(deadline: number): number {
+  const remaining = Math.floor(deadline - performance.now());
+  if (remaining < 1) throw new ProviderCallError('provider_timeout', 408);
+  return remaining;
+}
+
 export const tokenPlanImageAdapter: ImageGenerationAdapter = {
   async generate(request) {
+    const deadline = performance.now() + request.timeoutMs;
     let response: Response;
     try {
       response = await fetch(endpointUrl(request.baseUrl), {
@@ -63,7 +70,7 @@ export const tokenPlanImageAdapter: ImageGenerationAdapter = {
           parameters: { size: request.size },
         }),
         redirect: 'error',
-        signal: AbortSignal.timeout(request.timeoutMs),
+        signal: AbortSignal.timeout(remainingTimeoutMs(deadline)),
       });
     } catch (error) {
       if (error instanceof ProviderCallError) throw error;
@@ -99,7 +106,11 @@ export const tokenPlanImageAdapter: ImageGenerationAdapter = {
 
     let download: Response;
     try {
-      download = await fetchAllowedMedia(imageValue, request.allowedMediaHostSuffixes, request.timeoutMs);
+      download = await fetchAllowedMedia(
+        imageValue,
+        request.allowedMediaHostSuffixes,
+        remainingTimeoutMs(deadline),
+      );
     } catch (error) {
       throw normalizeOutboundError(error);
     }

@@ -5,6 +5,7 @@ import type {
   CoursewareModelPreference,
   CoursewareModelPurpose,
 } from '../../src/shared/ai-catalog';
+import { readBoundedConnectionTestBody } from '../../src/worker/ai-catalog/routes';
 
 interface Envelope<T> {
   success: boolean;
@@ -104,6 +105,24 @@ async function usageCount(userId: number): Promise<number> {
     'SELECT request_count FROM ai_connection_test_usage WHERE user_id = ?',
   ).bind(userId).first<{ request_count: number }>();
   return row?.request_count ?? 0;
+}
+
+function oversizedStream(
+  onCancel: () => void = () => undefined,
+  rejectCancel = false,
+): ReadableStream<Uint8Array> {
+  const chunks = [new Uint8Array(700).fill(32), new Uint8Array(700).fill(32)];
+  let index = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const chunk = chunks[index++];
+      if (chunk) controller.enqueue(chunk);
+    },
+    cancel() {
+      onCancel();
+      if (rejectCancel) throw new Error('cancel must not replace safe 413');
+    },
+  });
 }
 
 beforeEach(async () => {
@@ -235,6 +254,94 @@ describe('AI provider connection tests', () => {
     ]);
 
     expect(responses.map((response) => response.status)).toEqual([400, 400, 400]);
+    expect(upstream).not.toHaveBeenCalled();
+    expect(await usageCount(account.userId)).toBe(0);
+  });
+
+  it.each([
+    ['/api/courseware-ai-settings/test/text', '{}'],
+    ['/api/courseware-ai-settings/test/speech', '{"purpose":"teacher_tts"}'],
+    ['/api/courseware-ai-settings/test/image', '{}'],
+  ])('rejects a declared body over 1 KiB before %s reaches the provider', async (path, body) => {
+    const account = await configuredAccount(`declared-limit-${path.split('/').at(-1)}@example.com`);
+    const upstream = vi.fn();
+    vi.stubGlobal('fetch', upstream);
+
+    const response = await api(path, {
+      method: 'POST',
+      headers: { 'Content-Length': '1025' },
+      body,
+    }, account.cookie);
+
+    expect(response.status).toBe(413);
+    expect(await json(response)).toEqual({
+      success: false, data: null, error: '连接测试请求体过大',
+    });
+    expect(upstream).not.toHaveBeenCalled();
+    expect(await usageCount(account.userId)).toBe(0);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['forged', '2'],
+  ])('streams and rejects an oversized body with %s Content-Length', async (_kind, contentLength) => {
+    const account = await configuredAccount(`stream-limit-${_kind}@example.com`);
+    const upstream = vi.fn();
+    vi.stubGlobal('fetch', upstream);
+    const headers = new Headers({ 'Content-Type': 'application/json' });
+    if (contentLength) headers.set('Content-Length', contentLength);
+
+    const response = await api('/api/courseware-ai-settings/test/text', {
+      method: 'POST',
+      headers,
+      body: oversizedStream(),
+    }, account.cookie);
+
+    expect(response.status).toBe(413);
+    expect((await json(response)).error).toBe('连接测试请求体过大');
+    expect(upstream).not.toHaveBeenCalled();
+    expect(await usageCount(account.userId)).toBe(0);
+  });
+
+  it('keeps the fixed 413 response when oversized-stream cancellation fails', async () => {
+    const cancelled = vi.fn();
+    const result = await readBoundedConnectionTestBody(
+      oversizedStream(cancelled, true),
+      undefined,
+    );
+
+    expect(result).toEqual({
+      ok: false, status: 413, message: '连接测试请求体过大',
+    });
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts an exactly 1 KiB valid empty JSON body', async () => {
+    const account = await configuredAccount('exact-body-limit@example.com');
+    const upstream = vi.fn().mockImplementation(async () => textProviderResponse());
+    vi.stubGlobal('fetch', upstream);
+    const body = `{${' '.repeat(1022)}}`;
+    expect(new TextEncoder().encode(body)).toHaveLength(1024);
+
+    const response = await api('/api/courseware-ai-settings/test/text', {
+      method: 'POST', body,
+    }, account.cookie);
+
+    expect(response.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(await usageCount(account.userId)).toBe(1);
+  });
+
+  it('rejects malformed bounded JSON without provider usage', async () => {
+    const account = await configuredAccount('malformed-body@example.com');
+    const upstream = vi.fn();
+    vi.stubGlobal('fetch', upstream);
+
+    const response = await api('/api/courseware-ai-settings/test/text', {
+      method: 'POST', body: '{',
+    }, account.cookie);
+
+    expect(response.status).toBe(400);
     expect(upstream).not.toHaveBeenCalled();
     expect(await usageCount(account.userId)).toBe(0);
   });

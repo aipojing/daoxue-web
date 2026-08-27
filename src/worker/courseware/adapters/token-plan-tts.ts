@@ -42,8 +42,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function remainingTimeoutMs(deadline: number): number {
+  const remaining = Math.floor(deadline - performance.now());
+  if (remaining < 1) throw new ProviderCallError('provider_timeout', 408);
+  return remaining;
+}
+
 export const tokenPlanTTSAdapter: SpeechSynthesisAdapter = {
   async synthesize(request) {
+    const deadline = performance.now() + request.timeoutMs;
     let response: Response;
     try {
       response = await fetch(endpointUrl(request.baseUrl), {
@@ -62,7 +69,7 @@ export const tokenPlanTTSAdapter: SpeechSynthesisAdapter = {
           },
         }),
         redirect: 'error',
-        signal: AbortSignal.timeout(request.timeoutMs),
+        signal: AbortSignal.timeout(remainingTimeoutMs(deadline)),
       });
     } catch (error) {
       if (error instanceof ProviderCallError) throw error;
@@ -91,7 +98,7 @@ export const tokenPlanTTSAdapter: SpeechSynthesisAdapter = {
       download = await fetchAllowedMedia(
         parsed.output.audio.url,
         request.allowedMediaHostSuffixes,
-        request.timeoutMs,
+        remainingTimeoutMs(deadline),
         { upgradeHttpToHttps: true },
       );
     } catch (error) {

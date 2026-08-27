@@ -23,7 +23,11 @@ import type {
 } from '../src/worker/courseware/adapters/types';
 import type { ResolvedModelSelection } from '../src/worker/ai-catalog/repository';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 function imageRequest(
   overrides: Partial<ImageGenerationRequest> = {},
@@ -381,6 +385,63 @@ describe('concrete courseware adapters', () => {
     expect(downloadInit.redirect).toBe('manual');
     expect(new Headers(downloadInit.headers).has('authorization')).toBe(false);
     expect(new Headers(downloadInit.headers).has('cookie')).toBe(false);
+  });
+
+  it.each([
+    ['speech', () => tokenPlanTTSAdapter.synthesize(speechRequest({ timeoutMs: 15_000 })), () =>
+      new Response(JSON.stringify({
+        output: { audio: { url: 'https://cdn.example/deadline.mp3' } },
+      }), { headers: { 'Content-Type': 'application/json' } })],
+    ['image', () => tokenPlanImageAdapter.generate(imageRequest({ timeoutMs: 15_000 })), () =>
+      new Response(JSON.stringify({
+        output: { choices: [{ message: { content: [{ image: 'https://cdn.example/deadline.png' }] } }] },
+      }), { headers: { 'Content-Type': 'application/json' } })],
+  ] as const)('uses one 15-second end-to-end deadline for %s provider and hanging media fetch', async (
+    _kind,
+    call,
+    providerResponse,
+  ) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(0));
+    const timeoutDurations: number[] = [];
+    const timeoutControllers: AbortController[] = [];
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((timeoutMs) => {
+      timeoutDurations.push(timeoutMs);
+      const controller = new AbortController();
+      timeoutControllers.push(controller);
+      setTimeout(() => controller.abort(new DOMException('deadline', 'TimeoutError')), timeoutMs);
+      return controller.signal;
+    });
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(async () => new Promise<Response>((resolve) => {
+        setTimeout(() => resolve(providerResponse()), 14_900);
+      }))
+      .mockImplementationOnce(async (_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        const signal = init.signal as AbortSignal;
+        if (signal.aborted) reject(signal.reason);
+        else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    let settled = false;
+    const observed = call().then(
+      (value) => ({ value, error: null }),
+      (error: unknown) => ({ value: null, error }),
+    ).finally(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(14_900);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(100);
+    const settledAtDeadline = settled;
+    if (!settled) {
+      timeoutControllers.at(-1)?.abort(new DOMException('test cleanup', 'TimeoutError'));
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    const outcome = await observed;
+
+    expect(timeoutDurations).toEqual([15_000, 100]);
+    expect(settledAtDeadline).toBe(true);
+    expect(outcome.error).toMatchObject({ errorCode: 'provider_timeout' });
+    expect(Date.now()).toBe(15_000);
   });
 
   it.each([
