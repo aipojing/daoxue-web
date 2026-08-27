@@ -155,6 +155,7 @@ async function canRetryImages(db: D1Database, userId: number, detail: Courseware
      JOIN ai_provider_endpoints e ON e.provider_id = p.id
      JOIN user_ai_credentials credential ON credential.provider_id = p.id AND credential.user_id = ?
      WHERE p.id = ? AND e.id = ?
+       AND e.capability = 'image_generation'
        AND credential.key_ciphertext IS NOT NULL
        AND credential.key_iv IS NOT NULL
        AND credential.health_status NOT IN ('invalid', 'quota_exhausted')`,

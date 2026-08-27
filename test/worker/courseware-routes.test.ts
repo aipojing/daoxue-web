@@ -529,6 +529,27 @@ describe('courseware routes', () => {
     }
   });
 
+  it('rejects image retry when a malformed historical snapshot points at a non-image endpoint', async () => {
+    const account = await register('image-retry-wrong-capability@example.com');
+    const studentId = await createStudent(account.cookie);
+    await configureCoursewareAI(account.id);
+    const coursewareId = await insertCourseware(studentId);
+    const text = await env.DB.prepare(
+      `SELECT p.id AS provider_id, e.id AS endpoint_id
+       FROM ai_provider_endpoints e JOIN ai_providers p ON p.id = e.provider_id
+       WHERE e.capability = 'structured_text' LIMIT 1`,
+    ).first<{ provider_id: number; endpoint_id: number }>();
+    await env.DB.prepare('UPDATE coursewares SET model_snapshot_json = ? WHERE id = ?').bind(
+      JSON.stringify({ image: { providerId: text?.provider_id, endpointId: text?.endpoint_id } }),
+      coursewareId,
+    ).run();
+    await insertSegment(coursewareId, 'failed');
+
+    expect((await api(`/api/coursewares/${coursewareId}/images/retry`, { method: 'POST' }, account.cookie)).status).toBe(409);
+    const detail = await api(`/api/coursewares/${coursewareId}`, {}, account.cookie);
+    expect((await json<{ imageRetryAvailable: boolean }>(detail)).data?.imageRetryAvailable).toBe(false);
+  });
+
   it('allows only one concurrent image retry claim and one queue message', async () => {
     const account = await register('image-cas@example.com');
     const studentId = await createStudent(account.cookie);
