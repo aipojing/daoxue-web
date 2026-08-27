@@ -33,6 +33,32 @@ export function buildCoursewareMediaKey(
   return `${prefix}images/${segmentId}.${extension}`;
 }
 
+const LOGICAL_MEDIA_KEY = /^courseware\/[1-9]\d*\/[1-9]\d*\/[1-9]\d*\/(?:audio\/[1-9]\d*(?:-alternate)?\.mp3|images\/[1-9]\d*\.(?:png|jpg|webp))$/;
+
+function encodeAttemptToken(attemptToken: string): string {
+  const bytes = new TextEncoder().encode(attemptToken);
+  if (bytes.length < 1 || bytes.length > 160) throw new Error('invalid media attempt token');
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+export function buildCoursewareMediaAttemptKey(logicalKey: string, attemptToken: string): string {
+  if (!LOGICAL_MEDIA_KEY.test(logicalKey)) throw new Error('invalid logical media key');
+  const extensionAt = logicalKey.lastIndexOf('.');
+  return `${logicalKey.slice(0, extensionAt)}.attempt-${encodeAttemptToken(attemptToken)}${logicalKey.slice(extensionAt)}`;
+}
+
+export function isCoursewareMediaKeyForLogicalKey(actualKey: string, logicalKey: string): boolean {
+  if (!LOGICAL_MEDIA_KEY.test(logicalKey)) return false;
+  if (actualKey === logicalKey) return true;
+  const extensionAt = logicalKey.lastIndexOf('.');
+  const prefix = `${logicalKey.slice(0, extensionAt)}.attempt-`;
+  return actualKey.startsWith(prefix)
+    && actualKey.endsWith(logicalKey.slice(extensionAt))
+    && /^[A-Za-z0-9_-]+$/.test(actualKey.slice(prefix.length, -logicalKey.slice(extensionAt).length));
+}
+
 export async function putCoursewareMedia(
   bucket: R2Bucket,
   key: string,

@@ -18,7 +18,11 @@ import {
   type CoursewareDetailRow,
   type CoursewareSegmentRow,
 } from './repository';
-import { deleteCoursewareMedia, getCoursewareMediaResponse } from './media';
+import {
+  deleteCoursewareMedia,
+  getCoursewareMediaResponse,
+  isCoursewareMediaKeyForLogicalKey,
+} from './media';
 
 const createSchema = z.object({
   subject: z.string().trim().min(1).max(40),
@@ -125,8 +129,22 @@ function mapSegment(coursewareId: number, segment: CoursewareSegmentRow): Course
 }
 
 async function canRetryImages(db: D1Database, userId: number, detail: CoursewareDetailRow): Promise<boolean> {
-  if (detail.status !== 'ready' || detail.generation_stage !== 'ready'
-    || !detail.segments.some((segment) => segment.image_status === 'failed')) return false;
+  const eligible = await db.prepare(
+    `SELECT 1 AS eligible FROM coursewares c
+     WHERE c.id = ? AND c.status = 'ready' AND (
+       (c.generation_stage = 'ready' AND EXISTS (
+         SELECT 1 FROM courseware_segments cs
+         WHERE cs.courseware_id = c.id AND cs.image_status = 'failed'
+       ))
+       OR (c.generation_stage = 'images' AND c.enqueue_kind = 'image_retry'
+           AND c.enqueue_expires_at <= datetime('now') AND EXISTS (
+         SELECT 1 FROM courseware_segments cs
+         WHERE cs.courseware_id = c.id AND cs.image_status = 'pending'
+           AND cs.image_request_id = c.enqueue_token
+       ))
+     )`,
+  ).bind(detail.id).first<{ eligible: number }>();
+  if (!eligible) return false;
   const image = parseObject(detail.model_snapshot_json).image;
   if (!image || typeof image !== 'object' || Array.isArray(image)) return false;
   const snapshot = image as Record<string, unknown>;
@@ -303,10 +321,6 @@ coursewareRoutes.post('/:coursewareId/images/retry', async (c) => {
   if (!await repository.claimImageRetry(c.get('user').id, detail.id, attemptToken)) {
     return err(c, '当前课件图片不可重试', 409);
   }
-  if (!await repository.resetClaimedFailedImages(detail.id, attemptToken)) {
-    await repository.rollbackImageRetryClaim(detail.id, attemptToken);
-    return err(c, '当前课件图片不可重试', 409);
-  }
   try {
     await c.env.COURSEWARE_QUEUE.send({ coursewareId: detail.id });
   } catch {
@@ -362,7 +376,9 @@ coursewareRoutes.get('/:coursewareId/segments/:segmentId/:variant', async (c) =>
   const expectedKey = variant === 'audio' ? `${expectedPrefix}audio/${segmentId}.mp3`
     : variant === 'alternate-audio' ? `${expectedPrefix}audio/${segmentId}-alternate.mp3`
       : imageExtension ? `${expectedPrefix}images/${segmentId}.${imageExtension}` : '';
-  if (status !== 'ready' || !key || key !== expectedKey) return err(c, '课件媒体尚未就绪', 404);
+  if (status !== 'ready' || !key || !isCoursewareMediaKeyForLogicalKey(key, expectedKey)) {
+    return err(c, '课件媒体尚未就绪', 404);
+  }
   const response = await getCoursewareMediaResponse(c.env.COURSEWARE_MEDIA, key, c.req.raw);
   if (response.status === 404) return err(c, '课件媒体不存在', 404);
   return response;

@@ -150,3 +150,43 @@ describe('0013 voice courseware migration', () => {
       .toContain('courseware_draft_json');
   });
 });
+
+describe('0014 courseware lifecycle migration', () => {
+  it('separates enqueue state and persists media and student cleanup tombstones', () => {
+    const dbPath = freshDatabase();
+    const coursewareColumns = queryJson<{ name: string }>(
+      dbPath,
+      "PRAGMA table_info('coursewares')",
+    ).map((row) => row.name);
+    expect(coursewareColumns).toEqual(expect.arrayContaining([
+      'enqueue_token', 'enqueue_kind', 'enqueue_expires_at',
+    ]));
+    expect(queryJson<{ name: string }>(
+      dbPath,
+      `SELECT name FROM sqlite_schema WHERE type = 'table'
+       AND name IN ('courseware_media_tombstones', 'courseware_student_tombstones') ORDER BY name`,
+    )).toEqual([
+      { name: 'courseware_media_tombstones' },
+      { name: 'courseware_student_tombstones' },
+    ]);
+    expect(queryJson<{ name: string }>(
+      dbPath,
+      `SELECT name FROM sqlite_schema WHERE type = 'index'
+       AND name IN ('idx_coursewares_enqueue_expiry', 'idx_courseware_student_tombstones_user') ORDER BY name`,
+    )).toEqual([
+      { name: 'idx_courseware_student_tombstones_user' },
+      { name: 'idx_coursewares_enqueue_expiry' },
+    ]);
+    insertOwnedStudent(dbPath);
+    expect(() => runSql(
+      dbPath,
+      "UPDATE coursewares SET enqueue_kind = 'invalid' WHERE id = 1",
+    )).not.toThrow();
+    insertCourseware(dbPath);
+    expect(() => runSql(
+      dbPath,
+      "UPDATE coursewares SET enqueue_kind = 'invalid' WHERE id = 1",
+    )).toThrow(/CHECK constraint failed/);
+    expect(queryJson(dbPath, 'PRAGMA foreign_key_check;')).toEqual([]);
+  });
+});

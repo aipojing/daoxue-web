@@ -123,18 +123,44 @@ studentRoutes.put('/:id', async (c) => {
 
 studentRoutes.delete('/:id', async (c) => {
   const user = c.get('user');
-  const student = await getOwnedStudent(c.env.DB, user.id, Number(c.req.param('id')));
-  if (!student) return err(c, '学生不存在', 404);
+  const studentId = Number(c.req.param('id'));
+  if (!Number.isSafeInteger(studentId) || studentId < 1) return err(c, '学生不存在', 404);
+  await c.env.DB.prepare(
+    `INSERT INTO courseware_student_tombstones(user_id, student_id)
+     SELECT user_id, id FROM students WHERE id = ? AND user_id = ?
+     ON CONFLICT(user_id, student_id) DO UPDATE SET updated_at = datetime('now')`,
+  ).bind(studentId, user.id).run();
+  const tombstone = await c.env.DB.prepare(
+    'SELECT student_id FROM courseware_student_tombstones WHERE user_id = ? AND student_id = ?',
+  ).bind(user.id, studentId).first<{ student_id: number }>();
+  if (!tombstone) return err(c, '学生不存在', 404);
+  const student = await getOwnedStudent(c.env.DB, user.id, studentId);
   await c.env.DB.prepare(
     `UPDATE coursewares SET status = 'deleting', lease_token = NULL, lease_expires_at = NULL,
-       updated_at = datetime('now') WHERE student_id = ?`,
-  ).bind(student.id).run();
+       enqueue_token = NULL, enqueue_kind = NULL, enqueue_expires_at = NULL,
+       updated_at = datetime('now')
+     WHERE student_id = ? AND EXISTS (
+       SELECT 1 FROM courseware_student_tombstones t
+       WHERE t.user_id = ? AND t.student_id = coursewares.student_id
+     )`,
+  ).bind(studentId, user.id).run();
+  if (student) {
+    try {
+      await deleteStudentCoursewareMedia(c.env.COURSEWARE_MEDIA, user.id, studentId);
+    } catch {
+      throw new UserFacingError('学生课件媒体删除暂时失败，请稍后重试', 503);
+    }
+    await c.env.DB.prepare('DELETE FROM students WHERE id = ? AND user_id = ?')
+      .bind(studentId, user.id).run();
+  }
   try {
-    await deleteStudentCoursewareMedia(c.env.COURSEWARE_MEDIA, user.id, student.id);
+    await deleteStudentCoursewareMedia(c.env.COURSEWARE_MEDIA, user.id, studentId);
   } catch {
     throw new UserFacingError('学生课件媒体删除暂时失败，请稍后重试', 503);
   }
-  await c.env.DB.prepare('DELETE FROM students WHERE id = ?').bind(student.id).run();
+  await c.env.DB.prepare(
+    'DELETE FROM courseware_student_tombstones WHERE user_id = ? AND student_id = ?',
+  ).bind(user.id, studentId).run();
   return ok(c, { deleted: true });
 });
 

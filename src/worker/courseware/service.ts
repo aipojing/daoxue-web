@@ -13,7 +13,7 @@ import {
   type CoursewareStateGuard,
   type SavedArtifact,
 } from './repository';
-import { putCoursewareMedia } from './media';
+import { buildCoursewareMediaAttemptKey, putCoursewareMedia } from './media';
 
 export interface CreateCoursewareInput {
   studentId: number;
@@ -26,7 +26,28 @@ export interface CreateCoursewareInput {
 }
 
 export interface PersistCoursewareArtifactInput extends SavedArtifact {
+  attemptToken: string;
   bytes: ArrayBuffer;
+}
+
+async function cleanupAttemptObject(env: Env, objectKey: string): Promise<void> {
+  const repository = createCoursewareRepository(env.DB);
+  try {
+    await env.COURSEWARE_MEDIA.delete(objectKey);
+    await repository.removeMediaTombstone(objectKey);
+  } catch (error) {
+    await repository.recordMediaTombstone(objectKey);
+    throw error;
+  }
+}
+
+export async function cleanupCoursewareMediaTombstone(env: Env, objectKey: string): Promise<boolean> {
+  const tombstone = await env.DB.prepare(
+    'SELECT object_key FROM courseware_media_tombstones WHERE object_key = ?',
+  ).bind(objectKey).first<{ object_key: string }>();
+  if (!tombstone) return false;
+  await cleanupAttemptObject(env, tombstone.object_key);
+  return true;
 }
 
 /**
@@ -38,15 +59,19 @@ export async function persistCoursewareArtifact(
   input: PersistCoursewareArtifactInput,
   guard: CoursewareStateGuard,
 ): Promise<boolean> {
-  await putCoursewareMedia(env.COURSEWARE_MEDIA, input.objectKey, input.bytes, input.contentType);
+  const attemptObjectKey = buildCoursewareMediaAttemptKey(input.objectKey, input.attemptToken);
+  await putCoursewareMedia(env.COURSEWARE_MEDIA, attemptObjectKey, input.bytes, input.contentType);
   try {
-    const committed = await createCoursewareRepository(env.DB).saveArtifact(input, guard);
+    const committed = await createCoursewareRepository(env.DB).saveArtifact(
+      { ...input, objectKey: attemptObjectKey },
+      guard,
+    );
     if (committed) return true;
   } catch (error) {
-    await env.COURSEWARE_MEDIA.delete(input.objectKey);
+    await cleanupAttemptObject(env, attemptObjectKey);
     throw error;
   }
-  await env.COURSEWARE_MEDIA.delete(input.objectKey);
+  await cleanupAttemptObject(env, attemptObjectKey);
   return false;
 }
 
@@ -174,7 +199,10 @@ export async function createCourseware(
     image: image ? snapshotSelection(image) : null,
   };
   const repository = createCoursewareRepository(env.DB);
+  const enqueueToken = `create:${crypto.randomUUID()}`;
   const created = await repository.create({
+    userId,
+    enqueueToken,
     studentId: student.id,
     sourceConversationId: input.sourceConversationId ?? null,
     subject: input.subject,
@@ -185,17 +213,13 @@ export async function createCourseware(
     title: input.topic,
     modelSnapshot: snapshot,
   });
+  if (!created) throw new UserFacingError('学生正在删除或不存在', 409);
   try {
     await env.COURSEWARE_QUEUE.send({ coursewareId: created.id });
   } catch {
-    await repository.markFailed(
-      created.id,
-      'queue_unavailable',
-      '课件生成队列暂时不可用，请稍后重试',
-      true,
-      { status: 'queued', stage: 'queued', leaseToken: null },
-    );
+    await repository.rollbackCreateEnqueue(created.id, enqueueToken);
     throw new UserFacingError('课件生成服务暂时不可用，请稍后重试', 503);
   }
+  await repository.finishEnqueue(created.id, enqueueToken);
   return created;
 }

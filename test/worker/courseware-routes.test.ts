@@ -4,7 +4,8 @@ import type { CoursewareModelPreference } from '../../src/shared/ai-catalog';
 import { saveCredential } from '../../src/worker/ai-catalog/credentials';
 import { saveUserModelPreferences } from '../../src/worker/ai-catalog/repository';
 import { createCourseware } from '../../src/worker/courseware/service';
-import { deleteCoursewareMedia } from '../../src/worker/courseware/media';
+import { createCoursewareRepository } from '../../src/worker/courseware/repository';
+import { buildCoursewareMediaAttemptKey, deleteCoursewareMedia } from '../../src/worker/courseware/media';
 
 interface Envelope<T> {
   success: boolean;
@@ -137,6 +138,8 @@ async function insertSegment(coursewareId: number, imageStatus: 'ready' | 'faile
 }
 
 beforeEach(async () => {
+  await env.DB.prepare('DELETE FROM courseware_media_tombstones').run();
+  await env.DB.prepare('DELETE FROM courseware_student_tombstones').run();
   await env.DB.prepare('DELETE FROM invite_codes').run();
   await env.DB.prepare('DELETE FROM users').run();
   await env.DB.prepare("UPDATE app_settings SET value = '0' WHERE key = 'courseware_enabled'").run();
@@ -227,6 +230,36 @@ describe('courseware routes', () => {
     expect(created.data?.status).toBe('queued');
     expect(sentMessages).toEqual([{ coursewareId: created.data?.id }]);
     expect(JSON.stringify(created.data)).not.toContain('model_snapshot');
+    const enqueue = await env.DB.prepare(
+      'SELECT enqueue_token, enqueue_kind FROM coursewares WHERE id = ?',
+    ).bind(created.data?.id).first<{ enqueue_token: string | null; enqueue_kind: string | null }>();
+    expect(enqueue).toEqual({ enqueue_token: null, enqueue_kind: null });
+  });
+
+  it('lets a create message acquire its worker lease before Queue.send resolves', async () => {
+    const account = await register('create-immediate-consumer@example.com');
+    const studentId = await createStudent(account.cookie);
+    await configureCoursewareAI(account.id);
+    await env.DB.prepare("UPDATE app_settings SET value = '1' WHERE key = 'courseware_enabled'").run();
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockImplementation(async (message) => {
+      const id = (message as { coursewareId: number }).coursewareId;
+      expect(await createCoursewareRepository(env.DB).claimStage(
+        id, 'queued', 'scripting', 'worker-immediate', '2099-01-01 00:00:00',
+      )).toBe(true);
+      return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+    });
+    const response = await api(`/api/students/${studentId}/coursewares`, {
+      method: 'POST',
+      body: JSON.stringify({ subject: 'math', topic: '一次函数', learningGoal: '理解图像', includeImages: false }),
+    }, account.cookie);
+    expect(response.status).toBe(201);
+    const created = await json<{ id: number }>(response);
+    const state = await env.DB.prepare(
+      'SELECT generation_stage, lease_token, enqueue_token FROM coursewares WHERE id = ?',
+    ).bind(created.data?.id).first<{
+      generation_stage: string; lease_token: string | null; enqueue_token: string | null;
+    }>();
+    expect(state).toEqual({ generation_stage: 'scripting', lease_token: 'worker-immediate', enqueue_token: null });
   });
 
   it('lists only coursewares owned by the current parent and student', async () => {
@@ -298,7 +331,8 @@ describe('courseware routes', () => {
     const studentId = await createStudent(account.cookie);
     const coursewareId = await insertCourseware(studentId);
     const segmentId = await insertSegment(coursewareId);
-    const key = `courseware/${account.id}/${studentId}/${coursewareId}/audio/${segmentId}.mp3`;
+    const logicalKey = `courseware/${account.id}/${studentId}/${coursewareId}/audio/${segmentId}.mp3`;
+    const key = buildCoursewareMediaAttemptKey(logicalKey, 'delivery-attempt');
     await env.DB.prepare('UPDATE courseware_segments SET audio_object_key = ? WHERE id = ?').bind(key, segmentId).run();
     await env.COURSEWARE_MEDIA.put(key, new TextEncoder().encode('0123456789'), { httpMetadata: { contentType: 'audio/mpeg' } });
     const response = await api(`/api/coursewares/${coursewareId}/segments/${segmentId}/audio`, {
@@ -399,6 +433,27 @@ describe('courseware routes', () => {
       api(`/api/coursewares/${coursewareId}/images/retry`, { method: 'POST' }, account.cookie),
     ]);
     expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect(sent).toEqual([{ coursewareId }]);
+  });
+
+  it('reclaims an expired image enqueue after the API crashes before send', async () => {
+    const account = await register('image-expired-enqueue@example.com');
+    const studentId = await createStudent(account.cookie);
+    await configureCoursewareAI(account.id);
+    const coursewareId = await insertCourseware(studentId);
+    await setImageSnapshot(coursewareId);
+    await insertSegment(coursewareId, 'failed');
+    const repository = createCoursewareRepository(env.DB);
+    expect(await repository.claimImageRetry(account.id, coursewareId, 'image-old')).toBe(true);
+    await env.DB.prepare(
+      "UPDATE coursewares SET enqueue_expires_at = datetime('now', '-1 minute') WHERE id = ?",
+    ).bind(coursewareId).run();
+    const sent: unknown[] = [];
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockImplementation(async (message) => {
+      sent.push(message);
+      return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+    });
+    expect((await api(`/api/coursewares/${coursewareId}/images/retry`, { method: 'POST' }, account.cookie)).status).toBe(200);
     expect(sent).toEqual([{ coursewareId }]);
   });
 
@@ -604,6 +659,29 @@ describe('courseware routes', () => {
     expect(response.status).toBe(200);
     expect(await env.COURSEWARE_MEDIA.head(key)).toBeNull();
     expect(await env.DB.prepare('SELECT id FROM students WHERE id = ?').bind(studentId).first()).toBeNull();
+  });
+
+  it('keeps a student deletion tombstone when the final post-cascade sweep fails and resumes it', async () => {
+    const account = await register('delete-student-final-sweep@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId);
+    const key = `courseware/${account.id}/${studentId}/${coursewareId}/audio/1.mp3`;
+    await env.COURSEWARE_MEDIA.put(key, 'delete-me');
+    const realList = env.COURSEWARE_MEDIA.list.bind(env.COURSEWARE_MEDIA);
+    vi.spyOn(env.COURSEWARE_MEDIA, 'list')
+      .mockImplementationOnce((options) => realList(options))
+      .mockRejectedValueOnce(new Error('final sweep unavailable'));
+    expect((await api(`/api/students/${studentId}`, { method: 'DELETE' }, account.cookie)).status).toBe(503);
+    expect(await env.DB.prepare('SELECT id FROM students WHERE id = ?').bind(studentId).first()).toBeNull();
+    expect(await env.DB.prepare(
+      'SELECT student_id FROM courseware_student_tombstones WHERE user_id = ? AND student_id = ?',
+    ).bind(account.id, studentId).first()).not.toBeNull();
+    vi.restoreAllMocks();
+    expect((await api(`/api/students/${studentId}`, { method: 'DELETE' }, account.cookie)).status).toBe(200);
+    expect(await env.DB.prepare(
+      'SELECT student_id FROM courseware_student_tombstones WHERE user_id = ? AND student_id = ?',
+    ).bind(account.id, studentId).first()).toBeNull();
+    expect(await env.COURSEWARE_MEDIA.head(key)).toBeNull();
   });
 
   it('keeps deleting ownership rows after an R2 failure and resumes on repeated DELETE', async () => {

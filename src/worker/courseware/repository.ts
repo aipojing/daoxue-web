@@ -7,6 +7,8 @@ import type {
 } from '../../shared/courseware';
 
 export interface CreateCoursewareRow {
+  userId: number;
+  enqueueToken: string;
   studentId: number;
   sourceConversationId: number | null;
   subject: string;
@@ -80,6 +82,9 @@ export interface CoursewareDetailRow {
   retryable: number;
   lease_token: string | null;
   lease_expires_at: string | null;
+  enqueue_token: string | null;
+  enqueue_kind: 'create' | 'full_retry' | 'image_retry' | null;
+  enqueue_expires_at: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -117,7 +122,7 @@ export interface OwnedCoursewareCoordinates {
 }
 
 export interface CoursewareRepository {
-  create(input: CreateCoursewareRow): Promise<CoursewareSummary>;
+  create(input: CreateCoursewareRow): Promise<CoursewareSummary | null>;
   listOwned(userId: number, studentId: number, cursor: string, limit: number): Promise<CoursewarePage>;
   getOwned(userId: number, coursewareId: number): Promise<CoursewareDetailRow | null>;
   getForWorker(coursewareId: number): Promise<CoursewareDetailRow | null>;
@@ -131,10 +136,14 @@ export interface CoursewareRepository {
   claimRetryableFailure(userId: number, coursewareId: number, attemptToken: string): Promise<CoursewareRetryClaim | null>;
   finishRetryClaim(claim: CoursewareRetryClaim): Promise<boolean>;
   rollbackRetryClaim(claim: CoursewareRetryClaim, code: string, safeMessage: string): Promise<boolean>;
+  finishEnqueue(coursewareId: number, attemptToken: string): Promise<boolean>;
+  rollbackCreateEnqueue(coursewareId: number, attemptToken: string): Promise<boolean>;
   claimImageRetry(userId: number, coursewareId: number, attemptToken: string): Promise<boolean>;
   resetClaimedFailedImages(coursewareId: number, attemptToken: string): Promise<boolean>;
   finishImageRetryClaim(coursewareId: number, attemptToken: string): Promise<boolean>;
   rollbackImageRetryClaim(coursewareId: number, attemptToken: string): Promise<boolean>;
+  recordMediaTombstone(objectKey: string): Promise<void>;
+  removeMediaTombstone(objectKey: string): Promise<boolean>;
   markDeleting(userId: number, coursewareId: number): Promise<OwnedCoursewareCoordinates | null>;
   deleteRows(coursewareId: number): Promise<boolean>;
 }
@@ -220,13 +229,20 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
       const row = await db.prepare(
         `INSERT INTO coursewares
          (student_id, source_conversation_id, subject, grade, topic, learning_goal,
-          source_text, title, model_snapshot_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+          source_text, title, model_snapshot_json, enqueue_token, enqueue_kind, enqueue_expires_at)
+         SELECT s.id, ?, ?, s.grade, ?, ?, ?, ?, ?, ?, 'create', datetime('now', '+5 minutes')
+         FROM students s
+         WHERE s.id = ? AND s.user_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM courseware_student_tombstones t
+             WHERE t.student_id = s.id AND t.user_id = s.user_id
+           )
+         RETURNING id`,
       ).bind(
-        input.studentId, input.sourceConversationId, input.subject, input.grade, input.topic,
-        input.learningGoal, input.sourceText, input.title, JSON.stringify(input.modelSnapshot),
+        input.sourceConversationId, input.subject, input.topic, input.learningGoal, input.sourceText,
+        input.title, JSON.stringify(input.modelSnapshot), input.enqueueToken, input.studentId, input.userId,
       ).first<{ id: number }>();
-      if (!row) throw new Error('courseware insert failed');
+      if (!row) return null;
       const created = await db.prepare(`SELECT ${SUMMARY_COLUMNS} FROM coursewares c WHERE c.id = ?`)
         .bind(row.id).first<SummaryRow>();
       if (!created) throw new Error('courseware insert unavailable');
@@ -283,7 +299,8 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
       const nextStatus = current.status === 'ready' ? 'ready' : 'generating';
       const result = await db.prepare(
         `UPDATE coursewares SET status = ?, generation_stage = ?, lease_token = ?,
-           lease_expires_at = ?, updated_at = datetime('now')
+           lease_expires_at = ?, enqueue_token = NULL, enqueue_kind = NULL,
+           enqueue_expires_at = NULL, updated_at = datetime('now')
          WHERE id = ? AND status = ? AND generation_stage = ?
            AND (lease_token IS NULL OR lease_expires_at <= datetime('now'))`,
       ).bind(nextStatus, nextStage, leaseToken, leaseUntil, coursewareId, current.status, expectedStage).run();
@@ -415,7 +432,7 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
 
     async claimRetryableFailure(userId, coursewareId, attemptToken) {
       const state = await db.prepare(
-        `SELECT c.generation_stage,
+        `SELECT c.status, c.generation_stage, c.enqueue_token,
                 COUNT(cs.id) AS segment_count,
                 COALESCE(SUM(CASE WHEN cs.audio_status NOT IN ('ready', 'not_required')
                                   OR cs.alternate_audio_status NOT IN ('ready', 'not_required')
@@ -425,10 +442,18 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
          FROM coursewares c
          JOIN students s ON s.id = c.student_id
          LEFT JOIN courseware_segments cs ON cs.courseware_id = c.id
-         WHERE c.id = ? AND s.user_id = ? AND c.status = 'failed' AND c.retryable = 1
+         WHERE c.id = ? AND s.user_id = ? AND c.lease_token IS NULL AND (
+           (c.status = 'failed' AND c.retryable = 1)
+           OR (c.status = 'generating' AND c.enqueue_kind = 'full_retry'
+               AND c.enqueue_expires_at <= datetime('now'))
+           OR (c.status = 'queued' AND c.generation_stage = 'queued'
+               AND c.enqueue_kind = 'create' AND c.enqueue_expires_at <= datetime('now'))
+         )
          GROUP BY c.id`,
       ).bind(coursewareId, userId).first<{
+        status: CoursewareStatus;
         generation_stage: CoursewareGenerationStage;
+        enqueue_token: string | null;
         segment_count: number;
         unfinished_speech: number;
         unfinished_images: number;
@@ -468,14 +493,19 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
       const statements: D1PreparedStatement[] = [
         db.prepare(
           `UPDATE coursewares SET status = ?, generation_stage = ?, error_code = '', error_message = '',
-             retryable = 0, lease_token = ?, lease_expires_at = datetime('now', '+5 minutes'),
+             retryable = 0, enqueue_token = ?, enqueue_kind = 'full_retry',
+             enqueue_expires_at = datetime('now', '+5 minutes'),
              updated_at = datetime('now')
-           WHERE id = ? AND status = 'failed' AND generation_stage = ? AND retryable = 1
-             AND (lease_token IS NULL OR lease_expires_at <= datetime('now'))
+           WHERE id = ? AND status = ? AND generation_stage = ? AND lease_token IS NULL
+             AND ((status = 'failed' AND retryable = 1)
+               OR (status = 'generating' AND enqueue_kind = 'full_retry'
+                   AND enqueue_expires_at <= datetime('now'))
+               OR (status = 'queued' AND generation_stage = 'queued'
+                   AND enqueue_kind = 'create' AND enqueue_expires_at <= datetime('now')))
              AND EXISTS (
                SELECT 1 FROM students s WHERE s.id = coursewares.student_id AND s.user_id = ?
              )`,
-        ).bind(resumeStatus, resumeStage, attemptToken, coursewareId, state.generation_stage, userId),
+        ).bind(resumeStatus, resumeStage, attemptToken, coursewareId, state.status, state.generation_stage, userId),
       ];
       if (resumeStage === 'speech') {
         statements.push(db.prepare(
@@ -491,7 +521,7 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
              updated_at = datetime('now')
            WHERE courseware_id = ? AND EXISTS (
              SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
-               AND c.status = ? AND c.generation_stage = ? AND c.lease_token = ?
+               AND c.status = ? AND c.generation_stage = ? AND c.enqueue_token = ?
            )`,
         ).bind(coursewareId, resumeStatus, resumeStage, attemptToken));
       } else if (resumeStage === 'images') {
@@ -504,7 +534,7 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
              updated_at = datetime('now')
            WHERE courseware_id = ? AND EXISTS (
              SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
-               AND c.status = ? AND c.generation_stage = ? AND c.lease_token = ?
+               AND c.status = ? AND c.generation_stage = ? AND c.enqueue_token = ?
            )`,
         ).bind(coursewareId, resumeStatus, resumeStage, attemptToken));
       }
@@ -514,38 +544,79 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
 
     async finishRetryClaim(claim) {
       const result = await db.prepare(
-        `UPDATE coursewares SET lease_token = NULL, lease_expires_at = NULL, updated_at = datetime('now')
-         WHERE id = ? AND status = ? AND generation_stage = ? AND lease_token = ?`,
-      ).bind(claim.coursewareId, claim.resumeStatus, claim.resumeStage, claim.attemptToken).run();
+        `UPDATE coursewares SET enqueue_token = NULL, enqueue_kind = NULL,
+           enqueue_expires_at = NULL, updated_at = datetime('now')
+         WHERE id = ? AND enqueue_token = ?`,
+      ).bind(claim.coursewareId, claim.attemptToken).run();
       return result.meta.changes === 1;
     },
 
     async rollbackRetryClaim(claim, code, safeMessage) {
       const result = await db.prepare(
         `UPDATE coursewares SET status = 'failed', generation_stage = ?, error_code = ?,
-           error_message = ?, retryable = 1, lease_token = NULL, lease_expires_at = NULL,
+           error_message = ?, retryable = 1, enqueue_token = NULL, enqueue_kind = NULL,
+           enqueue_expires_at = NULL,
            updated_at = datetime('now')
-         WHERE id = ? AND status = ? AND generation_stage = ? AND lease_token = ?`,
+         WHERE id = ? AND status = ? AND generation_stage = ? AND enqueue_token = ?
+           AND lease_token IS NULL`,
       ).bind(claim.resumeStage, code, safeMessage, claim.coursewareId,
         claim.resumeStatus, claim.resumeStage, claim.attemptToken).run();
       return result.meta.changes === 1;
     },
 
-    async claimImageRetry(userId, coursewareId, attemptToken) {
+    async finishEnqueue(coursewareId, attemptToken) {
       const result = await db.prepare(
-        `UPDATE coursewares SET generation_stage = 'images', lease_token = ?,
-           lease_expires_at = datetime('now', '+5 minutes'), updated_at = datetime('now')
-         WHERE id = ? AND status = 'ready' AND generation_stage = 'ready'
-           AND (lease_token IS NULL OR lease_expires_at <= datetime('now'))
+        `UPDATE coursewares SET enqueue_token = NULL, enqueue_kind = NULL,
+           enqueue_expires_at = NULL, updated_at = datetime('now')
+         WHERE id = ? AND enqueue_token = ?`,
+      ).bind(coursewareId, attemptToken).run();
+      return result.meta.changes === 1;
+    },
+
+    async rollbackCreateEnqueue(coursewareId, attemptToken) {
+      const result = await db.prepare(
+        `UPDATE coursewares SET status = 'failed', error_code = 'queue_unavailable',
+           error_message = '生成队列暂时不可用', retryable = 1,
+           enqueue_token = NULL, enqueue_kind = NULL, enqueue_expires_at = NULL,
+           updated_at = datetime('now')
+         WHERE id = ? AND status = 'queued' AND generation_stage = 'queued'
+           AND enqueue_kind = 'create' AND enqueue_token = ? AND lease_token IS NULL`,
+      ).bind(coursewareId, attemptToken).run();
+      return result.meta.changes === 1;
+    },
+
+    async claimImageRetry(userId, coursewareId, attemptToken) {
+      const results = await db.batch([
+        db.prepare(
+        `UPDATE coursewares SET generation_stage = 'images', enqueue_token = ?,
+           enqueue_kind = 'image_retry', enqueue_expires_at = datetime('now', '+5 minutes'),
+           updated_at = datetime('now')
+         WHERE id = ? AND status = 'ready' AND lease_token IS NULL
+           AND ((generation_stage = 'ready' AND enqueue_token IS NULL)
+             OR (generation_stage = 'images' AND enqueue_kind = 'image_retry'
+                 AND enqueue_expires_at <= datetime('now')))
            AND EXISTS (
              SELECT 1 FROM students s WHERE s.id = coursewares.student_id AND s.user_id = ?
            )
            AND EXISTS (
              SELECT 1 FROM courseware_segments cs
-             WHERE cs.courseware_id = coursewares.id AND cs.image_status = 'failed'
+             WHERE cs.courseware_id = coursewares.id
+               AND (cs.image_status = 'failed'
+                 OR (cs.image_status = 'pending' AND cs.image_request_id = coursewares.enqueue_token))
            )`,
-      ).bind(attemptToken, coursewareId, userId).run();
-      return result.meta.changes === 1;
+        ).bind(attemptToken, coursewareId, userId),
+        db.prepare(
+          `UPDATE courseware_segments SET image_status = 'pending', image_request_id = ?,
+             image_error_code = '', image_error_message = '', image_retry_count = 0,
+             updated_at = datetime('now')
+           WHERE courseware_id = ? AND image_status IN ('failed', 'pending') AND EXISTS (
+             SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
+               AND c.status = 'ready' AND c.generation_stage = 'images'
+               AND c.enqueue_token = ? AND c.lease_token IS NULL
+           )`,
+        ).bind(attemptToken, coursewareId, attemptToken),
+      ]);
+      return results[0]?.meta.changes === 1 && (results[1]?.meta.changes ?? 0) > 0;
     },
 
     async resetClaimedFailedImages(coursewareId, attemptToken) {
@@ -553,18 +624,19 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
         `UPDATE courseware_segments SET image_status = 'pending', image_request_id = ?,
            image_error_code = '', image_error_message = '', image_retry_count = 0,
            updated_at = datetime('now')
-         WHERE courseware_id = ? AND image_status = 'failed' AND EXISTS (
+         WHERE courseware_id = ? AND image_status = 'pending' AND image_request_id = ? AND EXISTS (
            SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
-             AND c.status = 'ready' AND c.generation_stage = 'images' AND c.lease_token = ?
+             AND c.status = 'ready' AND c.generation_stage = 'images' AND c.enqueue_token = ?
          )`,
-      ).bind(attemptToken, coursewareId, attemptToken).run();
+      ).bind(attemptToken, coursewareId, attemptToken, attemptToken).run();
       return result.meta.changes > 0;
     },
 
     async finishImageRetryClaim(coursewareId, attemptToken) {
       const result = await db.prepare(
-        `UPDATE coursewares SET lease_token = NULL, lease_expires_at = NULL, updated_at = datetime('now')
-         WHERE id = ? AND status = 'ready' AND generation_stage = 'images' AND lease_token = ?`,
+        `UPDATE coursewares SET enqueue_token = NULL, enqueue_kind = NULL,
+           enqueue_expires_at = NULL, updated_at = datetime('now')
+         WHERE id = ? AND enqueue_token = ?`,
       ).bind(coursewareId, attemptToken).run();
       return result.meta.changes === 1;
     },
@@ -578,21 +650,40 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
            WHERE courseware_id = ? AND image_status = 'pending' AND image_request_id = ?
              AND EXISTS (
                SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
-                 AND c.status = 'ready' AND c.generation_stage = 'images' AND c.lease_token = ?
+                 AND c.status = 'ready' AND c.generation_stage = 'images'
+                 AND c.enqueue_token = ? AND c.lease_token IS NULL
              )`,
         ).bind(coursewareId, attemptToken, attemptToken),
         db.prepare(
-          `UPDATE coursewares SET generation_stage = 'ready', lease_token = NULL,
-             lease_expires_at = NULL, updated_at = datetime('now')
-           WHERE id = ? AND status = 'ready' AND generation_stage = 'images' AND lease_token = ?`,
+          `UPDATE coursewares SET generation_stage = 'ready', enqueue_token = NULL,
+             enqueue_kind = NULL, enqueue_expires_at = NULL, updated_at = datetime('now')
+           WHERE id = ? AND status = 'ready' AND generation_stage = 'images'
+             AND enqueue_token = ? AND lease_token IS NULL`,
         ).bind(coursewareId, attemptToken),
       ]);
       return results[1]?.meta.changes === 1;
     },
 
+    async recordMediaTombstone(objectKey) {
+      await db.prepare(
+        `INSERT INTO courseware_media_tombstones(object_key, retry_count)
+         VALUES (?, 1)
+         ON CONFLICT(object_key) DO UPDATE SET
+           retry_count = courseware_media_tombstones.retry_count + 1,
+           updated_at = datetime('now')`,
+      ).bind(objectKey).run();
+    },
+
+    async removeMediaTombstone(objectKey) {
+      const result = await db.prepare('DELETE FROM courseware_media_tombstones WHERE object_key = ?')
+        .bind(objectKey).run();
+      return result.meta.changes === 1;
+    },
+
     async markDeleting(userId, coursewareId) {
       await db.prepare(
         `UPDATE coursewares SET status = 'deleting', lease_token = NULL, lease_expires_at = NULL,
+           enqueue_token = NULL, enqueue_kind = NULL, enqueue_expires_at = NULL,
            updated_at = datetime('now')
          WHERE id = ? AND EXISTS (
            SELECT 1 FROM students s WHERE s.id = coursewares.student_id AND s.user_id = ?
