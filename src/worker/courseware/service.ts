@@ -30,7 +30,7 @@ export interface PersistCoursewareArtifactInput extends SavedArtifact {
   bytes: ArrayBuffer;
 }
 
-async function cleanupAttemptObject(env: Env, objectKey: string): Promise<void> {
+export async function cleanupCoursewareAttemptObject(env: Env, objectKey: string): Promise<void> {
   const repository = createCoursewareRepository(env.DB);
   try {
     await env.COURSEWARE_MEDIA.delete(objectKey);
@@ -46,7 +46,7 @@ export async function cleanupCoursewareMediaTombstone(env: Env, objectKey: strin
     'SELECT object_key FROM courseware_media_tombstones WHERE object_key = ?',
   ).bind(objectKey).first<{ object_key: string }>();
   if (!tombstone) return false;
-  await cleanupAttemptObject(env, tombstone.object_key);
+  await cleanupCoursewareAttemptObject(env, tombstone.object_key);
   return true;
 }
 
@@ -68,7 +68,7 @@ export async function drainCoursewareMediaTombstones(
   const outcome: MediaTombstoneDrainResult = { attempted: results.length, deleted: 0, failed: 0 };
   for (const row of results) {
     try {
-      await cleanupAttemptObject(env, row.object_key);
+      await cleanupCoursewareAttemptObject(env, row.object_key);
       outcome.deleted += 1;
     } catch {
       outcome.failed += 1;
@@ -95,10 +95,10 @@ export async function persistCoursewareArtifact(
     );
     if (committed) return true;
   } catch (error) {
-    await cleanupAttemptObject(env, attemptObjectKey);
+    await cleanupCoursewareAttemptObject(env, attemptObjectKey);
     throw error;
   }
-  await cleanupAttemptObject(env, attemptObjectKey);
+  await cleanupCoursewareAttemptObject(env, attemptObjectKey);
   return false;
 }
 

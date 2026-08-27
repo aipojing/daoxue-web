@@ -10,6 +10,7 @@ import type {
 import type { Env } from '../env';
 import { UserFacingError } from '../lib/errors';
 import { resolveCredential } from './credentials';
+import type { CredentialRevision } from './credentials';
 import { preferenceListSchema, projectPublicModelConfig } from './validation';
 
 type AdapterType = 'openai_text' | 'token_plan_tts' | 'token_plan_image';
@@ -638,4 +639,47 @@ export async function recordCredentialHealth(
     )
     .bind(userId, providerId, status, normalizedErrorCode)
     .run();
+}
+
+export async function recordCredentialHealthForRevision(
+  db: D1Database,
+  userId: number,
+  providerId: number,
+  revision: CredentialRevision,
+  status: Exclude<CredentialHealth, 'unknown'>,
+): Promise<boolean> {
+  const errorCode = status === 'invalid' ? 'invalid_credential' : status === 'quota_exhausted' ? status : '';
+  if (revision.source === 'catalog') {
+    const result = await db.prepare(
+      `UPDATE user_ai_credentials SET health_status = ?, health_checked_at = datetime('now'),
+         last_error_code = ?, updated_at = datetime('now')
+       WHERE user_id = ? AND provider_id = ? AND credential_revision = ?
+         AND key_ciphertext IS NOT NULL AND key_iv IS NOT NULL`,
+    ).bind(status, errorCode, userId, providerId, revision.revision).run();
+    return result.meta.changes === 1;
+  }
+  const result = await db.prepare(
+    `INSERT INTO user_ai_credentials
+       (user_id, provider_id, health_status, health_checked_at, last_error_code,
+        credential_revision, updated_at)
+     SELECT ?, ?, ?, datetime('now'), ?, ?, datetime('now')
+     WHERE EXISTS (
+       SELECT 1 FROM user_ai_settings s WHERE s.user_id = ?
+         AND s.deepseek_key_ciphertext = ? AND s.deepseek_key_iv = ?
+     )
+     ON CONFLICT(user_id, provider_id) DO UPDATE SET
+       health_status = excluded.health_status,
+       health_checked_at = excluded.health_checked_at,
+       last_error_code = excluded.last_error_code,
+       credential_revision = excluded.credential_revision,
+       updated_at = excluded.updated_at
+     WHERE user_ai_credentials.key_ciphertext IS NULL
+       AND user_ai_credentials.key_iv IS NULL
+       AND EXISTS (
+         SELECT 1 FROM user_ai_settings s WHERE s.user_id = excluded.user_id
+           AND s.deepseek_key_ciphertext = ? AND s.deepseek_key_iv = ?
+       )`,
+  ).bind(userId, providerId, status, errorCode, revision.revision, userId,
+    revision.ciphertext, revision.iv, revision.ciphertext, revision.iv).run();
+  return result.meta.changes === 1;
 }

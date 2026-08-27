@@ -1,10 +1,11 @@
-import { recordCredentialHealth } from '../ai-catalog/repository';
+import { recordCredentialHealthForRevision } from '../ai-catalog/repository';
+import type { CredentialRevision } from '../ai-catalog/credentials';
 import type { Env } from '../env';
-import { buildCoursewareMediaKey } from './media';
+import { buildCoursewareMediaAttemptKey, buildCoursewareMediaKey } from './media';
 import { buildCoursewarePrompt } from './prompt-builder';
 import { createCoursewareRepository, type CoursewareDetailRow, type CoursewareSegmentRow } from './repository';
 import { parseCoursewareScript } from './schema';
-import { persistCoursewareArtifact } from './service';
+import { cleanupCoursewareAttemptObject, persistCoursewareArtifact } from './service';
 import { ProviderCallError } from './adapters/errors';
 import { createImageAdapter, createSpeechAdapter, createTextAdapter } from './adapters/registry';
 import type {
@@ -17,7 +18,8 @@ import type {
 import { readMp3DurationMs } from './audio-metadata';
 import {
   resolveImageModelForJob,
-  resolveSpeechModelsForJob,
+  resolveStudentSpeechModelForJob,
+  resolveTeacherSpeechModelForJob,
   resolveTextModelForJob,
   type ResolvedModelCall,
 } from './model-resolution';
@@ -30,9 +32,16 @@ export interface CoursewareGenerationDependencies {
   generateText(call: ResolvedModelCall, request: TextGenerationRequest): Promise<TextGenerationResult>;
   synthesizeSpeech(call: ResolvedModelCall, request: SpeechSynthesisRequest): Promise<SpeechSynthesisResult>;
   generateImage(call: ResolvedModelCall, request: ImageGenerationRequest): Promise<ImageGenerationResult>;
+  recordCredentialHealth(
+    env: Env,
+    userId: number,
+    providerId: number,
+    revision: CredentialRevision,
+    status: 'valid' | 'invalid' | 'quota_exhausted',
+  ): Promise<boolean>;
 }
 
-const LEASE_MS = 2 * 60 * 1000;
+const LEASE_MS = 5 * 60 * 1000;
 const MAX_ARTIFACTS_PER_ADVANCE = 5;
 const MAX_ITEM_ATTEMPTS = 3;
 const TRANSIENT_CODES = new Set(['rate_limited', 'provider_timeout', 'provider_unavailable', 'storage_failed']);
@@ -43,6 +52,8 @@ const defaultDependencies: CoursewareGenerationDependencies = {
   generateText: (call, request) => createTextAdapter(call.adapterType).generateStructured(request),
   synthesizeSpeech: (call, request) => createSpeechAdapter(call.adapterType).synthesize(request),
   generateImage: (call, request) => createImageAdapter(call.adapterType).generate(request),
+  recordCredentialHealth: (env, userId, providerId, revision, status) =>
+    recordCredentialHealthForRevision(env.DB, userId, providerId, revision, status),
 };
 
 function sqliteTime(date: Date): string {
@@ -77,13 +88,23 @@ function safeRequestId(value: unknown, apiKey: string): string {
     !value.includes(apiKey) ? value : '';
 }
 
-async function recordHealth(env: Env, courseware: CoursewareDetailRow, call: ResolvedModelCall, error?: ProviderCallError) {
-  if (!error) {
-    await recordCredentialHealth(env.DB, courseware.owner_user_id, call.providerId, 'valid');
-  } else if (error.errorCode === 'invalid_credential') {
-    await recordCredentialHealth(env.DB, courseware.owner_user_id, call.providerId, 'invalid');
-  } else if (error.errorCode === 'quota_exhausted') {
-    await recordCredentialHealth(env.DB, courseware.owner_user_id, call.providerId, 'quota_exhausted');
+async function recordHealth(
+  dependencies: CoursewareGenerationDependencies,
+  env: Env,
+  courseware: CoursewareDetailRow,
+  call: ResolvedModelCall,
+  error?: ProviderCallError,
+): Promise<void> {
+  const status = !error ? 'valid'
+    : error.errorCode === 'invalid_credential' ? 'invalid'
+      : error.errorCode === 'quota_exhausted' ? 'quota_exhausted' : null;
+  if (!status) return;
+  try {
+    await dependencies.recordCredentialHealth(
+      env, courseware.owner_user_id, call.providerId, call.credentialRevision, status,
+    );
+  } catch {
+    // Credential health is advisory. Never discard paid output or replace the normalized job failure.
   }
 }
 
@@ -178,7 +199,7 @@ async function advanceScripting(
       user: prompt.user,
       timeoutMs: timeoutMs(text),
     });
-    await recordHealth(env, courseware, text);
+    if (!await renewLease(env, courseware.id, leaseToken, dependencies.now())) return 'ignored';
     let parsed;
     try {
       parsed = parseCoursewareScript(result.jsonText);
@@ -191,10 +212,10 @@ async function advanceScripting(
       stage: courseware.generation_stage,
       leaseToken,
     }, { inputTokens: result.inputTokens, outputTokens: result.outputTokens })) return 'ignored';
+    await recordHealth(dependencies, env, courseware, text);
     return 'reenqueue';
   } catch (error) {
     const normalized = normalizedError(error);
-    if (textCall) await recordHealth(env, courseware, textCall, normalized);
     if (TRANSIENT_CODES.has(normalized.errorCode)) {
       const retry = await env.DB.prepare(
         `UPDATE coursewares SET usage_json = json_set(usage_json, '$.textRetryCount',
@@ -204,10 +225,15 @@ async function advanceScripting(
          RETURNING CAST(json_extract(usage_json, '$.textRetryCount') AS INTEGER) AS retry_count`,
       ).bind(normalized.errorCode, normalized.message, courseware.id, courseware.status, leaseToken)
         .first<{ retry_count: number }>();
-      if (retry && retry.retry_count < MAX_ITEM_ATTEMPTS) return 'reenqueue';
+      if (retry && retry.retry_count < MAX_ITEM_ATTEMPTS) {
+        if (textCall) await recordHealth(dependencies, env, courseware, textCall, normalized);
+        return 'reenqueue';
+      }
       if (!retry) return 'ignored';
     }
-    return failCourseware(env, courseware, leaseToken, normalized);
+    const outcome = await failCourseware(env, courseware, leaseToken, normalized);
+    if (textCall) await recordHealth(dependencies, env, courseware, textCall, normalized);
+    return outcome;
   }
 }
 
@@ -220,23 +246,75 @@ function audioFields(variant: AudioVariant) {
     : { status: 'alternate_audio_status', object: 'alternate_audio_object_key', retry: 'alternate_audio_retry_count', errorCode: 'alternate_audio_error_code', errorMessage: 'alternate_audio_error_message' };
 }
 
-async function resetMissingReadyAudio(env: Env, courseware: CoursewareDetailRow, leaseToken: string): Promise<void> {
+function artifactFields(variant: AudioVariant | 'image') {
+  return variant === 'image'
+    ? { status: 'image_status', object: 'image_object_key', retry: 'image_retry_count', errorCode: 'image_error_code', errorMessage: 'image_error_message' }
+    : audioFields(variant);
+}
+
+type ObjectInspection = 'ready' | 'missing' | 'retry' | 'failed' | 'lost';
+
+async function inspectStoredArtifact(
+  env: Env,
+  courseware: CoursewareDetailRow,
+  leaseToken: string,
+  stage: 'speech' | 'images' | 'finalizing',
+  segmentId: number,
+  variant: AudioVariant | 'image',
+  currentStatus: string,
+  objectKey: string,
+): Promise<ObjectInspection> {
+  const fields = artifactFields(variant);
+  let object: R2Object | null;
+  try {
+    object = await env.COURSEWARE_MEDIA.head(objectKey);
+  } catch {
+    const updated = await env.DB.prepare(
+      `UPDATE courseware_segments SET ${fields.retry} = ${fields.retry} + 1,
+         ${fields.status} = CASE WHEN ${fields.retry} + 1 < ? THEN ${fields.status} ELSE 'failed' END,
+         ${fields.errorCode} = 'storage_failed', ${fields.errorMessage} = '媒体文件保存失败',
+         updated_at = datetime('now')
+       WHERE id = ? AND courseware_id = ? AND ${fields.status} = ? AND EXISTS (
+         SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = ?
+       ) RETURNING ${fields.retry} AS retry_count, ${fields.status} AS artifact_status`,
+    ).bind(MAX_ITEM_ATTEMPTS, segmentId, courseware.id, currentStatus,
+      courseware.id, leaseToken, stage).first<{ retry_count: number; artifact_status: string }>();
+    if (!updated) return 'lost';
+    return updated.artifact_status === 'failed' ? 'failed' : 'retry';
+  }
+  if (!object) return 'missing';
+  const restored = await env.DB.prepare(
+    `UPDATE courseware_segments SET ${fields.status} = 'ready', ${fields.retry} = 0,
+       ${fields.errorCode} = '', ${fields.errorMessage} = '', updated_at = datetime('now')
+     WHERE id = ? AND courseware_id = ? AND ${fields.status} = ? AND ${fields.object} = ? AND EXISTS (
+       SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = ?
+     )`,
+  ).bind(segmentId, courseware.id, currentStatus, objectKey,
+    courseware.id, leaseToken, stage).run();
+  return restored.meta.changes === 1 ? 'ready' : 'lost';
+}
+
+async function resetMissingReadyAudio(
+  env: Env,
+  courseware: CoursewareDetailRow,
+  leaseToken: string,
+): Promise<'ok' | 'reenqueue' | 'failed' | 'ignored'> {
   for (const segment of courseware.segments) {
     for (const variant of ['main', 'alternate'] as const) {
       const fields = audioFields(variant);
       const status = segment[fields.status as keyof CoursewareSegmentRow];
       const objectKey = segment[fields.object as keyof CoursewareSegmentRow];
       if (status !== 'ready' || typeof objectKey !== 'string') continue;
-      let exists: R2Object | null;
-      try {
-        exists = await env.COURSEWARE_MEDIA.head(objectKey);
-      } catch {
-        throw new ProviderCallError('storage_failed', 503);
-      }
-      if (!exists) {
+      const inspection = await inspectStoredArtifact(
+        env, courseware, leaseToken, 'speech', segment.id, variant, 'ready', objectKey,
+      );
+      if (inspection === 'retry') return 'reenqueue';
+      if (inspection === 'failed') return 'failed';
+      if (inspection === 'lost') return 'ignored';
+      if (inspection === 'missing') {
         await env.DB.prepare(
           `UPDATE courseware_segments SET ${fields.status} = 'pending', ${fields.object} = '',
-             ${fields.errorCode} = '', ${fields.errorMessage} = ''
+             ${fields.retry} = 0, ${fields.errorCode} = '', ${fields.errorMessage} = ''
            WHERE id = ? AND courseware_id = ? AND ${fields.status} = 'ready' AND EXISTS (
              SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = 'speech'
            )`,
@@ -244,6 +322,7 @@ async function resetMissingReadyAudio(env: Env, courseware: CoursewareDetailRow,
       }
     }
   }
+  return 'ok';
 }
 
 async function updateProgress(env: Env, coursewareId: number, leaseToken: string): Promise<void> {
@@ -268,7 +347,6 @@ async function advanceSpeech(
   dependencies: CoursewareGenerationDependencies,
 ): Promise<'done' | 'reenqueue' | 'ignored'> {
   try {
-    const models = await resolveSpeechModelsForJob(env, courseware);
     await env.DB.prepare(
       `UPDATE courseware_segments SET
          audio_status = CASE WHEN audio_status = 'generating' THEN 'pending' ELSE audio_status END,
@@ -279,7 +357,12 @@ async function advanceSpeech(
     ).bind(courseware.id, courseware.id, leaseToken).run();
     const refreshed = await createCoursewareRepository(env.DB).getForWorker(courseware.id);
     if (!refreshed) return 'ignored';
-    await resetMissingReadyAudio(env, refreshed, leaseToken);
+    const storage = await resetMissingReadyAudio(env, refreshed, leaseToken);
+    if (storage === 'reenqueue') return 'reenqueue';
+    if (storage === 'failed') return failCourseware(
+      env, courseware, leaseToken, new ProviderCallError('storage_failed', 503),
+    );
+    if (storage === 'ignored') return 'ignored';
     const latest = await createCoursewareRepository(env.DB).getForWorker(courseware.id);
     if (!latest) return 'ignored';
     const work: AudioWork[] = [];
@@ -289,7 +372,17 @@ async function advanceSpeech(
     }
     work.sort((left, right) => left.segment.position - right.segment.position ||
       (left.variant === right.variant ? 0 : left.variant === 'main' ? -1 : 1));
-    for (const item of work.slice(0, MAX_ARTIFACTS_PER_ADVANCE)) {
+    const batch = work.slice(0, MAX_ARTIFACTS_PER_ADVANCE);
+    if (batch.length === 0) {
+      return await setStage(env, courseware, leaseToken, 'speech', 'images') ? 'reenqueue' : 'ignored';
+    }
+    const needsStudent = batch.some((item) => item.segment.speaker === 'student');
+    const needsTeacher = batch.some((item) => item.segment.speaker !== 'student');
+    const [teacherModel, studentModel] = await Promise.all([
+      needsTeacher ? resolveTeacherSpeechModelForJob(env, courseware) : Promise.resolve(null),
+      needsStudent ? resolveStudentSpeechModelForJob(env, courseware) : Promise.resolve(null),
+    ] as const);
+    for (const item of batch) {
       if (!await renewLease(env, courseware.id, leaseToken, dependencies.now())) return 'ignored';
       const fields = audioFields(item.variant);
       const claimed = await env.DB.prepare(
@@ -299,7 +392,10 @@ async function advanceSpeech(
          )`,
       ).bind(item.segment.id, courseware.id, courseware.id, leaseToken).run();
       if (claimed.meta.changes !== 1) continue;
-      const model = item.segment.speaker === 'student' ? models.studentSpeech : models.teacherSpeech;
+      const model = item.segment.speaker === 'student' ? studentModel : teacherModel;
+      if (!model) return failCourseware(
+        env, courseware, leaseToken, new ProviderCallError('missing_credential', 401),
+      );
       const text = item.variant === 'alternate' ? item.segment.alternate_speech_text : item.segment.speech_text;
       try {
         const result = await dependencies.synthesizeSpeech(model, {
@@ -313,6 +409,7 @@ async function advanceSpeech(
           allowedMediaHostSuffixes: stringArray(model.endpointConfig.mediaHostSuffixes),
           timeoutMs: timeoutMs(model),
         });
+        if (!await renewLease(env, courseware.id, leaseToken, dependencies.now())) return 'ignored';
         if (result.contentType !== 'audio/mpeg') throw new ProviderCallError('invalid_model_output', 502);
         const durationMs = readMp3DurationMs(result.bytes);
         const logicalKey = buildCoursewareMediaKey(
@@ -340,10 +437,9 @@ async function advanceSpeech(
           throw new ProviderCallError('storage_failed', 503);
         }
         if (!committed) return 'ignored';
-        await recordHealth(env, courseware, model);
+        await recordHealth(dependencies, env, courseware, model);
       } catch (error) {
         const normalized = normalizedError(error);
-        await recordHealth(env, courseware, model, normalized);
         const transient = TRANSIENT_CODES.has(normalized.errorCode);
         const failed = await env.DB.prepare(
           `UPDATE courseware_segments SET ${fields.retry} = ${fields.retry} + 1,
@@ -351,13 +447,17 @@ async function advanceSpeech(
              ${fields.errorCode} = ?, ${fields.errorMessage} = ?, updated_at = datetime('now')
            WHERE id = ? AND ${fields.status} = 'generating' AND EXISTS (
              SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = 'speech'
-           )`,
+           ) RETURNING ${fields.retry} AS retry_count, ${fields.status} AS artifact_status`,
         ).bind(transient ? 1 : 0, MAX_ITEM_ATTEMPTS, normalized.errorCode, normalized.message,
-          item.segment.id, courseware.id, leaseToken).run();
-        if (failed.meta.changes !== 1) return 'ignored';
-        if (!transient || Number(item.segment[fields.retry as keyof CoursewareSegmentRow]) + 1 >= MAX_ITEM_ATTEMPTS) {
-          return failCourseware(env, courseware, leaseToken, normalized);
+          item.segment.id, courseware.id, leaseToken)
+          .first<{ retry_count: number; artifact_status: string }>();
+        if (!failed) return 'ignored';
+        if (!transient || failed.artifact_status === 'failed') {
+          const outcome = await failCourseware(env, courseware, leaseToken, normalized);
+          await recordHealth(dependencies, env, courseware, model, normalized);
+          return outcome;
         }
+        await recordHealth(dependencies, env, courseware, model, normalized);
       }
       await updateProgress(env, courseware.id, leaseToken);
     }
@@ -392,29 +492,6 @@ async function advanceImages(
   leaseToken: string,
   dependencies: CoursewareGenerationDependencies,
 ): Promise<'done' | 'reenqueue' | 'ignored'> {
-  let models;
-  try {
-    models = { image: await resolveImageModelForJob(env, courseware) };
-  } catch (error) {
-    const normalized = normalizedError(error);
-    await env.DB.prepare(
-      `UPDATE courseware_segments SET image_status = 'failed', image_error_code = ?, image_error_message = ?
-       WHERE courseware_id = ? AND image_status IN ('pending', 'generating') AND EXISTS (
-         SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = 'images'
-       )`,
-    ).bind(normalized.errorCode, normalized.message, courseware.id, courseware.id, leaseToken).run();
-    return await setStage(env, courseware, leaseToken, 'images', 'finalizing', 95) ? 'reenqueue' : 'ignored';
-  }
-  if (!models.image) {
-    await env.DB.prepare(
-      `UPDATE courseware_segments SET image_status = 'failed', image_error_code = 'model_unavailable',
-         image_error_message = '所选模型不可用', updated_at = datetime('now')
-       WHERE courseware_id = ? AND image_status IN ('pending', 'generating') AND EXISTS (
-         SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = 'images'
-       )`,
-    ).bind(courseware.id, courseware.id, leaseToken).run();
-    return await setStage(env, courseware, leaseToken, 'images', 'finalizing') ? 'reenqueue' : 'ignored';
-  }
   await env.DB.prepare(
     `UPDATE courseware_segments SET image_status = 'pending'
      WHERE courseware_id = ? AND image_status = 'generating' AND EXISTS (
@@ -424,23 +501,16 @@ async function advanceImages(
   const refreshed = await createCoursewareRepository(env.DB).getForWorker(courseware.id);
   if (!refreshed) return 'ignored';
   for (const item of refreshed.segments) {
-    if (item.image_status !== 'ready' || !item.image_object_key) continue;
-    let exists: R2Object | null;
-    try { exists = await env.COURSEWARE_MEDIA.head(item.image_object_key); }
-    catch {
+    if (!['ready', 'pending'].includes(item.image_status) || !item.image_object_key) continue;
+    const inspection = await inspectStoredArtifact(
+      env, courseware, leaseToken, 'images', item.id, 'image', item.image_status, item.image_object_key,
+    );
+    if (inspection === 'retry') return 'reenqueue';
+    if (inspection === 'lost') return 'ignored';
+    if (inspection === 'missing' && item.image_status === 'ready') {
       await env.DB.prepare(
-        `UPDATE courseware_segments SET image_retry_count = image_retry_count + 1,
-           image_status = CASE WHEN image_retry_count + 1 < ? THEN 'ready' ELSE 'failed' END,
-           image_error_code = 'storage_failed', image_error_message = '媒体文件保存失败'
-         WHERE id = ? AND image_status = 'ready' AND EXISTS (
-           SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = 'images'
-         )`,
-      ).bind(MAX_ITEM_ATTEMPTS, item.id, courseware.id, leaseToken).run();
-      continue;
-    }
-    if (!exists) {
-      await env.DB.prepare(
-        `UPDATE courseware_segments SET image_status = 'pending', image_object_key = ''
+        `UPDATE courseware_segments SET image_status = 'pending', image_retry_count = 0,
+           image_error_code = '', image_error_message = ''
          WHERE id = ? AND image_status = 'ready' AND EXISTS (
            SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = 'images'
          )`,
@@ -451,6 +521,32 @@ async function advanceImages(
   if (!latest) return 'ignored';
   const work = latest.segments.filter((item) => item.image_status === 'pending')
     .sort((left, right) => left.position - right.position).slice(0, MAX_ARTIFACTS_PER_ADVANCE);
+  if (work.length === 0) {
+    return await setStage(env, courseware, leaseToken, 'images', 'finalizing', 95) ? 'reenqueue' : 'ignored';
+  }
+  let imageModel: ResolvedModelCall | null;
+  try {
+    imageModel = await resolveImageModelForJob(env, courseware);
+  } catch (error) {
+    const normalized = normalizedError(error);
+    await env.DB.prepare(
+      `UPDATE courseware_segments SET image_status = 'failed', image_error_code = ?, image_error_message = ?
+       WHERE courseware_id = ? AND image_status IN ('pending', 'generating') AND EXISTS (
+         SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = 'images'
+       )`,
+    ).bind(normalized.errorCode, normalized.message, courseware.id, courseware.id, leaseToken).run();
+    return await setStage(env, courseware, leaseToken, 'images', 'finalizing', 95) ? 'reenqueue' : 'ignored';
+  }
+  if (!imageModel) {
+    await env.DB.prepare(
+      `UPDATE courseware_segments SET image_status = 'failed', image_error_code = 'model_unavailable',
+         image_error_message = '所选模型不可用', updated_at = datetime('now')
+       WHERE courseware_id = ? AND image_status IN ('pending', 'generating') AND EXISTS (
+         SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = 'images'
+       )`,
+    ).bind(courseware.id, courseware.id, leaseToken).run();
+    return await setStage(env, courseware, leaseToken, 'images', 'finalizing', 95) ? 'reenqueue' : 'ignored';
+  }
   for (const item of work) {
     if (!await renewLease(env, courseware.id, leaseToken, dependencies.now())) return 'ignored';
     const claimed = await env.DB.prepare(
@@ -461,15 +557,16 @@ async function advanceImages(
     ).bind(item.id, courseware.id, leaseToken).run();
     if (claimed.meta.changes !== 1) continue;
     try {
-      const result = await dependencies.generateImage(models.image, {
-        baseUrl: models.image.baseUrl,
-        apiKey: models.image.apiKey,
-        modelId: models.image.modelId,
+      const result = await dependencies.generateImage(imageModel, {
+        baseUrl: imageModel.baseUrl,
+        apiKey: imageModel.apiKey,
+        modelId: imageModel.modelId,
         prompt: item.visual_prompt,
-        size: imageSize(models.image),
-        allowedMediaHostSuffixes: stringArray(models.image.endpointConfig.mediaHostSuffixes),
-        timeoutMs: timeoutMs(models.image),
+        size: imageSize(imageModel),
+        allowedMediaHostSuffixes: stringArray(imageModel.endpointConfig.mediaHostSuffixes),
+        timeoutMs: timeoutMs(imageModel),
       });
+      if (!await renewLease(env, courseware.id, leaseToken, dependencies.now())) return 'ignored';
       const logicalKey = buildCoursewareMediaKey(
         courseware.owner_user_id, courseware.student_id, courseware.id, item.id, 'image', imageExtension(result.contentType),
       );
@@ -483,16 +580,23 @@ async function advanceImages(
           attemptToken: leaseToken,
           contentType: result.contentType,
           bytes: result.bytes,
-          requestId: safeRequestId(result.requestId, models.image.apiKey),
+          requestId: safeRequestId(result.requestId, imageModel.apiKey),
         }, { status: courseware.status, stage: 'images', leaseToken });
       } catch {
         throw new ProviderCallError('storage_failed', 503);
       }
       if (!committed) return 'ignored';
-      await recordHealth(env, courseware, models.image);
+      const newKey = buildCoursewareMediaAttemptKey(logicalKey, leaseToken);
+      if (item.image_object_key && item.image_object_key !== newKey) {
+        try {
+          await cleanupCoursewareAttemptObject(env, item.image_object_key);
+        } catch {
+          // Exact cleanup tombstone was persisted; the new committed artifact remains authoritative.
+        }
+      }
+      await recordHealth(dependencies, env, courseware, imageModel);
     } catch (error) {
       const normalized = normalizedError(error);
-      await recordHealth(env, courseware, models.image, normalized);
       const transient = TRANSIENT_CODES.has(normalized.errorCode);
       const updated = await env.DB.prepare(
         `UPDATE courseware_segments SET image_retry_count = image_retry_count + 1,
@@ -504,6 +608,7 @@ async function advanceImages(
       ).bind(transient ? 1 : 0, MAX_ITEM_ATTEMPTS, normalized.errorCode, normalized.message,
         item.id, courseware.id, leaseToken).run();
       if (updated.meta.changes !== 1) return 'ignored';
+      await recordHealth(dependencies, env, courseware, imageModel, normalized);
     }
     await updateProgress(env, courseware.id, leaseToken);
   }
@@ -536,49 +641,44 @@ async function advanceFinalizing(
         await setStage(env, courseware, leaseToken, 'finalizing', 'speech');
         return 'reenqueue';
       }
-      try {
-        if (!await env.COURSEWARE_MEDIA.head(objectKey)) {
-          await env.DB.prepare(
-            `UPDATE courseware_segments SET
-               audio_status = CASE WHEN audio_object_key = ? THEN 'pending' ELSE audio_status END,
-               alternate_audio_status = CASE WHEN alternate_audio_object_key = ? THEN 'pending' ELSE alternate_audio_status END
-             WHERE id = ? AND EXISTS (
-               SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = 'finalizing'
-             )`,
-          ).bind(objectKey, objectKey, item.id, courseware.id, leaseToken).run();
-          await setStage(env, courseware, leaseToken, 'finalizing', 'speech');
-          return 'reenqueue';
-        }
-      } catch {
+      const variant = objectKey === item.audio_object_key ? 'main' : 'alternate';
+      const inspection = await inspectStoredArtifact(
+        env, courseware, leaseToken, 'finalizing', item.id, variant, 'ready', objectKey,
+      );
+      if (inspection === 'retry') return 'reenqueue';
+      if (inspection === 'failed') {
         return failCourseware(env, courseware, leaseToken, new ProviderCallError('storage_failed', 503));
+      }
+      if (inspection === 'lost') return 'ignored';
+      if (inspection === 'missing') {
+        const fields = audioFields(variant);
+        await env.DB.prepare(
+          `UPDATE courseware_segments SET ${fields.status} = 'pending', ${fields.object} = '',
+             ${fields.retry} = 0, ${fields.errorCode} = '', ${fields.errorMessage} = ''
+           WHERE id = ? AND ${fields.status} = 'ready' AND EXISTS (
+             SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = 'finalizing'
+           )`,
+        ).bind(item.id, courseware.id, leaseToken).run();
+        await setStage(env, courseware, leaseToken, 'finalizing', 'speech');
+        return 'reenqueue';
       }
     }
     if (item.image_status === 'ready' && item.image_object_key) {
-      try {
-        if (!await env.COURSEWARE_MEDIA.head(item.image_object_key)) {
-          await env.DB.prepare(
-            `UPDATE courseware_segments SET image_status = 'pending', image_object_key = ''
-             WHERE id = ? AND EXISTS (
-               SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = 'finalizing'
-             )`,
-          ).bind(item.id, courseware.id, leaseToken).run();
-          await setStage(env, courseware, leaseToken, 'finalizing', 'images');
-          return 'reenqueue';
-        }
-      } catch {
-        const updated = await env.DB.prepare(
-          `UPDATE courseware_segments SET image_retry_count = image_retry_count + 1,
-             image_status = CASE WHEN image_retry_count + 1 < ? THEN 'ready' ELSE 'failed' END,
-             image_error_code = 'storage_failed', image_error_message = '媒体文件保存失败'
+      const inspection = await inspectStoredArtifact(
+        env, courseware, leaseToken, 'finalizing', item.id, 'image', 'ready', item.image_object_key,
+      );
+      if (inspection === 'retry') return 'reenqueue';
+      if (inspection === 'lost') return 'ignored';
+      if (inspection === 'missing') {
+        await env.DB.prepare(
+          `UPDATE courseware_segments SET image_status = 'pending', image_retry_count = 0,
+             image_error_code = '', image_error_message = ''
            WHERE id = ? AND image_status = 'ready' AND EXISTS (
              SELECT 1 FROM coursewares c WHERE c.id = ? AND c.lease_token = ? AND c.generation_stage = 'finalizing'
-           ) RETURNING image_status`,
-        ).bind(MAX_ITEM_ATTEMPTS, item.id, courseware.id, leaseToken).first<{ image_status: string }>();
-        if (!updated) return 'ignored';
-        if (updated.image_status === 'ready') {
-          await setStage(env, courseware, leaseToken, 'finalizing', 'images');
-          return 'reenqueue';
-        }
+           )`,
+        ).bind(item.id, courseware.id, leaseToken).run();
+        await setStage(env, courseware, leaseToken, 'finalizing', 'images');
+        return 'reenqueue';
       }
     }
   }

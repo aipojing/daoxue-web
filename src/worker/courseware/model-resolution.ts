@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { AICapability, CoursewareModelPurpose } from '../../shared/ai-catalog';
-import { resolveCredential } from '../ai-catalog/credentials';
-import { recordCredentialHealth, resolvePreference, type ResolvedModelSelection } from '../ai-catalog/repository';
+import { resolveCredentialWithRevision, type CredentialRevision } from '../ai-catalog/credentials';
+import { resolvePreference, type ResolvedModelSelection } from '../ai-catalog/repository';
 import type { Env } from '../env';
 import { ProviderCallError } from './adapters/errors';
 import type { AdapterType } from './adapters/registry';
@@ -16,6 +16,7 @@ export interface ResolvedModelCall {
   capability: AICapability;
   modelId: string;
   apiKey: string;
+  credentialRevision: CredentialRevision;
   endpointConfig: Record<string, unknown>;
   modelConfig: Record<string, unknown>;
   params: Record<string, unknown>;
@@ -70,19 +71,15 @@ async function withCredential(
   userId: number,
   selection: Omit<ResolvedModelSelection, 'purpose'> | z.infer<typeof snapshotCallSchema>,
 ): Promise<ResolvedModelCall> {
-  const health = await env.DB.prepare(
-    `SELECT health_status FROM user_ai_credentials WHERE user_id = ? AND provider_id = ?`,
-  ).bind(userId, selection.providerId).first<{ health_status: string }>();
-  if (health?.health_status === 'invalid') throw new ProviderCallError('invalid_credential', 401);
-  if (health?.health_status === 'quota_exhausted') throw new ProviderCallError('quota_exhausted', 402);
-  let apiKey: string;
+  let credential;
   try {
-    apiKey = await resolveCredential(env.DB, env, userId, selection.providerId);
+    credential = await resolveCredentialWithRevision(env.DB, env, userId, selection.providerId);
   } catch {
-    await recordCredentialHealth(env.DB, userId, selection.providerId, 'invalid');
-    throw new ProviderCallError('invalid_credential', 401);
+    throw new ProviderCallError('internal_error', 503);
   }
-  if (!apiKey) throw new ProviderCallError('missing_credential', 401);
+  if (!credential?.apiKey) throw new ProviderCallError('missing_credential', 401);
+  if (credential.healthStatus === 'invalid') throw new ProviderCallError('invalid_credential', 401);
+  if (credential.healthStatus === 'quota_exhausted') throw new ProviderCallError('quota_exhausted', 402);
   return {
     providerId: selection.providerId,
     providerSlug: selection.providerSlug,
@@ -91,7 +88,8 @@ async function withCredential(
     baseUrl: selection.baseUrl,
     capability: selection.capability,
     modelId: selection.modelId,
-    apiKey,
+    apiKey: credential.apiKey,
+    credentialRevision: credential.revision,
     endpointConfig: selection.endpointConfig,
     modelConfig: selection.modelConfig,
     params: selection.params,
@@ -167,15 +165,29 @@ export async function resolveSpeechModelsForJob(env: Env, courseware: Courseware
   teacherSpeech: ResolvedModelCall & { voiceId: string };
   studentSpeech: ResolvedModelCall & { voiceId: string };
 }> {
-  const snapshot = parseJobSnapshot(courseware);
   const [teacherSpeech, studentSpeech] = await Promise.all([
-    resolveSnapshotCall(env, courseware, snapshot.teacherSpeech),
-    resolveSnapshotCall(env, courseware, snapshot.studentSpeech),
+    resolveTeacherSpeechModelForJob(env, courseware),
+    resolveStudentSpeechModelForJob(env, courseware),
   ] as const);
-  return {
-    teacherSpeech: { ...teacherSpeech, voiceId: snapshot.teacherSpeech.voiceId },
-    studentSpeech: { ...studentSpeech, voiceId: snapshot.studentSpeech.voiceId },
-  };
+  return { teacherSpeech, studentSpeech };
+}
+
+export async function resolveTeacherSpeechModelForJob(
+  env: Env,
+  courseware: CoursewareDetailRow,
+): Promise<ResolvedModelCall & { voiceId: string }> {
+  const snapshot = parseJobSnapshot(courseware);
+  const teacherSpeech = await resolveSnapshotCall(env, courseware, snapshot.teacherSpeech);
+  return { ...teacherSpeech, voiceId: snapshot.teacherSpeech.voiceId };
+}
+
+export async function resolveStudentSpeechModelForJob(
+  env: Env,
+  courseware: CoursewareDetailRow,
+): Promise<ResolvedModelCall & { voiceId: string }> {
+  const snapshot = parseJobSnapshot(courseware);
+  const studentSpeech = await resolveSnapshotCall(env, courseware, snapshot.studentSpeech);
+  return { ...studentSpeech, voiceId: snapshot.studentSpeech.voiceId };
 }
 
 export async function resolveImageModelForJob(

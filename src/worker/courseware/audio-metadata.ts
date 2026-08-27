@@ -27,10 +27,22 @@ export function readMp3DurationMs(buffer: ArrayBuffer): number {
   let offset = 0;
   if (bytes.length >= 10 && bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
     if (bytes[3]! < 2 || bytes[3]! > 4 || bytes[4] === 0xff) invalidMp3();
+    const version = bytes[3]!;
     const flags = bytes[5]!;
+    const reservedMask = version === 2 ? 0x3f : version === 3 ? 0x1f : 0x0f;
+    if ((flags & reservedMask) !== 0) invalidMp3();
     const tagSize = syncSafe(bytes, 6);
-    offset = 10 + tagSize + ((flags & 0x10) !== 0 ? 10 : 0);
+    const hasFooter = version === 4 && (flags & 0x10) !== 0;
+    offset = 10 + tagSize + (hasFooter ? 10 : 0);
     if (offset > bytes.length) invalidMp3();
+    if (hasFooter) {
+      const footer = 10 + tagSize;
+      if (bytes[footer] !== 0x33 || bytes[footer + 1] !== 0x44 || bytes[footer + 2] !== 0x49 ||
+          bytes[footer + 3] !== 4 || bytes[footer + 4] !== bytes[4] || bytes[footer + 5] !== flags) invalidMp3();
+      for (let index = 0; index < 4; index += 1) {
+        if (bytes[footer + 6 + index] !== bytes[6 + index]) invalidMp3();
+      }
+    }
   }
 
   let durationMs = 0;

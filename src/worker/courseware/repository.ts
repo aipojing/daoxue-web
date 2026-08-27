@@ -416,19 +416,21 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
 
     async saveArtifact(artifact, guard) {
       const fields = artifact.variant === 'main'
-        ? ['audio_status', 'audio_object_key', 'audio_content_type', 'audio_duration_ms', 'audio_request_id']
+        ? ['audio_status', 'audio_object_key', 'audio_content_type', 'audio_duration_ms', 'audio_request_id', 'audio_retry_count', 'audio_error_code', 'audio_error_message']
         : artifact.variant === 'alternate'
-          ? ['alternate_audio_status', 'alternate_audio_object_key', 'alternate_audio_content_type', 'alternate_audio_duration_ms', 'alternate_audio_request_id']
-          : ['image_status', 'image_object_key', 'image_content_type', null, 'image_request_id'];
+          ? ['alternate_audio_status', 'alternate_audio_object_key', 'alternate_audio_content_type', 'alternate_audio_duration_ms', 'alternate_audio_request_id', 'alternate_audio_retry_count', 'alternate_audio_error_code', 'alternate_audio_error_message']
+          : ['image_status', 'image_object_key', 'image_content_type', null, 'image_request_id', 'image_retry_count', 'image_error_code', 'image_error_message'];
       const durationField = fields[3];
       const sql = durationField
-        ? `UPDATE courseware_segments SET ${fields[0]} = 'ready', ${fields[1]} = ?, ${fields[2]} = ?, ${durationField} = ?, ${fields[4]} = ?, updated_at = datetime('now')
+        ? `UPDATE courseware_segments SET ${fields[0]} = 'ready', ${fields[1]} = ?, ${fields[2]} = ?, ${durationField} = ?, ${fields[4]} = ?,
+             ${fields[5]} = 0, ${fields[6]} = '', ${fields[7]} = '', updated_at = datetime('now')
            WHERE id = ? AND courseware_id = ? AND ${fields[0]} = 'generating' AND EXISTS (
              SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
                AND c.status = ? AND c.generation_stage = ?
                AND ((? IS NULL AND c.lease_token IS NULL) OR c.lease_token = ?)
            )`
-        : `UPDATE courseware_segments SET ${fields[0]} = 'ready', ${fields[1]} = ?, ${fields[2]} = ?, ${fields[4]} = ?, updated_at = datetime('now')
+        : `UPDATE courseware_segments SET ${fields[0]} = 'ready', ${fields[1]} = ?, ${fields[2]} = ?, ${fields[4]} = ?,
+             ${fields[5]} = 0, ${fields[6]} = '', ${fields[7]} = '', updated_at = datetime('now')
            WHERE id = ? AND courseware_id = ? AND ${fields[0]} = 'generating' AND EXISTS (
              SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
                AND c.status = ? AND c.generation_stage = ?

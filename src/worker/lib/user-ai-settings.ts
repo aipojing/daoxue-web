@@ -137,8 +137,28 @@ export async function resolvePersonalDeepSeekKey(
   env: Env,
   userId: number,
 ): Promise<string> {
+  return (await resolvePersonalDeepSeekCredential(db, env, userId)).apiKey;
+}
+
+export interface ResolvedPersonalCredential {
+  apiKey: string;
+  ciphertext: string;
+  iv: string;
+}
+
+export async function resolvePersonalDeepSeekCredential(
+  db: D1Database,
+  env: Env,
+  userId: number,
+): Promise<ResolvedPersonalCredential> {
   const personal = await readPersonalRow(db, userId);
-  return decryptPresentKey(env, personal, userId, 'deepseek');
+  const ciphertext = personal?.deepseek_key_ciphertext ?? '';
+  const iv = personal?.deepseek_key_iv ?? '';
+  return {
+    apiKey: await decryptPresentKey(env, personal, userId, 'deepseek'),
+    ciphertext,
+    iv,
+  };
 }
 
 /**

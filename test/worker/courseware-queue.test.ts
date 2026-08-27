@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoursewareScript, CoursewareScriptSegment } from '../../src/shared/courseware';
 import { saveCredential } from '../../src/worker/ai-catalog/credentials';
+import { recordCredentialHealthForRevision } from '../../src/worker/ai-catalog/repository';
 import { ProviderCallError } from '../../src/worker/courseware/adapters/errors';
 import { readMp3DurationMs } from '../../src/worker/courseware/audio-metadata';
 import {
@@ -13,8 +14,13 @@ import type { Env } from '../../src/worker/env';
 
 class FakeBucket {
   readonly objects = new Map<string, { bytes: ArrayBuffer; contentType: string }>();
+  readonly hiddenHeads = new Set<string>();
+  readonly headFailures = new Map<string, number>();
+  readonly deleteFailures = new Set<string>();
+  putCalls = 0;
 
   async put(key: string, bytes: ArrayBuffer, options?: R2PutOptions) {
+    this.putCalls += 1;
     const metadata = options?.httpMetadata;
     const contentType = metadata instanceof Headers ? metadata.get('content-type') ?? '' : metadata?.contentType ?? '';
     this.objects.set(key, { bytes: bytes.slice(0), contentType });
@@ -22,12 +28,21 @@ class FakeBucket {
   }
 
   async head(key: string) {
+    const failures = this.headFailures.get(key) ?? 0;
+    if (failures > 0) {
+      this.headFailures.set(key, failures - 1);
+      throw new Error('temporary head failure');
+    }
+    if (this.hiddenHeads.has(key)) return null;
     const object = this.objects.get(key);
     return object ? ({ key, size: object.bytes.byteLength } as R2Object) : null;
   }
 
   async delete(key: string | string[]) {
-    for (const item of Array.isArray(key) ? key : [key]) this.objects.delete(item);
+    for (const item of Array.isArray(key) ? key : [key]) {
+      if (this.deleteFailures.has(item)) throw new Error('temporary delete failure');
+      this.objects.delete(item);
+    }
   }
 }
 
@@ -37,6 +52,15 @@ function validMp3(frameCount = 2): ArrayBuffer {
   for (let index = 0; index < frameCount; index += 1) {
     bytes.set([0xff, 0xfb, 0x90, 0x00], index * frameLength);
   }
+  return bytes.buffer;
+}
+
+function mp3WithId3(version: 2 | 3 | 4, flags: number, footer = false): ArrayBuffer {
+  const frames = new Uint8Array(validMp3());
+  const bytes = new Uint8Array(10 + (footer ? 10 : 0) + frames.length);
+  bytes.set([0x49, 0x44, 0x33, version, 0, flags, 0, 0, 0, 0]);
+  if (footer) bytes.set([0x33, 0x44, 0x49, version, 0, flags, 0, 0, 0, 0], 10);
+  bytes.set(frames, footer ? 20 : 10);
   return bytes.buffer;
 }
 
@@ -69,6 +93,30 @@ const script: CoursewareScript = {
     segment('explain', 'teacher_explanation', 'teacher', {
       alternateExplanation: { displayMarkdown: '换一种解释', speechText: '换一种讲法' },
       visual: { mode: 'generated_image', prompt: '函数坐标图', altText: '函数坐标示意图' },
+    }),
+    segment('question', 'student_question', 'student'),
+    segment('misconception', 'student_misconception', 'student'),
+    segment('reframe', 'teacher_reframe', 'teacher', {
+      alternateExplanation: { displayMarkdown: '重新理解', speechText: '重新讲解' },
+    }),
+    segment('checkpoint', 'checkpoint', 'system', {
+      checkpoint: {
+        prompt: '哪个是函数', options: ['甲', '乙'], correctAnswer: '甲', explanation: '甲符合定义',
+      },
+    }),
+    segment('summary', 'summary', 'teacher'),
+  ],
+};
+
+const teacherFirstScript: CoursewareScript = {
+  ...script,
+  segments: [
+    segment('intro', 'teacher_intro', 'teacher'),
+    segment('explain-a', 'teacher_explanation', 'teacher', {
+      alternateExplanation: { displayMarkdown: '解释甲', speechText: '讲法甲' },
+    }),
+    segment('explain-b', 'teacher_explanation', 'teacher', {
+      alternateExplanation: { displayMarkdown: '解释乙', speechText: '讲法乙' },
     }),
     segment('question', 'student_question', 'student'),
     segment('misconception', 'student_misconception', 'student'),
@@ -173,6 +221,8 @@ function dependencies(overrides: Partial<CoursewareGenerationDependencies> = {})
     generateImage: vi.fn(async () => ({
       bytes: new Uint8Array([1, 2, 3]).buffer, contentType: 'image/png', requestId: 'image-request',
     })),
+    recordCredentialHealth: (appEnv, userId, providerId, revision, status) =>
+      recordCredentialHealthForRevision(appEnv.DB, userId, providerId, revision, status),
     ...overrides,
   };
 }
@@ -196,6 +246,46 @@ async function advanceUntilDone(fixture: Fixture, deps: CoursewareGenerationDepe
   return results;
 }
 
+async function splitStudentSpeechProvider(fixture: Fixture): Promise<number> {
+  const stored = await env.DB.prepare('SELECT model_snapshot_json FROM coursewares WHERE id = ?')
+    .bind(fixture.coursewareId).first<{ model_snapshot_json: string }>();
+  const snapshot = JSON.parse(stored?.model_snapshot_json ?? '{}') as Record<string, any>;
+  const student = snapshot.studentSpeech as Record<string, any>;
+  const provider = await env.DB.prepare(
+    `INSERT INTO ai_providers(slug, display_name) VALUES (?, 'Student TTS Test') RETURNING id`,
+  ).bind(`student-tts-${crypto.randomUUID()}`).first<{ id: number }>();
+  const endpoint = await env.DB.prepare(
+    `INSERT INTO ai_provider_endpoints(provider_id, capability, adapter_type, base_url, config_json)
+     VALUES (?, 'speech_synthesis', 'token_plan_tts', ?, ?) RETURNING id`,
+  ).bind(provider?.id, student.baseUrl, JSON.stringify(student.endpointConfig)).first<{ id: number }>();
+  await env.DB.prepare(
+    `INSERT INTO ai_models(endpoint_id, capability, model_id, display_name, config_json, voices_json)
+     VALUES (?, 'speech_synthesis', ?, 'Student TTS Model', ?, ?)`,
+  ).bind(endpoint?.id, student.modelId, JSON.stringify(student.modelConfig), JSON.stringify([
+    { id: student.voiceId, name: 'Student Voice', recommendedRole: 'student' },
+  ])).run();
+  if (!provider || !endpoint) throw new Error('student provider fixture unavailable');
+  await saveCredential(env.DB, env, fixture.userId, provider.id, 'student-key-old');
+  snapshot.studentSpeech = {
+    ...student,
+    providerId: provider.id,
+    providerSlug: `student-provider-${provider.id}`,
+    endpointId: endpoint.id,
+  };
+  await env.DB.prepare('UPDATE coursewares SET model_snapshot_json = ? WHERE id = ?')
+    .bind(JSON.stringify(snapshot), fixture.coursewareId).run();
+  return provider.id;
+}
+
+async function firstReadyArtifact(coursewareId: number, variant: 'audio' | 'image' = 'audio') {
+  const prefix = variant === 'audio' ? 'audio' : 'image';
+  return env.DB.prepare(
+    `SELECT id, ${prefix}_object_key AS object_key, ${prefix}_retry_count AS retry_count
+     FROM courseware_segments WHERE courseware_id = ? AND ${prefix}_status = 'ready'
+     ORDER BY position LIMIT 1`,
+  ).bind(coursewareId).first<{ id: number; object_key: string; retry_count: number }>();
+}
+
 beforeEach(async () => {
   await env.DB.prepare('DELETE FROM invite_codes').run();
   await env.DB.prepare('DELETE FROM users').run();
@@ -214,6 +304,17 @@ describe('MP3 duration reader', () => {
     } catch (error) {
       expect(error).toMatchObject({ errorCode: 'invalid_model_output' });
     }
+  });
+
+  it('enforces version-specific ID3v2 flag masks and validates v2.4 footer ownership', () => {
+    for (const bytes of [
+      mp3WithId3(2, 0x20),
+      mp3WithId3(3, 0x10, true),
+      mp3WithId3(4, 0x08),
+    ]) {
+      expect(() => readMp3DurationMs(bytes)).toThrow();
+    }
+    expect(readMp3DurationMs(mp3WithId3(4, 0x10, true))).toBe(52);
   });
 });
 
@@ -377,6 +478,296 @@ describe('courseware queue processor', () => {
     expect(health?.health_status).toBe('invalid');
   });
 
+  it('continues after credential-health writes fail instead of discarding paid artifacts', async () => {
+    const fixture = await createFixture({ includeImages: false });
+    const healthWrite = vi.fn(async () => { throw new Error('health database unavailable'); });
+    const deps = dependencies({ recordCredentialHealth: healthWrite } as Partial<CoursewareGenerationDependencies>);
+    await advanceUntilDone(fixture, deps);
+    expect(healthWrite).toHaveBeenCalled();
+    expect(await row(fixture.coursewareId)).toMatchObject({ status: 'ready', generation_stage: 'ready' });
+    expect(fixture.bucket.objects.size).toBe(9);
+  });
+
+  it('does not let a late provider failure poison a concurrently rotated credential', async () => {
+    const fixture = await createFixture();
+    let rotated = false;
+    const deps = dependencies({
+      synthesizeSpeech: vi.fn(async () => {
+        if (!rotated) {
+          rotated = true;
+          const snapshot = await env.DB.prepare('SELECT model_snapshot_json FROM coursewares WHERE id = ?')
+            .bind(fixture.coursewareId).first<{ model_snapshot_json: string }>();
+          const providerId = (JSON.parse(snapshot?.model_snapshot_json ?? '{}') as any).teacherSpeech.providerId as number;
+          await saveCredential(env.DB, env, fixture.userId, providerId, 'rotated-new-key');
+        }
+        throw new ProviderCallError('invalid_credential', 401);
+      }),
+    });
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    const health = await env.DB.prepare(
+      'SELECT health_status, key_tail FROM user_ai_credentials WHERE user_id = ?',
+    ).bind(fixture.userId).first<{ health_status: string; key_tail: string }>();
+    expect(health).toMatchObject({ health_status: 'unknown', key_tail: '-key' });
+    expect(await row(fixture.coursewareId)).toMatchObject({ status: 'failed', error_code: 'invalid_credential' });
+  });
+
+  it.each([
+    ['success', null, 'generating'],
+    ['quota', new ProviderCallError('quota_exhausted', 402), 'failed'],
+  ] as const)('ignores a late %s health result from a rotated credential', async (_label, providerError, expectedStatus) => {
+    const fixture = await createFixture({ includeImages: false });
+    let rotated = false;
+    const deps = dependencies({
+      synthesizeSpeech: vi.fn(async () => {
+        if (!rotated) {
+          rotated = true;
+          const snapshot = await env.DB.prepare('SELECT model_snapshot_json FROM coursewares WHERE id = ?')
+            .bind(fixture.coursewareId).first<{ model_snapshot_json: string }>();
+          const providerId = (JSON.parse(snapshot?.model_snapshot_json ?? '{}') as any).teacherSpeech.providerId as number;
+          await saveCredential(env.DB, env, fixture.userId, providerId, 'rotated-health-key');
+        }
+        if (providerError) throw providerError;
+        return { bytes: validMp3(), contentType: 'audio/mpeg', requestId: 'late-health' };
+      }),
+    });
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    const health = await env.DB.prepare(
+      'SELECT health_status FROM user_ai_credentials WHERE user_id = ?',
+    ).bind(fixture.userId).first<{ health_status: string }>();
+    expect(health?.health_status).toBe('unknown');
+    expect(await row(fixture.coursewareId)).toMatchObject({ status: expectedStatus });
+  });
+
+  it('preserves the normalized provider failure when its health update also fails', async () => {
+    const fixture = await createFixture();
+    const healthWrite = vi.fn(async () => { throw new Error('health unavailable'); });
+    const deps = dependencies({
+      recordCredentialHealth: healthWrite,
+      synthesizeSpeech: vi.fn(async () => { throw new ProviderCallError('quota_exhausted', 402); }),
+    });
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    expect(healthWrite).toHaveBeenCalled();
+    expect(await row(fixture.coursewareId)).toMatchObject({
+      status: 'failed', error_code: 'quota_exhausted', retryable: 0,
+    });
+  });
+
+  it('classifies a missing credential master key as infrastructure failure without marking the user key invalid', async () => {
+    const fixture = await createFixture();
+    const appEnv = { ...fixture.appEnv, AI_SETTINGS_ENCRYPTION_KEY: undefined } as unknown as Env;
+    expect(await advanceCourseware(appEnv, fixture.coursewareId, dependencies())).toBe('done');
+    expect(await row(fixture.coursewareId)).toMatchObject({ status: 'failed', error_code: 'internal_error' });
+    const health = await env.DB.prepare(
+      'SELECT health_status FROM user_ai_credentials WHERE user_id = ?',
+    ).bind(fixture.userId).first<{ health_status: string }>();
+    expect(health?.health_status).toBe('unknown');
+  });
+
+  it('resolves credentials only for speakers in the claimed speech batch', async () => {
+    const fixture = await createFixture({ includeImages: false });
+    const studentProviderId = await splitStudentSpeechProvider(fixture);
+    const speech = vi.fn(async () => ({ bytes: validMp3(), contentType: 'audio/mpeg', requestId: crypto.randomUUID() }));
+    const deps = dependencies({
+      generateText: vi.fn(async () => ({
+        jsonText: JSON.stringify(teacherFirstScript), requestId: 'teacher-first', inputTokens: 10, outputTokens: 20,
+      })),
+      synthesizeSpeech: speech,
+    });
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    await env.DB.prepare(
+      `UPDATE user_ai_credentials SET health_status = 'invalid' WHERE user_id = ? AND provider_id = ?`,
+    ).bind(fixture.userId, studentProviderId).run();
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(speech).toHaveBeenCalledTimes(5);
+    expect(await row(fixture.coursewareId)).toMatchObject({ status: 'generating', generation_stage: 'speech' });
+  });
+
+  it('advances an artifact-complete speech stage without resolving any credential', async () => {
+    const fixture = await createFixture({ includeImages: false });
+    const deps = dependencies();
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    await env.DB.prepare(
+      `UPDATE coursewares SET generation_stage = 'speech' WHERE id = ?`,
+    ).bind(fixture.coursewareId).run();
+    await env.DB.prepare(
+      `UPDATE user_ai_credentials SET health_status = 'invalid' WHERE user_id = ?`,
+    ).bind(fixture.userId).run();
+    const calls = vi.mocked(deps.synthesizeSpeech).mock.calls.length;
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(vi.mocked(deps.synthesizeSpeech).mock.calls.length).toBe(calls);
+    expect(await row(fixture.coursewareId)).toMatchObject({ status: 'generating', generation_stage: 'images' });
+  });
+
+  it('bounds required-audio R2 head errors and fails safely on the third attempt', async () => {
+    const fixture = await createFixture({ includeImages: false });
+    const deps = dependencies();
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    const artifact = await firstReadyArtifact(fixture.coursewareId);
+    if (!artifact) throw new Error('audio fixture unavailable');
+    fixture.bucket.headFailures.set(artifact.object_key, 3);
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('done');
+    expect(await row(fixture.coursewareId)).toMatchObject({ status: 'failed', error_code: 'storage_failed', retryable: 1 });
+  });
+
+  it('retries finalizing head failures twice and succeeds when storage recovers', async () => {
+    const fixture = await createFixture({ includeImages: false });
+    const deps = dependencies();
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    expect(await row(fixture.coursewareId)).toMatchObject({ generation_stage: 'finalizing' });
+    const artifact = await firstReadyArtifact(fixture.coursewareId);
+    if (!artifact) throw new Error('audio fixture unavailable');
+    fixture.bucket.headFailures.set(artifact.object_key, 2);
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('done');
+    expect(await row(fixture.coursewareId)).toMatchObject({ status: 'ready', generation_stage: 'ready' });
+  });
+
+  it('restores a retained image object without another provider call', async () => {
+    const fixture = await createFixture();
+    const deps = dependencies();
+    await advanceUntilDone(fixture, deps);
+    const artifact = await firstReadyArtifact(fixture.coursewareId, 'image');
+    if (!artifact) throw new Error('image fixture unavailable');
+    await env.DB.prepare("UPDATE coursewares SET generation_stage = 'images' WHERE id = ?")
+      .bind(fixture.coursewareId).run();
+    await env.DB.prepare("UPDATE courseware_segments SET image_status = 'pending' WHERE id = ?")
+      .bind(artifact.id).run();
+    const imageCalls = vi.mocked(deps.generateImage).mock.calls.length;
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(vi.mocked(deps.generateImage).mock.calls.length).toBe(imageCalls);
+    const restored = await env.DB.prepare('SELECT image_status FROM courseware_segments WHERE id = ?')
+      .bind(artifact.id).first<{ image_status: string }>();
+    expect(restored?.image_status).toBe('ready');
+  });
+
+  it('deletes the retained image attempt after a replacement CAS succeeds', async () => {
+    const fixture = await createFixture();
+    const deps = dependencies();
+    await advanceUntilDone(fixture, deps);
+    const artifact = await firstReadyArtifact(fixture.coursewareId, 'image');
+    if (!artifact) throw new Error('image fixture unavailable');
+    fixture.bucket.hiddenHeads.add(artifact.object_key);
+    await env.DB.prepare("UPDATE coursewares SET generation_stage = 'images' WHERE id = ?")
+      .bind(fixture.coursewareId).run();
+    await env.DB.prepare("UPDATE courseware_segments SET image_status = 'pending' WHERE id = ?")
+      .bind(artifact.id).run();
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    expect(fixture.bucket.objects.has(artifact.object_key)).toBe(false);
+  });
+
+  it('tombstones a retained image attempt when post-CAS cleanup fails', async () => {
+    const fixture = await createFixture();
+    const deps = dependencies();
+    await advanceUntilDone(fixture, deps);
+    const artifact = await firstReadyArtifact(fixture.coursewareId, 'image');
+    if (!artifact) throw new Error('image fixture unavailable');
+    fixture.bucket.hiddenHeads.add(artifact.object_key);
+    fixture.bucket.deleteFailures.add(artifact.object_key);
+    await env.DB.prepare("UPDATE coursewares SET generation_stage = 'images' WHERE id = ?")
+      .bind(fixture.coursewareId).run();
+    await env.DB.prepare("UPDATE courseware_segments SET image_status = 'pending' WHERE id = ?")
+      .bind(artifact.id).run();
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    const tombstone = await env.DB.prepare(
+      'SELECT object_key FROM courseware_media_tombstones WHERE object_key = ?',
+    ).bind(artifact.object_key).first<{ object_key: string }>();
+    expect(tombstone?.object_key).toBe(artifact.object_key);
+  });
+
+  it('retries retained-image head failures twice and restores without provider billing', async () => {
+    const fixture = await createFixture();
+    const deps = dependencies();
+    await advanceUntilDone(fixture, deps);
+    const artifact = await firstReadyArtifact(fixture.coursewareId, 'image');
+    if (!artifact) throw new Error('image fixture unavailable');
+    fixture.bucket.headFailures.set(artifact.object_key, 2);
+    await env.DB.prepare("UPDATE coursewares SET generation_stage = 'images' WHERE id = ?")
+      .bind(fixture.coursewareId).run();
+    const imageCalls = vi.mocked(deps.generateImage).mock.calls.length;
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(vi.mocked(deps.generateImage).mock.calls.length).toBe(imageCalls);
+    const restored = await env.DB.prepare('SELECT image_status, image_retry_count FROM courseware_segments WHERE id = ?')
+      .bind(artifact.id).first<{ image_status: string; image_retry_count: number }>();
+    expect(restored).toEqual({ image_status: 'ready', image_retry_count: 0 });
+  });
+
+  it('bounds retained-image head failures and completes ready with a warning on the third attempt', async () => {
+    const fixture = await createFixture();
+    const deps = dependencies();
+    await advanceUntilDone(fixture, deps);
+    const artifact = await firstReadyArtifact(fixture.coursewareId, 'image');
+    if (!artifact) throw new Error('image fixture unavailable');
+    fixture.bucket.headFailures.set(artifact.object_key, 3);
+    await env.DB.prepare("UPDATE coursewares SET generation_stage = 'images' WHERE id = ?")
+      .bind(fixture.coursewareId).run();
+    const imageCalls = vi.mocked(deps.generateImage).mock.calls.length;
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('done');
+    expect(vi.mocked(deps.generateImage).mock.calls.length).toBe(imageCalls);
+    expect(await row(fixture.coursewareId)).toMatchObject({
+      status: 'ready', generation_stage: 'ready', warnings_json: JSON.stringify(['部分配图生成失败，不影响语音课件播放']),
+    });
+  });
+
+  it('renews a five-minute lease after provider response and avoids R2 when ownership was lost', async () => {
+    const fixture = await createFixture({ includeImages: false });
+    let remainingMs = 0;
+    const deps = dependencies({
+      synthesizeSpeech: vi.fn(async () => {
+        const lease = await env.DB.prepare('SELECT lease_expires_at FROM coursewares WHERE id = ?')
+          .bind(fixture.coursewareId).first<{ lease_expires_at: string }>();
+        remainingMs = Date.parse(`${lease?.lease_expires_at.replace(' ', 'T')}Z`) - Date.now();
+        await env.DB.prepare(
+          `UPDATE coursewares SET status = 'deleting', lease_token = 'deleting-owner',
+             lease_expires_at = datetime('now', '+5 minutes') WHERE id = ?`,
+        ).bind(fixture.coursewareId).run();
+        return { bytes: validMp3(), contentType: 'audio/mpeg', requestId: 'late-provider' };
+      }),
+    });
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    const putsBefore = fixture.bucket.putCalls;
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('ignored');
+    expect(remainingMs).toBeGreaterThan(4 * 60 * 1000);
+    expect(fixture.bucket.putCalls).toBe(putsBefore);
+    expect(await row(fixture.coursewareId)).toMatchObject({ status: 'deleting' });
+  });
+
+  it('does not write R2 when a newer generation attempt takes the lease during the provider call', async () => {
+    const fixture = await createFixture({ includeImages: false });
+    const deps = dependencies({
+      synthesizeSpeech: vi.fn(async () => {
+        await env.DB.prepare(
+          `UPDATE coursewares SET lease_token = 'new-attempt', lease_expires_at = datetime('now', '+5 minutes')
+           WHERE id = ?`,
+        ).bind(fixture.coursewareId).run();
+        return { bytes: validMp3(), contentType: 'audio/mpeg', requestId: 'stale-attempt' };
+      }),
+    });
+    await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
+    const putsBefore = fixture.bucket.putCalls;
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('ignored');
+    expect(fixture.bucket.putCalls).toBe(putsBefore);
+    const lease = await env.DB.prepare('SELECT lease_token FROM coursewares WHERE id = ?')
+      .bind(fixture.coursewareId).first<{ lease_token: string }>();
+    expect(lease?.lease_token).toBe('new-attempt');
+  });
+
   it('honors an unexpired lease and recovers an expired lease', async () => {
     const owned = await createFixture({ lease: 'fresh' });
     const blockedDeps = dependencies();
@@ -395,6 +786,10 @@ describe('courseware queue processor', () => {
     expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, readyDeps)).toBe('ignored');
     expect(readyDeps.generateText).not.toHaveBeenCalled();
     expect(readyDeps.synthesizeSpeech).not.toHaveBeenCalled();
+    await env.DB.prepare("UPDATE coursewares SET status = 'deleting' WHERE id = ?")
+      .bind(fixture.coursewareId).run();
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, readyDeps)).toBe('ignored');
+    expect(await advanceCourseware(fixture.appEnv, 2_147_483_647, readyDeps)).toBe('ignored');
     const advance = vi.fn(async () => 'ignored' as const);
     const consume = createCoursewareQueueConsumer(advance);
     const ackInvalid = vi.fn();
