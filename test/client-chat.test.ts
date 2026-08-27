@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   consumeAssessmentRouteState,
   hideCoursewareMachineBlock,
+  isCoursewareDailyConversation,
   isNearBottom,
   isPersistedMessage,
   markPersistedMessages,
   shouldApplyConversationDetail,
   shouldCommitAssistantMessage,
   subscribeToMobileMediaQuery,
+  selfLearnDailyIntro,
 } from '../src/client/lib/chat';
 import { buildCoursewareDraftCreateRequest } from '../src/client/components/CoursewareDraftCard';
 import type { Message } from '../src/client/types';
@@ -18,6 +20,23 @@ describe('client chat helpers', () => {
     expect(hideCoursewareMachineBlock('课程准备好了\n【语音课件任务】\n```json\n{"apiKey":"secret"}'))
       .toBe('课程准备好了');
     expect(hideCoursewareMachineBlock('普通自学回答')).toBe('普通自学回答');
+  });
+
+  it('limits courseware marker handling to selflearn-daily conversations', () => {
+    expect(isCoursewareDailyConversation('selflearn', 'selflearn-daily')).toBe(true);
+    expect(isCoursewareDailyConversation('selflearn', 'selflearn-profiling')).toBe(false);
+    expect(isCoursewareDailyConversation('math', 'subject')).toBe(false);
+  });
+
+  it('uses real settings state for the empty daily intro without misreporting loading or errors as off', () => {
+    expect(selfLearnDailyIntro('ready', false)).toContain('open.maic.chat');
+    const enabled = selfLearnDailyIntro('ready', true);
+    expect(enabled).toContain('站内语音课件卡片');
+    expect(enabled).not.toMatch(/OpenMAIC|https?:\/\//i);
+    expect(selfLearnDailyIntro('loading', null)).toContain('正在确认');
+    expect(selfLearnDailyIntro('error', null)).toContain('无法确认');
+    expect(selfLearnDailyIntro('loading', null)).not.toContain('OpenMAIC');
+    expect(selfLearnDailyIntro('error', null)).not.toContain('OpenMAIC');
   });
 
   it('consumes valid assessment route state exactly once for the target conversation', () => {

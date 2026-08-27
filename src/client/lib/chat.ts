@@ -2,6 +2,24 @@ import type { Message } from '../types';
 
 const COURSEWARE_TASK_MARKER = '【语音课件任务】';
 
+export type CoursewareSettingsState = 'loading' | 'ready' | 'error';
+
+export function isCoursewareDailyConversation(subject?: string, mode?: string): boolean {
+  return subject === 'selflearn' && mode === 'selflearn-daily';
+}
+
+export function selfLearnDailyIntro(
+  state: CoursewareSettingsState,
+  featureEnabled: boolean | null,
+): string {
+  if (state === 'loading') return '正在确认语音课件状态，请稍候…';
+  if (state === 'error') return '无法确认语音课件状态，请稍后重试；当前不会误切换到其他课件流程。';
+  if (featureEnabled) {
+    return '输入“开始今天的学习”，我会按任务确认、旧知识保温和知识拆解推进，并在会话内给出站内语音课件卡片；学完后回到这里完成正式测验、错题卡和每课输出。';
+  }
+  return '输入"开始今天的学习"，我会按固定流程进行：任务确认 → 旧知识保温 → 知识拆解 → 生成课件提示词（复制到 open.maic.chat 上课）→ 孩子学完回来说"学完了" → 测验与错题卡 → 每课输出。当天结束时说"今天结束"生成每日家长反馈。';
+}
+
 export function hideCoursewareMachineBlock(text: string): string {
   const marker = text.indexOf(COURSEWARE_TASK_MARKER);
   return marker < 0 ? text : text.slice(0, marker).trimEnd();

@@ -220,15 +220,98 @@ describe('courseware formal assessment', () => {
     ).bind(conversation?.id,
       '给孩子看的课程说明\n【语音课件任务】\n```json\n{"apiKey":"raw-secret","baseUrl":"https://bad.example',
       JSON.stringify(safeDraft)).run();
+    await env.DB.prepare(
+      "UPDATE messages SET reasoning_content = ? WHERE conversation_id = ? AND role = 'assistant'",
+    ).bind('可见推理\n【语音课件任务】\nraw reasoning configuration', conversation?.id).run();
     const response = await api(`/api/conversations/${conversation?.id}/messages`, {}, cookie);
     const detail = await body<{ messages: Array<Record<string, unknown>> }>(response);
     expect(detail.data?.messages).toEqual([expect.objectContaining({
-      content: '给孩子看的课程说明', coursewareDraft: safeDraft,
+      content: '给孩子看的课程说明', reasoning_content: '可见推理', coursewareDraft: safeDraft,
     })]);
     const serialized = JSON.stringify(detail.data);
     expect(serialized).not.toContain('raw-secret');
     expect(serialized).not.toContain('bad.example');
     expect(serialized).not.toContain('courseware_draft_json');
+  });
+
+  it('does not inject, extract, truncate, or render courseware tasks in profiling conversations', async () => {
+    const registration = await api('/api/auth/register', {
+      method: 'POST', body: JSON.stringify({ email: 'profiling-boundary@example.com', password: 'correct-password' }),
+    });
+    const registered = await body<{ id: number }>(registration);
+    const cookie = registration.headers.get('Set-Cookie')?.split(';', 1)[0] ?? '';
+    const student = await env.DB.prepare(
+      "INSERT INTO students(user_id, name, grade) VALUES (?, '小明', '初二') RETURNING id",
+    ).bind(registered.data?.id).first<{ id: number }>();
+    const profiling = await env.DB.prepare(
+      `INSERT INTO conversations(student_id, subject, mode, title)
+       VALUES (?, 'selflearn', 'selflearn-profiling', '画像') RETURNING id`,
+    ).bind(student?.id).first<{ id: number }>();
+    const raw = '画像原文\n【语音课件任务】\n不是机器课件';
+    const safeDraft = { subject: '数学', topic: '一次函数', learningGoal: '判断一次函数', sourceText: '摘要' };
+    await env.DB.prepare(
+      `INSERT INTO messages(conversation_id, role, content, reasoning_content, courseware_draft_json)
+       VALUES (?, 'assistant', ?, ?, ?)`,
+    ).bind(profiling?.id, raw, raw, JSON.stringify(safeDraft)).run();
+    const response = await api(`/api/conversations/${profiling?.id}/messages`, {}, cookie);
+    const detail = await body<{ messages: Array<Record<string, unknown>> }>(response);
+    expect(detail.data?.messages).toEqual([expect.objectContaining({ content: raw, reasoning_content: raw })]);
+    expect(detail.data?.messages[0]).not.toHaveProperty('coursewareDraft');
+
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO app_settings(key, value) VALUES ('deepseek_api_key', 'fake-shared-key') ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
+      env.DB.prepare("INSERT INTO app_settings(key, value) VALUES ('shared_ai_fallback_enabled', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
+      env.DB.prepare("INSERT INTO app_settings(key, value) VALUES ('courseware_enabled', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
+    ]);
+    const upstream = vi.fn(async (_input: unknown, _init?: RequestInit) => new Response(
+      'data: {"choices":[{"delta":{"content":"画像继续"}}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    ));
+    vi.stubGlobal('fetch', upstream);
+    await (await api(`/api/conversations/${profiling?.id}/chat`, {
+      method: 'POST', body: JSON.stringify({ content: '开始画像', requestId: 'profiling-courseware-boundary' }),
+    }, cookie)).text();
+    const request = JSON.parse(String((upstream.mock.calls[0]?.[1] as RequestInit | undefined)?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(request.messages[0]?.content).not.toContain('本项目语音课件模式：已开启');
+  });
+
+  it('sanitizes daily reasoning before persistence while retaining ordinary reasoning text', async () => {
+    const registration = await api('/api/auth/register', {
+      method: 'POST', body: JSON.stringify({ email: 'daily-reasoning@example.com', password: 'correct-password' }),
+    });
+    const registered = await body<{ id: number }>(registration);
+    const cookie = registration.headers.get('Set-Cookie')?.split(';', 1)[0] ?? '';
+    const student = await env.DB.prepare(
+      "INSERT INTO students(user_id, name, grade) VALUES (?, '小明', '初二') RETURNING id",
+    ).bind(registered.data?.id).first<{ id: number }>();
+    const daily = await env.DB.prepare(
+      `INSERT INTO conversations(student_id, subject, mode, title)
+       VALUES (?, 'selflearn', 'selflearn-daily', '今日学习') RETURNING id`,
+    ).bind(student?.id).first<{ id: number }>();
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO app_settings(key, value) VALUES ('deepseek_api_key', 'fake-shared-key') ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
+      env.DB.prepare("INSERT INTO app_settings(key, value) VALUES ('shared_ai_fallback_enabled', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
+      env.DB.prepare("INSERT INTO app_settings(key, value) VALUES ('courseware_enabled', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
+    ]);
+    const reasoning = '合法推理正文\n【语音课件任务】\nraw reasoning configuration';
+    const upstream = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
+      expect(request.messages[0]?.content).toContain('本项目语音课件模式：已开启');
+      return new Response(
+        `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: reasoning, content: '课程说明' } }] })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      );
+    });
+    vi.stubGlobal('fetch', upstream);
+    await (await api(`/api/conversations/${daily?.id}/chat`, {
+      method: 'POST', body: JSON.stringify({ content: '开始学习', requestId: 'daily-reasoning-boundary' }),
+    }, cookie)).text();
+    const stored = await env.DB.prepare(
+      "SELECT reasoning_content FROM messages WHERE conversation_id = ? AND role = 'assistant'",
+    ).bind(daily?.id).first<{ reasoning_content: string }>();
+    expect(stored?.reasoning_content).toBe('合法推理正文');
   });
 
   it('preserves marker text from users and from non-selflearn subjects', async () => {

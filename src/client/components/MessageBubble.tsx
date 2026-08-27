@@ -3,7 +3,8 @@ import MarkdownContent from './MarkdownContent';
 import ErrorBoundary from './ErrorBoundary';
 import { IconSpark, IconNotebook } from './icons';
 import CoursewareDraftCard from './CoursewareDraftCard';
-import type { SelfLearnCoursewareDraft } from '../types';
+import type { CoursewareAISettings, SelfLearnCoursewareDraft } from '../types';
+import type { CoursewareSettingsState } from '../lib/chat';
 
 interface Props {
   role: 'user' | 'assistant';
@@ -16,10 +17,12 @@ interface Props {
   coursewareDraft?: SelfLearnCoursewareDraft;
   studentId?: number;
   sourceConversationId?: number;
+  coursewareSettings?: CoursewareAISettings | null;
+  coursewareSettingsState?: CoursewareSettingsState;
 }
 
 function MessageBubble({ role, content, reasoning, streaming, messageId, onSaveMistake, saveState,
-  coursewareDraft, studentId, sourceConversationId }: Props) {
+  coursewareDraft, studentId, sourceConversationId, coursewareSettings, coursewareSettingsState }: Props) {
   const [reasoningOpen, setReasoningOpen] = useState(false);
 
   if (role === 'user') {
@@ -55,7 +58,13 @@ function MessageBubble({ role, content, reasoning, streaming, messageId, onSaveM
         )}
         {streaming && content && <span className="cursor-blink">▍</span>}
         {!streaming && coursewareDraft && studentId && sourceConversationId && (
-          <CoursewareDraftCard studentId={studentId} sourceConversationId={sourceConversationId} draft={coursewareDraft} />
+          <CoursewareDraftCard
+            studentId={studentId}
+            sourceConversationId={sourceConversationId}
+            draft={coursewareDraft}
+            settings={coursewareSettings ?? null}
+            settingsState={coursewareSettingsState ?? 'loading'}
+          />
         )}
         {!streaming && content && messageId !== undefined && onSaveMistake && (
           <div className="bubble-actions">

@@ -10,6 +10,7 @@ import {
   getOrCreatePendingRequest,
   consumeAssessmentRouteState,
   hideCoursewareMachineBlock,
+  isCoursewareDailyConversation,
   markPersistedMessages,
   nextStickToBottom,
   resolveChatRequestId,
@@ -21,7 +22,9 @@ import {
   streamErrorRecovery,
   streamReconciliationDecision,
   subscribeToMobileMediaQuery,
+  selfLearnDailyIntro,
   tryStartPending,
+  type CoursewareSettingsState,
 } from '../lib/chat';
 import { compressImageToDataUrl } from '../lib/image';
 import {
@@ -30,6 +33,7 @@ import {
   type Conversation,
   type ConversationDetail,
   type ConversationSubject,
+  type CoursewareAISettings,
   type Message,
 } from '../types';
 import MessageBubble from '../components/MessageBubble';
@@ -47,8 +51,6 @@ const SUBJECT_INTROS: Record<string, string> = {
     '请告诉我年级，并发完整题目、材料、选项和分值；如果已经作答，也请附上答案或卡住的位置。未指定模式时，我会默认逐步导学，先确定时空、材料类型和设问。',
   'selflearn-profiling':
     '这里是孩子学习画像采集。请家长回复"开始"，我会分几轮提问（每轮最多 6 个问题）了解孩子的情况；不确定的可以答"不确定"。画像建立后就能开始每日学习。',
-  'selflearn-daily':
-    '输入"开始今天的学习"，我会按固定流程进行：任务确认 → 旧知识保温 → 知识拆解 → 生成课件提示词（复制到 open.maic.chat 上课）→ 孩子学完回来说"学完了" → 测验与错题卡 → 每课输出。当天结束时说"今天结束"生成每日家长反馈。',
 };
 
 interface StreamingState {
@@ -80,6 +82,8 @@ export default function ChatPage() {
   const [deepThinkingPendingId, setDeepThinkingPendingId] = useState<number | null>(null);
   const [reconcilingStream, setReconcilingStream] = useState(false);
   const [toast, setToast] = useState('');
+  const [coursewareSettings, setCoursewareSettings] = useState<CoursewareAISettings | null>(null);
+  const [coursewareSettingsState, setCoursewareSettingsState] = useState<CoursewareSettingsState>('loading');
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const streamingRef = useRef(false);
@@ -255,6 +259,29 @@ export default function ChatPage() {
     return subscribeToMobileMediaQuery(mediaQuery, setIsMobile);
   }, []);
 
+  useEffect(() => {
+    if (!isCoursewareDailyConversation(detail?.subject, detail?.mode)) {
+      setCoursewareSettings(null);
+      setCoursewareSettingsState('loading');
+      return;
+    }
+    const controller = new AbortController();
+    setCoursewareSettings(null);
+    setCoursewareSettingsState('loading');
+    void apiGet<CoursewareAISettings>('/api/courseware-ai-settings', { signal: controller.signal })
+      .then((settings) => {
+        if (controller.signal.aborted) return;
+        setCoursewareSettings(settings);
+        setCoursewareSettingsState('ready');
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setCoursewareSettings(null);
+        setCoursewareSettingsState('error');
+      });
+    return () => controller.abort();
+  }, [detail?.mode, detail?.subject]);
+
   // 仅在用户本来就贴着底部时自动滚动，避免上翻查看历史时被拽回来
   useEffect(() => {
     const el = scrollRef.current;
@@ -297,6 +324,7 @@ export default function ChatPage() {
     const requestId = fixedRequestId ?? resolveChatRequestId(
       restoredRequestRef.current, content, () => crypto.randomUUID(),
     );
+    const isCoursewareDaily = isCoursewareDailyConversation(detail.subject, detail.mode);
     restoredRequestRef.current = null;
     streamingRef.current = true;
     setError('');
@@ -342,7 +370,7 @@ export default function ChatPage() {
         onDelta: (text) => {
           if (controller.signal.aborted) return;
           streamBufRef.current.content += text;
-          const visible = detail.subject === 'selflearn'
+          const visible = isCoursewareDaily
             ? hideCoursewareMachineBlock(streamBufRef.current.content)
             : streamBufRef.current.content;
           setStreaming((prev) => ({ ...prev, content: visible }));
@@ -350,14 +378,17 @@ export default function ChatPage() {
         onReasoning: (text) => {
           if (controller.signal.aborted) return;
           streamBufRef.current.reasoning += text;
-          setStreaming((prev) => ({ ...prev, reasoning: prev.reasoning + text }));
+          const visibleReasoning = isCoursewareDaily
+            ? hideCoursewareMachineBlock(streamBufRef.current.reasoning)
+            : streamBufRef.current.reasoning;
+          setStreaming((prev) => ({ ...prev, reasoning: visibleReasoning }));
         },
         onDone: (messageId) => {
           if (controller.signal.aborted) return;
           streamingRef.current = false;
           abortRef.current = null;
           setReconcilingStream(false);
-          if (detail.subject === 'selflearn') {
+          if (isCoursewareDaily) {
             streamBufRef.current = { content: '', reasoning: '' };
             setStreaming(IDLE_STREAM);
             void loadDetail();
@@ -471,15 +502,17 @@ export default function ChatPage() {
     abortRef.current = null;
     streamingRef.current = false;
     streamBufRef.current = { content: '', reasoning: '' };
-    const visibleText = detail?.subject === 'selflearn' ? hideCoursewareMachineBlock(text) : text;
-    if (shouldCommitAssistantMessage(visibleText, reasoning)) {
+    const isCoursewareDaily = isCoursewareDailyConversation(detail?.subject, detail?.mode);
+    const visibleText = isCoursewareDaily ? hideCoursewareMachineBlock(text) : text;
+    const visibleReasoning = isCoursewareDaily ? hideCoursewareMachineBlock(reasoning) : reasoning;
+    if (shouldCommitAssistantMessage(visibleText, visibleReasoning)) {
       setMessages((msgs) => [
         ...msgs,
         {
           id: Date.now(),
           role: 'assistant',
           content: visibleText,
-          reasoning_content: reasoning || null,
+          reasoning_content: visibleReasoning || null,
           created_at: '',
           persisted: false,
         },
@@ -612,6 +645,12 @@ export default function ChatPage() {
   const isSelfLearn = subject === 'selflearn' || (!detail && searchParams.get('subject') === 'selflearn');
   const backLink = isSelfLearn ? `/students/${studentId}/selflearn` : `/students/${studentId}/tutoring`;
   const introKey = subject === 'selflearn' ? detail?.mode : subject;
+  const introText = introKey === 'selflearn-daily'
+    ? selfLearnDailyIntro(
+        coursewareSettingsState,
+        coursewareSettingsState === 'ready' ? (coursewareSettings?.featureEnabled ?? false) : null,
+      )
+    : introKey ? (SUBJECT_INTROS[introKey] ?? '') : '';
 
   return (
     <div className="chat-page">
@@ -671,7 +710,7 @@ export default function ChatPage() {
         >
           {detail && messages.length === 0 && !streaming.active && (
             <div className="chat-intro card">
-              <p>{introKey ? (SUBJECT_INTROS[introKey] ?? '') : ''}</p>
+              <p>{introText}</p>
               <p className="text-secondary chat-intro-note">
                 {user?.visionEnabled
                   ? '可以点输入框旁的相机按钮拍题，系统会自动转写成文字——发送前请核对转写内容是否与原题一致。'
@@ -693,6 +732,8 @@ export default function ChatPage() {
                 coursewareDraft={m.coursewareDraft}
                 studentId={detail?.studentId}
                 sourceConversationId={detail?.id}
+                coursewareSettings={coursewareSettings}
+                coursewareSettingsState={coursewareSettingsState}
               />
             );
           })}

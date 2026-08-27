@@ -208,13 +208,17 @@ conversationRoutes.get('/:id/messages', async (c) => {
       generating: !!conv.generating,
     },
     messages: results.map((message) => {
-      const isCoursewareAssistant = conv.subject === 'selflearn' && message.role === 'assistant';
+      const isCoursewareAssistant = conv.subject === 'selflearn'
+        && conv.mode === 'selflearn-daily'
+        && message.role === 'assistant';
       const draft = isCoursewareAssistant ? parseStoredCoursewareDraft(message.courseware_draft_json) : null;
       return {
         id: message.id,
         role: message.role,
         content: isCoursewareAssistant ? extractCoursewareDraft(message.content).visibleText : message.content,
-        reasoning_content: message.reasoning_content,
+        reasoning_content: isCoursewareAssistant && message.reasoning_content
+          ? extractCoursewareDraft(message.reasoning_content).visibleText
+          : message.reasoning_content,
         created_at: message.created_at,
         ...(draft ? { coursewareDraft: draft } : {}),
       };
@@ -396,16 +400,20 @@ conversationRoutes.post('/:id/chat', async (c) => {
 
     const persistAssistant = async () => {
       if (!hasAssistantOutput(acc.content, acc.reasoning) || savedMessageId !== null) return;
-      const courseware = conv.subject === 'selflearn'
+      const isCoursewareDaily = conv.subject === 'selflearn' && conv.mode === 'selflearn-daily';
+      const courseware = isCoursewareDaily
         ? extractCoursewareDraft(acc.content)
         : { visibleText: acc.content, draft: null };
+      const visibleReasoning = isCoursewareDaily
+        ? extractCoursewareDraft(acc.reasoning).visibleText
+        : acc.reasoning;
       const row = await db
         .prepare(
           `INSERT INTO messages
              (conversation_id, role, content, reasoning_content, client_request_id, courseware_draft_json)
            VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
         )
-        .bind(conv.id, 'assistant', courseware.visibleText, acc.reasoning || null, clientRequestId,
+        .bind(conv.id, 'assistant', courseware.visibleText, visibleReasoning || null, clientRequestId,
           courseware.draft ? JSON.stringify(courseware.draft) : '')
         .first<{ id: number }>();
       savedMessageId = row?.id ?? null;
@@ -466,7 +474,11 @@ conversationRoutes.post('/:id/chat', async (c) => {
       let systemPrompt: string;
 
       if (isSelfLearn) {
-        systemPrompt = await buildSelfLearnPrompt(db, conv, appSettings.courseware_enabled === '1');
+        systemPrompt = await buildSelfLearnPrompt(
+          db,
+          conv,
+          conv.mode === 'selflearn-daily' && appSettings.courseware_enabled === '1',
+        );
       } else {
         if (!isSubject(conv.subject)) {
           await sendError('会话学科数据异常');

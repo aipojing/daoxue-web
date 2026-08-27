@@ -142,4 +142,15 @@ describe('客户端关键交互结构', () => {
     expect(draft).toContain('无法读取课件配置，请重试');
     expect(draft).not.toContain("reason: '正在读取课件配置'");
   });
+
+  it('聊天页只加载一次真实课件设置并净化 daily reasoning，卡片不各自重复请求', () => {
+    const chat = clientSource('pages/ChatPage.tsx');
+    const draft = clientSource('components/CoursewareDraftCard.tsx');
+    const reasoningHandler = chat.match(/onReasoning: \(text\) => \{[\s\S]*?\n\s+},/)?.[0] ?? '';
+    const stopHandler = chat.match(/const stopStreaming = \(\) => \{[\s\S]*?\n\s+};/)?.[0] ?? '';
+    expect(chat).toContain("apiGet<CoursewareAISettings>('/api/courseware-ai-settings'");
+    expect(draft).not.toContain("apiGet<CoursewareAISettings>('/api/courseware-ai-settings'");
+    expect(reasoningHandler).toContain('hideCoursewareMachineBlock');
+    expect(stopHandler).toContain('visibleReasoning');
+  });
 });
