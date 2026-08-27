@@ -14,14 +14,13 @@ describe('courseware AI administrator atomic SQL', () => {
     expect(statement).toMatch(/adapter_type\s*=\s*\?/);
   });
 
-  it('binds model creation and movement to the target endpoint protocol in write SQL', () => {
+  it('binds model creation to the target endpoint protocol and freezes model endpoint identity', () => {
     const insert = source.match(/`INSERT INTO ai_models[\s\S]*?RETURNING id`/)?.[0] ?? '';
     const update = source.match(/`UPDATE ai_models[\s\S]*?RETURNING id`/)?.[0] ?? '';
     expect(insert).toContain('SELECT');
     expect(insert).toContain('ai_provider_endpoints');
     expect(insert).toMatch(/adapter_type\s*=\s*\?/);
-    expect(update).toContain('EXISTS');
-    expect(update).toContain('ai_provider_endpoints');
-    expect(update).toMatch(/adapter_type\s*=\s*\?/);
+    expect(update).toMatch(/endpoint_id\s*=\s*\?/);
+    expect(update).not.toMatch(/SET\s+endpoint_id\s*=/);
   });
 });

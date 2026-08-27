@@ -495,6 +495,40 @@ describe('courseware routes', () => {
     expect(sent).toEqual([{ coursewareId }]);
   });
 
+  it('queues an image retry from a historical snapshot after provider, endpoint, and model are disabled', async () => {
+    const account = await register('image-retry-disabled-catalog@example.com');
+    const studentId = await createStudent(account.cookie);
+    await configureCoursewareAI(account.id);
+    const coursewareId = await insertCourseware(studentId);
+    await setImageSnapshot(coursewareId);
+    await insertSegment(coursewareId, 'failed');
+    const image = await env.DB.prepare(
+      `SELECT p.id AS provider_id, e.id AS endpoint_id, m.id AS model_id
+       FROM ai_models m JOIN ai_provider_endpoints e ON e.id = m.endpoint_id
+       JOIN ai_providers p ON p.id = e.provider_id WHERE m.capability = 'image_generation' LIMIT 1`,
+    ).first<{ provider_id: number; endpoint_id: number; model_id: number }>();
+    await env.DB.batch([
+      env.DB.prepare('UPDATE ai_providers SET enabled = 0 WHERE id = ?').bind(image?.provider_id),
+      env.DB.prepare('UPDATE ai_provider_endpoints SET enabled = 0 WHERE id = ?').bind(image?.endpoint_id),
+      env.DB.prepare('UPDATE ai_models SET enabled = 0 WHERE id = ?').bind(image?.model_id),
+    ]);
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockResolvedValue({ metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } });
+    try {
+      expect((await api(`/api/coursewares/${coursewareId}/images/retry`, { method: 'POST' }, account.cookie)).status).toBe(200);
+      await env.DB.prepare("UPDATE app_settings SET value = '1' WHERE key = 'courseware_enabled'").run();
+      expect((await api(`/api/students/${studentId}/coursewares`, {
+        method: 'POST', body: JSON.stringify({ subject: 'math', topic: '新课件', learningGoal: '新目标', includeImages: false }),
+      }, account.cookie)).status).toBe(400);
+    } finally {
+      await env.DB.batch([
+        env.DB.prepare('UPDATE ai_providers SET enabled = 1 WHERE id = ?').bind(image?.provider_id),
+        env.DB.prepare('UPDATE ai_provider_endpoints SET enabled = 1 WHERE id = ?').bind(image?.endpoint_id),
+        env.DB.prepare('UPDATE ai_models SET enabled = 1 WHERE id = ?').bind(image?.model_id),
+      ]);
+      vi.restoreAllMocks();
+    }
+  });
+
   it('allows only one concurrent image retry claim and one queue message', async () => {
     const account = await register('image-cas@example.com');
     const studentId = await createStudent(account.cookie);

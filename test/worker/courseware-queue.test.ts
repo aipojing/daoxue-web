@@ -11,6 +11,7 @@ import {
 } from '../../src/worker/courseware/generator';
 import { createCoursewareQueueConsumer } from '../../src/worker/courseware/queue';
 import { createCoursewareRepository } from '../../src/worker/courseware/repository';
+import { resolveModelsForJob } from '../../src/worker/courseware/model-resolution';
 import type { Env } from '../../src/worker/env';
 
 class FakeBucket {
@@ -423,9 +424,11 @@ describe('courseware queue processor', () => {
     expect(JSON.parse((await row(fixture.coursewareId))?.warnings_json ?? '[]')).toContain('部分配图生成失败，不影响语音课件播放');
   });
 
-  it('keeps a courseware playable when its snapshotted image endpoint is administratively disabled', async () => {
+  it('continues the snapshotted image generation when its endpoint is administratively disabled', async () => {
     const fixture = await createFixture();
-    const image = vi.fn();
+    const image = vi.fn(async () => ({
+      bytes: new Uint8Array([1, 2, 3]).buffer, contentType: 'image/png', requestId: 'disabled-endpoint-image',
+    }));
     const deps = dependencies({ generateImage: image });
     await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
     await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps);
@@ -436,11 +439,56 @@ describe('courseware queue processor', () => {
     await env.DB.prepare('UPDATE ai_provider_endpoints SET enabled = 0 WHERE id = ?').bind(endpointId).run();
     try {
       await advanceUntilDone(fixture, deps);
-      expect(image).not.toHaveBeenCalled();
+      expect(image).toHaveBeenCalledTimes(1);
       expect(await row(fixture.coursewareId)).toMatchObject({ status: 'ready', generation_stage: 'ready' });
-      expect(JSON.parse((await row(fixture.coursewareId))?.warnings_json ?? '[]')).toContain('部分配图生成失败，不影响语音课件播放');
+      expect(JSON.parse((await row(fixture.coursewareId))?.warnings_json ?? '[]')).not.toContain('部分配图生成失败，不影响语音课件播放');
     } finally {
       await env.DB.prepare('UPDATE ai_provider_endpoints SET enabled = 1 WHERE id = ?').bind(endpointId).run();
+    }
+  });
+
+  it('resolves required and image snapshot calls after catalog items are disabled, but rejects a changed provider relation', async () => {
+    const fixture = await createFixture();
+    const repository = createCoursewareRepository(fixture.appEnv.DB);
+    const detail = await repository.getForWorker(fixture.coursewareId);
+    if (!detail) throw new Error('missing courseware');
+    const snapshot = JSON.parse(detail.model_snapshot_json) as {
+      text: { providerId: number; endpointId: number };
+      teacherSpeech: { endpointId: number };
+      studentSpeech: { endpointId: number };
+      image: { endpointId: number };
+    };
+    const modelIds = await env.DB.prepare(
+      'SELECT id FROM ai_models WHERE endpoint_id IN (?, ?, ?)',
+    ).bind(snapshot.text.endpointId, snapshot.teacherSpeech.endpointId, snapshot.image.endpointId)
+      .all<{ id: number }>();
+    await env.DB.batch([
+      env.DB.prepare('UPDATE ai_providers SET enabled = 0 WHERE id = ?').bind(snapshot.text.providerId),
+      env.DB.prepare('UPDATE ai_provider_endpoints SET enabled = 0 WHERE id IN (?, ?, ?)')
+        .bind(snapshot.text.endpointId, snapshot.teacherSpeech.endpointId, snapshot.image.endpointId),
+      ...modelIds.results.map((model) => env.DB.prepare('UPDATE ai_models SET enabled = 0 WHERE id = ?').bind(model.id)),
+    ]);
+    try {
+      await expect(resolveModelsForJob(fixture.appEnv, detail)).resolves.toMatchObject({
+        text: { endpointId: snapshot.text.endpointId },
+        teacherSpeech: { endpointId: snapshot.teacherSpeech.endpointId },
+        studentSpeech: { endpointId: snapshot.studentSpeech.endpointId },
+        image: { endpointId: snapshot.image.endpointId },
+      });
+      const replacement = await env.DB.prepare(
+        "INSERT INTO ai_providers (slug, display_name) VALUES ('snapshot-relation-replacement', 'Replacement') RETURNING id",
+      ).first<{ id: number }>();
+      await env.DB.prepare('UPDATE ai_provider_endpoints SET provider_id = ? WHERE id = ?')
+        .bind(replacement?.id, snapshot.text.endpointId).run();
+      await expect(resolveModelsForJob(fixture.appEnv, detail)).rejects.toMatchObject({ errorCode: 'model_unavailable' });
+    } finally {
+      await env.DB.prepare('UPDATE ai_provider_endpoints SET provider_id = ? WHERE id = ?')
+        .bind(snapshot.text.providerId, snapshot.text.endpointId).run();
+      await env.DB.prepare('UPDATE ai_providers SET enabled = 1 WHERE id = ?').bind(snapshot.text.providerId).run();
+      await env.DB.prepare('UPDATE ai_provider_endpoints SET enabled = 1 WHERE id IN (?, ?, ?)')
+        .bind(snapshot.text.endpointId, snapshot.teacherSpeech.endpointId, snapshot.image.endpointId).run();
+      await env.DB.batch(modelIds.results.map((model) =>
+        env.DB.prepare('UPDATE ai_models SET enabled = 1 WHERE id = ?').bind(model.id)));
     }
   });
 

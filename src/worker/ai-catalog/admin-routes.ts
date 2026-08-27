@@ -272,7 +272,7 @@ adminAICatalogRoutes.put('/providers/:id', async (c) => {
 adminAICatalogRoutes.post('/endpoints', async (c) => {
   const parsed = adminEndpointSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
-  const baseUrl = normalizeAdminEndpointUrl(parsed.data.baseUrl);
+  const baseUrl = normalizeAdminEndpointUrl(parsed.data.baseUrl, parsed.data.adapterType);
   const provider = await c.env.DB.prepare('SELECT id FROM ai_providers WHERE id = ?')
     .bind(parsed.data.providerId)
     .first<{ id: number }>();
@@ -311,7 +311,7 @@ adminAICatalogRoutes.put('/endpoints/:id', async (c) => {
       existing.adapter_type !== parsed.data.adapterType) {
     return err(c, '端点所属服务商、能力和适配器创建后不可更改', 409);
   }
-  const baseUrl = normalizeAdminEndpointUrl(parsed.data.baseUrl);
+  const baseUrl = normalizeAdminEndpointUrl(parsed.data.baseUrl, parsed.data.adapterType);
   const endpoint = await catalogWrite(() =>
     c.env.DB.prepare(
       `UPDATE ai_provider_endpoints
@@ -387,7 +387,13 @@ adminAICatalogRoutes.put('/models/:id', async (c) => {
   if (!id) return err(c, '模型不存在', 404);
   const parsed = modelSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
-  const protocol = await endpointProtocol(c.env.DB, parsed.data.endpointId);
+  const existing = await c.env.DB.prepare('SELECT endpoint_id FROM ai_models WHERE id = ?')
+    .bind(id).first<{ endpoint_id: number }>();
+  if (!existing) return err(c, '模型不存在', 404);
+  if (existing.endpoint_id !== parsed.data.endpointId) {
+    return err(c, '模型所属端点创建后不可更改', 409);
+  }
+  const protocol = await endpointProtocol(c.env.DB, existing.endpoint_id);
   if (!protocol) return err(c, '端点不存在', 404);
   if (getCompiledAdapter(protocol.adapterType).capability !== protocol.capability) {
     return err(c, '目标端点协议配置不一致', 409);
@@ -399,19 +405,13 @@ adminAICatalogRoutes.put('/models/:id', async (c) => {
   const model = await catalogWrite(() =>
     c.env.DB.prepare(
       `UPDATE ai_models
-       SET endpoint_id = ?, capability = ?, model_id = ?, display_name = ?,
+       SET model_id = ?, display_name = ?,
            config_json = ?, voices_json = ?, recommended = ?, enabled = ?, sort_order = ?,
            updated_at = datetime('now')
-       WHERE id = ?
-         AND EXISTS (
-           SELECT 1 FROM ai_provider_endpoints e
-           WHERE e.id = ? AND e.capability = ? AND e.adapter_type = ?
-         )
+       WHERE id = ? AND endpoint_id = ?
        RETURNING id`,
     )
       .bind(
-        parsed.data.endpointId,
-        protocol.capability,
         parsed.data.modelId,
         parsed.data.displayName,
         JSON.stringify(validatedConfig.data),
@@ -420,9 +420,7 @@ adminAICatalogRoutes.put('/models/:id', async (c) => {
         parsed.data.enabled ? 1 : 0,
         parsed.data.sortOrder,
         id,
-        parsed.data.endpointId,
-        protocol.capability,
-        protocol.adapterType,
+        existing.endpoint_id,
       )
       .first<{ id: number }>(),
   );
@@ -432,7 +430,7 @@ adminAICatalogRoutes.put('/models/:id', async (c) => {
       .bind(id)
       .first<{ id: number }>();
     return stillExists
-      ? err(c, '目标端点协议已变更，请重试', 409)
+      ? err(c, '模型所属端点创建后不可更改', 409)
       : err(c, '模型不存在', 404);
   }
   return ok(c, model);

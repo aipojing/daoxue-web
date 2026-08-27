@@ -12,8 +12,7 @@ import { UserFacingError } from '../lib/errors';
 import { resolveCredential } from './credentials';
 import type { CredentialRevision } from './credentials';
 import { preferenceListSchema, projectPublicModelConfig } from './validation';
-
-type AdapterType = 'openai_text' | 'token_plan_tts' | 'token_plan_image';
+import type { AdapterType } from '../courseware/adapters/registry';
 type CredentialHealth = 'unknown' | 'valid' | 'invalid' | 'quota_exhausted';
 
 export interface ResolvedModelSelection {

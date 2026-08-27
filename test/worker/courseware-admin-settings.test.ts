@@ -185,6 +185,64 @@ describe('courseware catalog administration', () => {
     }
   });
 
+  it('normalizes trailing slashes for exact Token Plan TTS and image endpoints on create and update', async () => {
+    const admin = await createAdmin();
+    const cases = [
+      { capability: 'speech_synthesis', adapterType: 'token_plan_tts', path: '/api/v1/services/audio/tts/SpeechSynthesizer' },
+      { capability: 'image_generation', adapterType: 'token_plan_image', path: '/api/v1/services/aigc/multimodal-generation/generation' },
+    ] as const;
+    for (const [index, item] of cases.entries()) {
+      const providerId = await createProvider(`task-12-exact-${index}`);
+      const created = await api('/api/admin/ai-catalog/endpoints', {
+        method: 'POST', body: JSON.stringify({
+          providerId, capability: item.capability, adapterType: item.adapterType,
+          baseUrl: `https://token.example${item.path}///`, config: { mediaHostSuffixes: ['media.example'] }, enabled: true,
+        }),
+      }, admin.cookie);
+      expect(created.status).toBe(200);
+      const endpointId = (await json<{ id: number }>(created)).data?.id;
+      expect((await env.DB.prepare('SELECT base_url FROM ai_provider_endpoints WHERE id = ?').bind(endpointId)
+        .first<{ base_url: string }>())?.base_url).toBe(`https://token.example${item.path}`);
+      const updated = await api(`/api/admin/ai-catalog/endpoints/${endpointId}`, {
+        method: 'PUT', body: JSON.stringify({
+          providerId, capability: item.capability, adapterType: item.adapterType,
+          baseUrl: `https://token.example${item.path}//`, config: { mediaHostSuffixes: ['media.example'] }, enabled: true,
+        }),
+      }, admin.cookie);
+      expect(updated.status).toBe(200);
+      expect((await env.DB.prepare('SELECT base_url FROM ai_provider_endpoints WHERE id = ?').bind(endpointId)
+        .first<{ base_url: string }>())?.base_url).toBe(`https://token.example${item.path}`);
+    }
+  });
+
+  it('forbids moving a model to another endpoint while allowing mutable model fields', async () => {
+    const admin = await createAdmin();
+    const firstProvider = await createProvider('task-12-model-first');
+    const secondProvider = await createProvider('task-12-model-second');
+    const createEndpoint = async (providerId: number, host: string) => api('/api/admin/ai-catalog/endpoints', {
+      method: 'POST', body: JSON.stringify({
+        providerId, capability: 'structured_text', adapterType: 'openai_text',
+        baseUrl: `https://${host}/v1`, config: {}, enabled: true,
+      }),
+    }, admin.cookie);
+    const firstEndpoint = (await json<{ id: number }>(await createEndpoint(firstProvider, 'first.example'))).data?.id;
+    const secondEndpoint = (await json<{ id: number }>(await createEndpoint(secondProvider, 'second.example'))).data?.id;
+    const createdModel = await api('/api/admin/ai-catalog/models', {
+      method: 'POST', body: JSON.stringify({ endpointId: firstEndpoint, modelId: 'stable-model', displayName: 'Stable', config: {}, voices: [], recommended: false, enabled: true, sortOrder: 1 }),
+    }, admin.cookie);
+    const modelId = (await json<{ id: number }>(createdModel)).data?.id;
+    const moved = await api(`/api/admin/ai-catalog/models/${modelId}`, {
+      method: 'PUT', body: JSON.stringify({ endpointId: secondEndpoint, modelId: 'stable-model', displayName: 'Moved', config: {}, voices: [], recommended: false, enabled: true, sortOrder: 1 }),
+    }, admin.cookie);
+    expect(moved.status).toBe(409);
+    const updated = await api(`/api/admin/ai-catalog/models/${modelId}`, {
+      method: 'PUT', body: JSON.stringify({ endpointId: firstEndpoint, modelId: 'stable-model-v2', displayName: 'Updated', config: {}, voices: [], recommended: true, enabled: false, sortOrder: 2 }),
+    }, admin.cookie);
+    expect(updated.status).toBe(200);
+    expect(await env.DB.prepare('SELECT endpoint_id, model_id, enabled FROM ai_models WHERE id = ?').bind(modelId)
+      .first<{ endpoint_id: number; model_id: string; enabled: number }>()).toEqual({ endpoint_id: firstEndpoint, model_id: 'stable-model-v2', enabled: 0 });
+  });
+
   it('rejects literal and malformed media suffixes on the matching TTS and image protocol paths', async () => {
     const admin = await createAdmin();
     const invalidSuffixes = ['*.example.com', '8.8.8.8', '127.0.0.1', '2001:4860:4860::8888', 'Media.Example.com'];

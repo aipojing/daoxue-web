@@ -4,7 +4,7 @@ import { resolveCredentialWithRevision, type CredentialRevision } from '../ai-ca
 import { resolvePreference, type ResolvedModelSelection } from '../ai-catalog/repository';
 import type { Env } from '../env';
 import { ProviderCallError } from './adapters/errors';
-import type { AdapterType } from './adapters/registry';
+import { COMPILED_ADAPTER_TYPES, type AdapterType } from './adapters/registry';
 import type { CoursewareDetailRow } from './repository';
 
 export interface ResolvedModelCall {
@@ -33,7 +33,7 @@ const snapshotCallSchema = z.object({
   providerId: z.number().int().positive(),
   providerSlug: z.string().min(1).max(100),
   endpointId: z.number().int().positive(),
-  adapterType: z.enum(['openai_text', 'token_plan_tts', 'token_plan_image']),
+  adapterType: z.enum(COMPILED_ADAPTER_TYPES),
   adapterVersion: z.literal('v1'),
   baseUrl: z.string().url().refine((value) => value.startsWith('https://')),
   capability: z.enum(['structured_text', 'speech_synthesis', 'image_generation']),
@@ -125,12 +125,12 @@ export async function resolveModelsForCreation(
   };
 }
 
-async function assertSnapshotEnabled(env: Env, providerId: number, endpointId: number): Promise<void> {
-  const enabled = await env.DB.prepare(
+async function assertSnapshotIdentity(env: Env, providerId: number, endpointId: number): Promise<void> {
+  const relation = await env.DB.prepare(
     `SELECT e.id FROM ai_provider_endpoints e JOIN ai_providers p ON p.id = e.provider_id
-     WHERE p.id = ? AND e.id = ? AND p.enabled = 1 AND e.enabled = 1`,
+     WHERE p.id = ? AND e.id = ?`,
   ).bind(providerId, endpointId).first<{ id: number }>();
-  if (!enabled) throw new ProviderCallError('model_unavailable', 422);
+  if (!relation) throw new ProviderCallError('model_unavailable', 422);
 }
 
 function parseJobSnapshot(courseware: CoursewareDetailRow): z.infer<typeof snapshotSchema> {
@@ -153,7 +153,7 @@ async function resolveSnapshotCall(
   courseware: CoursewareDetailRow,
   selection: z.infer<typeof snapshotCallSchema>,
 ): Promise<ResolvedModelCall> {
-  await assertSnapshotEnabled(env, selection.providerId, selection.endpointId);
+  await assertSnapshotIdentity(env, selection.providerId, selection.endpointId);
   return withCredential(env, courseware.owner_user_id, selection);
 }
 

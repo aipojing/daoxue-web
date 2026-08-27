@@ -3,6 +3,7 @@ import {
   adapterEndpointPathMatches,
   COMPILED_ADAPTER_TYPES,
   getCompiledAdapter,
+  type AdapterType,
   validateAdapterEndpointConfig,
 } from '../courseware/adapters/registry';
 import { assertPublicHttpsUrl } from '../lib/outbound-url';
@@ -92,10 +93,13 @@ export const preferenceListSchema = z
   })
   .strict();
 
-export function normalizeAdminEndpointUrl(value: string): string {
+export function normalizeAdminEndpointUrl(value: string, adapterType?: AdapterType): string {
   const normalized = assertPublicHttpsUrl(value);
   const url = new URL(normalized);
   if (url.search || url.hash || url.pathname.includes('%')) throw new Error('invalid endpoint URL');
+  if (adapterType && getCompiledAdapter(adapterType).endpointPath.mode === 'exact') {
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+  }
   return url.toString();
 }
 
@@ -111,7 +115,7 @@ const rawAdminEndpointSchema = z.object({
 export const adminEndpointSchema = rawAdminEndpointSchema.superRefine((value, context) => {
   let safeUrl: string;
   try {
-    safeUrl = normalizeAdminEndpointUrl(value.baseUrl);
+    safeUrl = normalizeAdminEndpointUrl(value.baseUrl, value.adapterType);
   } catch {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ['baseUrl'], message: 'Base URL 必须是公网 HTTPS 地址' });
     return;

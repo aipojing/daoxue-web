@@ -64,6 +64,8 @@ describe('客户端关键交互结构', () => {
     expect(adminCatalogSource).toContain('停用');
     expect(adminCatalogSource).toContain('lifecycleRef.current.activate()');
     expect(adminCatalogSource).toContain('lifecycleRef.current.cleanup()');
+    expect(adminCatalogSource).toContain('disabled={pending || modelDraft.id !== null}');
+    expect(adminCatalogSource).toContain('编辑已有模型时，端点不可更改');
   });
 
   it('课件设置逐项管理异步请求、预览和错误关联', () => {
