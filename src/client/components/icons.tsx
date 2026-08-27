@@ -123,3 +123,44 @@ export function IconPlus(props: IconProps) {
     </Svg>
   );
 }
+
+/** 日历（今日学习） */
+export function IconCalendar(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="4" y="5.5" width="16" height="14" rx="2" />
+      <path d="M8 3.5v4M16 3.5v4M4 10h16" />
+      <path d="M8 14h.01M12 14h.01M16 14h.01" strokeWidth={2.4} />
+    </Svg>
+  );
+}
+
+/** 耳机（语音课件） */
+export function IconHeadphones(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 14v-2a8 8 0 0 1 16 0v2" />
+      <path d="M4 14h3v5H5.5A1.5 1.5 0 0 1 4 17.5zM20 14h-3v5h1.5a1.5 1.5 0 0 0 1.5-1.5z" />
+    </Svg>
+  );
+}
+
+/** 图表（知识掌握） */
+export function IconChart(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 19.5h16" />
+      <path d="M7 17v-4M12 17V8M17 17v-7" strokeWidth={2.2} />
+    </Svg>
+  );
+}
+
+/** 档案盒（学习档案） */
+export function IconArchive(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 8.5h16v11H4zM3.5 4.5h17v4h-17z" />
+      <path d="M9 13h6" />
+    </Svg>
+  );
+}

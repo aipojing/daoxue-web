@@ -83,4 +83,16 @@ describe('客户端关键交互结构', () => {
     expect(source).toContain('savingPreferencesRef.current');
     expect(source).toContain('完成后会自动同步');
   });
+
+  it('孩子工作台提供分组导航与移动端抽屉控制', () => {
+    const app = clientSource('App.tsx');
+    const workspace = clientSource('components/StudentWorkspaceLayout.tsx');
+
+    expect(app).toContain('StudentWorkspaceLayout');
+    expect(workspace).toContain('aria-label="孩子学习功能"');
+    expect(workspace).toContain('AI 服务');
+    expect(workspace).toContain('返回学生列表');
+    expect(workspace).toContain('aria-label="打开孩子学习菜单"');
+    expect(workspace).toContain('aria-expanded={drawerOpen}');
+  });
 });

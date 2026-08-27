@@ -74,8 +74,8 @@ export default function TutoringPage() {
             <button className="btn btn-primary" onClick={() => void load()}>
               重新加载
             </button>
-            <Link to={`/students/${studentId}`} className="btn">
-              返回学生主页
+            <Link to={`/students/${studentId}/today`} className="btn">
+              返回今日学习
             </Link>
           </div>
         </div>
@@ -95,8 +95,8 @@ export default function TutoringPage() {
           <IconLamp size={24} />
           解题辅导
         </h1>
-        <Link to={`/students/${studentId}`} className="btn">
-          返回学生主页
+        <Link to={`/students/${studentId}/today`} className="btn">
+          返回今日学习
         </Link>
       </div>
       <p className="text-secondary mode-intro">

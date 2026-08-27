@@ -75,8 +75,8 @@ export default function MistakesPage() {
           <IconNotebook size={24} />
           错题本
         </h1>
-        <Link to={`/students/${studentId}`} className="btn">
-          返回学生主页
+        <Link to={`/students/${studentId}/today`} className="btn">
+          返回今日学习
         </Link>
       </div>
 

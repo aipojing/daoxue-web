@@ -14,6 +14,18 @@ const SelfLearnPage = lazy(() => import('./pages/SelfLearnPage'));
 const TutoringPage = lazy(() => import('./pages/TutoringPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 const AISettingsPage = lazy(() => import('./pages/AISettingsPage'));
+const StudentWorkspaceLayout = lazy(() => import('./components/StudentWorkspaceLayout'));
+const StudentMasteryPage = lazy(() => import('./pages/StudentMasteryPage'));
+const StudentProfilePage = lazy(() => import('./pages/StudentProfilePage'));
+
+function WorkspacePlaceholder({ title }: { title: string }) {
+  return (
+    <div className="page">
+      <div className="page-header"><h1>{title}</h1></div>
+      <div className="empty-state"><p>该功能正在准备中，请从左侧菜单继续使用其他学习功能。</p></div>
+    </div>
+  );
+}
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user, loading, error, refresh } = useAuth();
@@ -106,50 +118,21 @@ function AppRoutes() {
         path="/students/:studentId"
         element={
           <RequireAuth>
-            <Layout>
-              <StudentDetailPage />
-            </Layout>
+            <StudentWorkspaceLayout />
           </RequireAuth>
         }
-      />
-      <Route
-        path="/students/:studentId/chat/:conversationId"
-        element={
-          <RequireAuth>
-            <ChatPage />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/students/:studentId/tutoring"
-        element={
-          <RequireAuth>
-            <Layout>
-              <TutoringPage />
-            </Layout>
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/students/:studentId/selflearn"
-        element={
-          <RequireAuth>
-            <Layout>
-              <SelfLearnPage />
-            </Layout>
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/students/:studentId/mistakes"
-        element={
-          <RequireAuth>
-            <Layout>
-              <MistakesPage />
-            </Layout>
-          </RequireAuth>
-        }
-      />
+      >
+        <Route index element={<Navigate to="today" replace />} />
+        <Route path="today" element={<StudentDetailPage />} />
+        <Route path="tutoring" element={<TutoringPage />} />
+        <Route path="chat/:conversationId" element={<ChatPage />} />
+        <Route path="selflearn" element={<SelfLearnPage />} />
+        <Route path="mistakes" element={<MistakesPage />} />
+        <Route path="coursewares" element={<WorkspacePlaceholder title="语音课件" />} />
+        <Route path="coursewares/:coursewareId" element={<WorkspacePlaceholder title="语音课件" />} />
+        <Route path="mastery" element={<StudentMasteryPage />} />
+        <Route path="profile" element={<StudentProfilePage />} />
+      </Route>
       <Route
         path="/ai-settings"
         element={
