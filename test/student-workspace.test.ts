@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   getNextWorkspaceFocusIndex,
   isStudentWorkspacePathActive,
+  shouldCloseDrawerForBreakpointChange,
   shouldRestoreWorkspaceMenuFocus,
   studentWorkspaceGroups,
 } from '../src/client/lib/student-workspace';
@@ -41,6 +42,12 @@ describe('student workspace navigation', () => {
   it('restores menu focus only after a real drawer close', () => {
     expect(shouldRestoreWorkspaceMenuFocus(true)).toBe(true);
     expect(shouldRestoreWorkspaceMenuFocus(false)).toBe(false);
+  });
+
+  it('silently closes only an open compact drawer when switching to desktop', () => {
+    expect(shouldCloseDrawerForBreakpointChange(true, false, true)).toBe(true);
+    expect(shouldCloseDrawerForBreakpointChange(true, false, false)).toBe(false);
+    expect(shouldCloseDrawerForBreakpointChange(false, true, true)).toBe(false);
   });
 });
 

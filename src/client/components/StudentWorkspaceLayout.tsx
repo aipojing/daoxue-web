@@ -5,6 +5,7 @@ import type { Student } from '../types';
 import {
   getNextWorkspaceFocusIndex,
   isStudentWorkspacePathActive,
+  shouldCloseDrawerForBreakpointChange,
   shouldRestoreWorkspaceMenuFocus,
   studentWorkspaceGroups,
   type StudentWorkspaceIcon,
@@ -62,6 +63,10 @@ export default function StudentWorkspaceLayout() {
   const contentRef = useRef<HTMLElement>(null);
   const drawerRef = useRef<HTMLElement>(null);
   const previousPathnameRef = useRef(location.pathname);
+  const compactNavigationRef = useRef(compactNavigation);
+  const drawerOpenRef = useRef(drawerOpen);
+  compactNavigationRef.current = compactNavigation;
+  drawerOpenRef.current = drawerOpen;
 
   const restoreMenuFocus = useCallback(() => {
     window.requestAnimationFrame(() => menuButtonRef.current?.focus());
@@ -104,7 +109,18 @@ export default function StudentWorkspaceLayout() {
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(max-width: 899px)');
-    const updateCompactNavigation = () => setCompactNavigation(mediaQuery.matches);
+    const updateCompactNavigation = () => {
+      const nextCompactNavigation = mediaQuery.matches;
+      if (shouldCloseDrawerForBreakpointChange(
+        compactNavigationRef.current,
+        nextCompactNavigation,
+        drawerOpenRef.current,
+      )) {
+        setDrawerOpen(false);
+      }
+      compactNavigationRef.current = nextCompactNavigation;
+      setCompactNavigation(nextCompactNavigation);
+    };
     updateCompactNavigation();
     mediaQuery.addEventListener('change', updateCompactNavigation);
     return () => mediaQuery.removeEventListener('change', updateCompactNavigation);

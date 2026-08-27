@@ -60,3 +60,11 @@ export function getNextWorkspaceFocusIndex(
 export function shouldRestoreWorkspaceMenuFocus(drawerWasOpen: boolean): boolean {
   return drawerWasOpen;
 }
+
+export function shouldCloseDrawerForBreakpointChange(
+  wasCompact: boolean,
+  nextCompact: boolean,
+  drawerOpen: boolean,
+): boolean {
+  return wasCompact && !nextCompact && drawerOpen;
+}

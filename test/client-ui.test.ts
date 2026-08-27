@@ -96,6 +96,7 @@ describe('客户端关键交互结构', () => {
     expect(workspace).toContain('aria-label="打开孩子学习菜单"');
     expect(workspace).toContain('aria-expanded={drawerOpen}');
     expect(workspace).toContain('document.body.style.overflow = previousBodyOverflow');
+    expect(workspace).toContain('shouldCloseDrawerForBreakpointChange');
     expect(workspace).toContain("toggleAttribute('inert', drawerOpen)");
     expect(workspace).toContain('aria-label="关闭菜单"');
     expect(workspace).not.toContain('<button className="workspace-backdrop"');
