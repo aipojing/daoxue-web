@@ -56,6 +56,11 @@ npm run deploy
 
 ## 二、首次部署（换新账号或重建环境时用）
 
+当前版本的 Worker 启动时就依赖 D1、私有 R2、generation Queue/DLQ 和
+`AI_SETTINGS_ENCRYPTION_KEY`。全新环境必须先创建并配置这些资源，再执行第一次
+`npm run deploy`；不能跳到后面的发布命令。资源用途、preview 冒烟和非破坏回滚细节见
+[语音课件首次发布](#二附二语音课件首次发布默认关闭)。
+
 ```bash
 # 1. 登录 Cloudflare（会打开浏览器授权）
 npx wrangler login
@@ -63,19 +68,39 @@ npx wrangler login
 # 2. 创建 D1 数据库，把输出的 database_id 填进 wrangler.jsonc
 npx wrangler d1 create daoxue-db
 
-# 3. 应用全部数据库迁移
-npx wrangler d1 migrations apply daoxue-db --remote
+# 3. 创建 wrangler.jsonc 当前声明的私有 R2、DLQ 和 generation Queue
+npx wrangler r2 bucket create daoxue-courseware-media
+npx wrangler r2 bucket create daoxue-courseware-media-preview
+npx wrangler queues create daoxue-courseware-generation-dlq
+npx wrangler queues create daoxue-courseware-generation
 
-# 4. 首次部署前需要注册 workers.dev 子域名
+# 4. 只生成一次加密主密钥，先保存到密码管理器，再把同一个值粘贴到提示中
+openssl rand -base64 32
+npx wrangler secret put AI_SETTINGS_ENCRYPTION_KEY
+
+# 5. 应用全部数据库迁移，并确认语音课件开关默认关闭
+npx wrangler d1 migrations apply daoxue-db --remote
+npx wrangler d1 execute daoxue-db --remote \
+  --command "SELECT key, value FROM app_settings WHERE key = 'courseware_enabled';"
+
+# 6. 首次部署前需要注册 workers.dev 子域名
 #    在 Cloudflare 控制台 Workers & Pages → 右侧 Subdomain 处设置
 #    （命令行交互不可用时，也可用 API：
 #     curl -X PUT "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/workers/subdomain" \
 #          -H "Authorization: Bearer <TOKEN>" -H "Content-Type: application/json" \
 #          -d '{"subdomain":"你想要的名字"}' ）
 
-# 5. 构建并部署
+# 7. 完成测试、构建和 dry-run 后再首次部署
+npm test
+npm run typecheck
+npm run build
+npm run deploy:dry-run
 npm run deploy
 ```
+
+上面的 R2、Queue 和 Secret 命令是全新环境的一次性步骤；已有同名资源或 Secret 的环境不要
+重复创建、重新生成或覆盖。第一次发布后，生产 `courseware_enabled` 仍应为 `0`，必须完成
+preview/本地冒烟并获得单独批准后才能开启。
 
 新子域名首次访问会有 1-3 分钟的 TLS 证书签发时间，期间会报 SSL 握手失败，属正常现象。
 
