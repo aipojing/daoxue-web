@@ -15,5 +15,26 @@
       "database_id": "00000000-0000-0000-0000-000000000000"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "COURSEWARE_MEDIA",
+      "bucket_name": "daoxue-courseware-media-test"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "COURSEWARE_QUEUE",
+        "queue": "daoxue-courseware-generation-test"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "daoxue-courseware-generation-test",
+        "max_batch_size": 1,
+        "max_retries": 3
+      }
+    ]
+  },
   "rules": [{ "type": "Text", "globs": ["**/*.md"], "fallthrough": true }]
 }

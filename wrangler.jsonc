@@ -17,6 +17,31 @@
       "database_id": "c81af3f5-3af9-47a3-a728-564bb2225f0b"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "COURSEWARE_MEDIA",
+      "bucket_name": "daoxue-courseware-media",
+      "preview_bucket_name": "daoxue-courseware-media-preview"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "COURSEWARE_QUEUE",
+        "queue": "daoxue-courseware-generation"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "daoxue-courseware-generation",
+        "max_batch_size": 1,
+        "max_batch_timeout": 2,
+        "max_retries": 3,
+        "dead_letter_queue": "daoxue-courseware-generation-dlq",
+        "max_concurrency": 2
+      }
+    ]
+  },
   // 自定义域名（大陆可直连）；同时保留 workers.dev 地址作为备用入口。
   // 根域名 aipojing.xyz 留给个人站，本项目走 xue 二级域名。
   "routes": [{ "pattern": "xue.aipojing.xyz", "custom_domain": true }],

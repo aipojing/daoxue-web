@@ -1,6 +1,12 @@
+export interface CoursewareQueueMessage {
+  coursewareId: number;
+}
+
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
+  COURSEWARE_MEDIA: R2Bucket;
+  COURSEWARE_QUEUE: Queue<CoursewareQueueMessage>;
   DEEPSEEK_API_KEY: string;
   /** 可选：视觉模型（拍照识题）。不配置则前端隐藏拍照按钮 */
   VISION_API_KEY?: string;
