@@ -27,7 +27,7 @@ export default function CoursewarePlayer({ courseware }: Props) {
   const stateRef = useRef(state);
   const audioRef = useRef<HTMLAudioElement>(null);
   const writerRef = useRef<CoursewareProgressWriter | null>(null);
-  const mountedRef = useRef(true);
+  const writerSessionRef = useRef(0);
   stateRef.current = state;
 
   const applyAction = (action: PlayerAction, saveProgress = false) => {
@@ -38,24 +38,29 @@ export default function CoursewarePlayer({ courseware }: Props) {
   };
 
   useEffect(() => {
-    mountedRef.current = true;
-    const writer = new CoursewareProgressWriter(async (patch: CoursewareProgressPatch) => {
-      try {
-        await apiPatch<CoursewareProgressPatch>(`/api/coursewares/${courseware.id}/progress`, patch);
-        if (mountedRef.current) setSaveError('');
-      } catch (cause) {
-        if (mountedRef.current) {
-          setSaveError(cause instanceof ApiError ? cause.message : '学习进度暂时没有保存');
+    const session = writerSessionRef.current + 1;
+    writerSessionRef.current = session;
+    const path = `/api/coursewares/${courseware.id}/progress`;
+    const writer = new CoursewareProgressWriter(
+      async (patch: CoursewareProgressPatch) => {
+        try {
+          await apiPatch<CoursewareProgressPatch>(path, patch);
+          if (writerSessionRef.current === session) setSaveError('');
+        } catch (cause) {
+          if (writerSessionRef.current === session) {
+            setSaveError(cause instanceof ApiError ? cause.message : '学习进度暂时没有保存');
+          }
+          throw cause;
         }
-        throw cause;
-      }
-    });
+      },
+      (patch: CoursewareProgressPatch) => apiPatch<CoursewareProgressPatch>(path, patch, { keepalive: true }),
+    );
     writerRef.current = writer;
     return () => {
-      mountedRef.current = false;
+      if (writerSessionRef.current === session) writerSessionRef.current += 1;
       audioRef.current?.pause();
       writer.dispose(progressPatch(stateRef.current));
-      writerRef.current = null;
+      if (writerRef.current === writer) writerRef.current = null;
     };
   }, [courseware.id]);
 
@@ -126,8 +131,13 @@ export default function CoursewarePlayer({ courseware }: Props) {
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') writerRef.current?.enqueue(progressPatch(stateRef.current));
     };
+    const onPageHide = () => writerRef.current?.flushFinal(progressPatch(stateRef.current));
     document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('pagehide', onPageHide);
+    };
   }, []);
 
   const seekTo = (seconds: number) => {

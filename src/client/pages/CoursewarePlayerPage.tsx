@@ -5,7 +5,8 @@ import { apiGet, ApiError } from '../api';
 import type { StudentWorkspaceContext } from '../components/StudentWorkspaceLayout';
 import CoursewareGenerationStatus from '../components/CoursewareGenerationStatus';
 import CoursewarePlayer from '../components/CoursewarePlayer';
-import { shouldPollCourseware } from '../lib/courseware';
+import { CoursewarePollChain, shouldPollCourseware } from '../lib/courseware';
+import { isTerminalCoursewareLoadStatus } from '../lib/courseware-player';
 
 export default function CoursewarePlayerPage() {
   const { studentId, coursewareId } = useParams();
@@ -24,8 +25,9 @@ export default function CoursewarePlayerPage() {
     const parsedId = Number(coursewareId);
     const controller = new AbortController();
     const token = ++routeEpochRef.current;
-    let timer: number | undefined;
     let hasLoaded = false;
+    let active = false;
+    let disposed = false;
     setRouteToken(token);
     setRouteSignal(controller.signal);
     setCourseware(null);
@@ -39,34 +41,62 @@ export default function CoursewarePlayerPage() {
       return () => controller.abort();
     }
 
+    const isCurrent = () => !disposed && !controller.signal.aborted && token === routeEpochRef.current;
     const load = async (background = false) => {
       try {
         const detail = await apiGet<CoursewareDetail>(`/api/coursewares/${parsedId}`, { signal: controller.signal });
-        if (controller.signal.aborted || token !== routeEpochRef.current) return;
+        if (!isCurrent()) return;
         if (detail.studentId !== Number(studentId)) {
+          active = false;
+          setCourseware(null);
           setError('该课件不属于当前孩子，请返回课件库重新选择');
           setLoading(false);
           return;
         }
         hasLoaded = true;
+        active = shouldPollCourseware(detail);
         setCourseware(detail);
         setError('');
         setLoading(false);
-        if (shouldPollCourseware(detail)) timer = window.setTimeout(() => void load(true), 2_000);
       } catch (cause) {
-        if (controller.signal.aborted || token !== routeEpochRef.current) return;
+        if (!isCurrent()) return;
+        const terminal = cause instanceof ApiError && isTerminalCoursewareLoadStatus(cause.status);
+        if (terminal) {
+          active = false;
+          setCourseware(null);
+          setError(cause.message);
+          setLoading(false);
+          return;
+        }
         if (!background || !hasLoaded) {
+          active = false;
           setError(cause instanceof ApiError ? cause.message : '无法加载课件，请稍后重试');
           setLoading(false);
+          return;
         }
-        timer = window.setTimeout(() => void load(true), 5_000);
+        throw cause;
       }
     };
-    void load();
+    const chain = new CoursewarePollChain(
+      {
+        setTimeout: (callback, delay) => window.setTimeout(callback, delay),
+        clearTimeout: (id) => window.clearTimeout(id),
+      },
+      () => active,
+      () => load(true),
+    );
+    chain.start();
+    const onFocus = () => chain.resetForFocus();
+    window.addEventListener('focus', onFocus);
+    void load().finally(() => {
+      if (isCurrent() && active) chain.start();
+    });
     return () => {
+      disposed = true;
       routeEpochRef.current += 1;
       controller.abort();
-      if (timer !== undefined) window.clearTimeout(timer);
+      chain.stop();
+      window.removeEventListener('focus', onFocus);
     };
   }, [coursewareId, reloadVersion, studentId]);
 

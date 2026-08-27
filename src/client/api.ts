@@ -15,6 +15,7 @@ export class ApiError extends Error {
 
 export interface ApiRequestOptions {
   signal?: AbortSignal;
+  keepalive?: boolean;
 }
 
 async function request<T>(method: string, path: string, body?: unknown, options?: ApiRequestOptions): Promise<T> {
@@ -26,6 +27,7 @@ async function request<T>(method: string, path: string, body?: unknown, options?
       body: body !== undefined ? JSON.stringify(body) : undefined,
       credentials: 'same-origin',
       signal: options?.signal,
+      keepalive: options?.keepalive,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {

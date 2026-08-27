@@ -228,33 +228,58 @@ export function progressPatch(state: CoursewarePlayerState): CoursewareProgressP
   };
 }
 
+export function isTerminalCoursewareLoadStatus(status: number): boolean {
+  return status === 401 || status === 403 || status === 404;
+}
+
+function cloneProgressPatch(patch: CoursewareProgressPatch): CoursewareProgressPatch {
+  return {
+    ...patch,
+    checkpointAnswers: { ...patch.checkpointAnswers },
+  };
+}
+
 /** Serializes saves and collapses queued updates to the newest full snapshot. */
 export class CoursewareProgressWriter {
   private pending: CoursewareProgressPatch | null = null;
   private inFlight = false;
   private disposed = false;
+  private lastFinalSnapshot = '';
 
-  constructor(private readonly send: (patch: CoursewareProgressPatch) => Promise<unknown>) {}
+  constructor(
+    private readonly send: (patch: CoursewareProgressPatch) => Promise<unknown>,
+    private readonly sendFinal: (patch: CoursewareProgressPatch) => Promise<unknown> = send,
+  ) {}
 
   enqueue(patch: CoursewareProgressPatch): void {
-    this.pending = {
-      ...patch,
-      checkpointAnswers: { ...patch.checkpointAnswers },
-    };
+    if (this.disposed) return;
+    this.pending = cloneProgressPatch(patch);
     void this.drain();
   }
 
+  flushFinal(patch: CoursewareProgressPatch): void {
+    if (this.disposed) return;
+    const snapshot = cloneProgressPatch(patch);
+    const fingerprint = JSON.stringify(snapshot);
+    if (fingerprint === this.lastFinalSnapshot) return;
+    this.lastFinalSnapshot = fingerprint;
+    this.pending = null;
+    void this.sendFinal(snapshot).catch(() => undefined);
+  }
+
   dispose(finalPatch: CoursewareProgressPatch): void {
-    this.enqueue(finalPatch);
+    if (this.disposed) return;
+    this.flushFinal(finalPatch);
     this.disposed = true;
+    this.pending = null;
   }
 
   private async drain(): Promise<void> {
-    if (this.inFlight) return;
+    if (this.inFlight || this.disposed) return;
     this.inFlight = true;
     let failed = false;
     try {
-      while (this.pending) {
+      while (this.pending && !this.disposed) {
         const next = this.pending;
         this.pending = null;
         try {
@@ -267,7 +292,7 @@ export class CoursewareProgressWriter {
       }
     } finally {
       this.inFlight = false;
-      if (this.pending && (!failed || this.disposed)) void this.drain();
+      if (this.pending && !failed && !this.disposed) void this.drain();
     }
   }
 }

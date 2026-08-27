@@ -160,7 +160,7 @@
 }
 
 @media (max-width: 600px) {
-  .courseware-player-page { padding-bottom: 300px; }
+  .courseware-player-page { padding-bottom: calc(360px + env(safe-area-inset-bottom)); }
   .courseware-breadcrumb { margin: 6px 0 14px; padding-left: 48px; }
   .courseware-lesson-header { flex-direction: column; padding: 24px 18px; }
   .courseware-lesson-status { align-self: flex-start; }
@@ -175,7 +175,7 @@
   .courseware-checkpoint { margin: 0 10px 12px; padding: 14px; }
   .courseware-checkpoint-options { grid-template-columns: 1fr; }
   .courseware-visual { margin: 0 12px 14px; }
-  .courseware-player-dock { gap: 9px; padding: 12px; }
+  .courseware-player-dock { bottom: max(12px, env(safe-area-inset-bottom)); gap: 9px; padding: 12px; }
   .courseware-now-playing { grid-column: 1 / -1; }
   .courseware-transport { grid-column: 1 / -1; grid-row: auto; }
   .courseware-start-button { grid-column: 1 / -1; grid-row: auto; }

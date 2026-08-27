@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { CoursewareProgressPatch } from '../src/shared/courseware';
 import {
   initialPlayerState,
+  isTerminalCoursewareLoadStatus,
   playerReducer,
   progressPatch,
   CoursewareProgressWriter,
@@ -121,6 +122,51 @@ describe('courseware progress writer', () => {
     expect(calls.map((patch) => patch.currentSegmentPosition)).toEqual([0, 2]);
     expect(calls[1]?.checkpointAnswers).toEqual({ s1: 0 });
   });
+
+  it('sends the newest full snapshot through the final keepalive channel even while a normal save is in flight', async () => {
+    const normalCalls: CoursewareProgressPatch[] = [];
+    const finalCalls: CoursewareProgressPatch[] = [];
+    let releaseNormal: (() => void) | undefined;
+    const pendingNormal = new Promise<void>((resolve) => { releaseNormal = resolve; });
+    const writer = new CoursewareProgressWriter(
+      async (patch) => { normalCalls.push(patch); await pendingNormal; },
+      async (patch) => { finalCalls.push(patch); },
+    );
+    const first = { currentSegmentPosition: 0, currentTimeMs: 1_000, checkpointAnswers: {} };
+    const latest = { currentSegmentPosition: 2, currentTimeMs: 8_000, checkpointAnswers: { s1: 0 } };
+
+    writer.enqueue(first);
+    writer.flushFinal(latest);
+    writer.flushFinal(latest);
+    expect(normalCalls).toEqual([first]);
+    expect(finalCalls).toEqual([latest]);
+    releaseNormal?.();
+  });
+
+  it('disposes through the final channel and ignores later ordinary enqueues', () => {
+    const normalCalls: CoursewareProgressPatch[] = [];
+    const finalCalls: CoursewareProgressPatch[] = [];
+    const writer = new CoursewareProgressWriter(
+      async (patch) => { normalCalls.push(patch); },
+      async (patch) => { finalCalls.push(patch); },
+    );
+    const finalPatch = { currentSegmentPosition: 3, currentTimeMs: 4_000, checkpointAnswers: { s2: 'skipped' as const } };
+    writer.dispose(finalPatch);
+    writer.enqueue({ currentSegmentPosition: 0, currentTimeMs: 0, checkpointAnswers: {} });
+    expect(finalCalls).toEqual([finalPatch]);
+    expect(normalCalls).toEqual([]);
+  });
+});
+
+describe('courseware player polling errors', () => {
+  it('stops automatic retries for authentication, ownership, and missing-courseware responses', () => {
+    expect(isTerminalCoursewareLoadStatus(401)).toBe(true);
+    expect(isTerminalCoursewareLoadStatus(403)).toBe(true);
+    expect(isTerminalCoursewareLoadStatus(404)).toBe(true);
+    expect(isTerminalCoursewareLoadStatus(0)).toBe(false);
+    expect(isTerminalCoursewareLoadStatus(500)).toBe(false);
+    expect(isTerminalCoursewareLoadStatus(503)).toBe(false);
+  });
 });
 
 describe('courseware player approved controls and safety', () => {
@@ -139,11 +185,18 @@ describe('courseware player approved controls and safety', () => {
 
   it('uses one authenticated audio element and a PATCH helper', () => {
     const player = readFileSync(new URL('../src/client/components/CoursewarePlayer.tsx', import.meta.url), 'utf8');
+    const page = readFileSync(new URL('../src/client/pages/CoursewarePlayerPage.tsx', import.meta.url), 'utf8');
     const api = readFileSync(new URL('../src/client/api.ts', import.meta.url), 'utf8');
+    const vite = readFileSync(new URL('../vite.config.ts', import.meta.url), 'utf8');
     expect(player.match(/<audio\b/g)).toHaveLength(1);
     expect(player).toContain('preload="metadata"');
     expect(player).toContain('apiPatch');
+    expect(player).toContain("window.addEventListener('pagehide'");
+    expect(player).toContain('keepalive: true');
+    expect(page).toContain('CoursewarePollChain');
     expect(api).toContain("request<T>('PATCH'");
+    expect(api).toContain('keepalive: options?.keepalive');
+    expect(vite).toContain("'^/api/'");
   });
 
   it('does not generate or POST from the alternate explanation path', () => {
