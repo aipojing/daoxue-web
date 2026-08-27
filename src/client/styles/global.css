@@ -1973,6 +1973,278 @@ a {
   gap: 0.75rem;
 }
 
+/* ===== 管理员语音课件目录 ===== */
+.catalog-admin-card {
+  margin-top: 16px;
+}
+
+.catalog-feature-status,
+.catalog-feature-actions,
+.catalog-admin-metrics,
+.catalog-endpoint-head,
+.catalog-model-row,
+.catalog-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.catalog-feature-status {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--grid-soft);
+  padding-bottom: 12px;
+}
+
+.catalog-feature-status h3,
+.catalog-admin-form h3 {
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+
+.catalog-feature-status p {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.catalog-admin-metrics {
+  flex-wrap: wrap;
+  padding: 12px 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.catalog-admin-metrics span {
+  border-left: 3px solid var(--board);
+  padding-left: 8px;
+}
+
+.catalog-feature-actions {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.catalog-confirm,
+.catalog-admin-notice {
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.catalog-confirm {
+  background: var(--warn-wash);
+  border-left: 3px solid var(--warning);
+}
+
+.catalog-confirm p {
+  margin-bottom: 8px;
+}
+
+.catalog-confirm .btn + .btn {
+  margin-left: 8px;
+}
+
+.catalog-admin-notice {
+  background: var(--board-wash);
+  color: var(--board-deep);
+  border-left: 3px solid var(--board);
+  margin-bottom: 12px;
+}
+
+.catalog-admin-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.catalog-admin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border: 1px solid var(--grid-soft);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.catalog-admin-form > label,
+.catalog-voice-row label {
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.catalog-admin-form > label input,
+.catalog-admin-form > label select,
+.catalog-voice-row label input,
+.catalog-voice-row label select {
+  display: block;
+  margin-top: 3px;
+}
+
+.catalog-model-form {
+  margin-top: 12px;
+}
+
+.catalog-voice-fieldset {
+  border: 1px solid var(--grid-soft);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.catalog-voice-fieldset legend {
+  color: var(--ink-soft);
+  font-size: 13px;
+  padding: 0 4px;
+}
+
+.catalog-voice-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+
+.catalog-checkbox-row {
+  margin: 4px 0;
+}
+
+.catalog-checkbox-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.catalog-inline-checkbox,
+.catalog-provider-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.catalog-inline-checkbox input {
+  width: auto;
+}
+
+.catalog-provider-edit {
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+
+.catalog-provider-edit label {
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.catalog-provider-edit input {
+  width: min(280px, 100%);
+}
+
+.catalog-checkbox-row input {
+  width: auto;
+}
+
+.catalog-provider-list {
+  margin-top: 16px;
+}
+
+.catalog-provider {
+  border-top: 1px solid var(--grid);
+}
+
+.catalog-provider summary {
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 2px;
+  font-weight: 700;
+}
+
+.catalog-provider-body {
+  padding: 0 2px 14px;
+}
+
+.catalog-endpoint {
+  border-left: 3px solid var(--grid);
+  margin-top: 12px;
+  padding: 10px 0 10px 12px;
+}
+
+.catalog-endpoint-head {
+  justify-content: space-between;
+}
+
+.catalog-endpoint dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.catalog-endpoint dt {
+  color: var(--ink-soft);
+}
+
+.catalog-endpoint dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.catalog-model-list {
+  margin-top: 10px;
+  border-top: 1px dashed var(--grid);
+}
+
+.catalog-model-row {
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--grid);
+}
+
+.catalog-model-row span:first-child {
+  min-width: 0;
+}
+
+.catalog-model-row small {
+  display: block;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.catalog-admin-skeleton {
+  display: grid;
+  gap: 10px;
+}
+
+.catalog-admin-skeleton span {
+  height: 38px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, var(--grid-soft), var(--paper), var(--grid-soft));
+  background-size: 200% 100%;
+  animation: catalog-shimmer 1.2s linear infinite;
+}
+
+@keyframes catalog-shimmer {
+  to { background-position: -200% 0; }
+}
+
+@media (max-width: 767px) {
+  .catalog-admin-grid,
+  .catalog-voice-row,
+  .catalog-endpoint dl {
+    grid-template-columns: 1fr;
+  }
+
+  .catalog-feature-status,
+  .catalog-model-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .invite-create-row {
   display: flex;
   gap: 8px;

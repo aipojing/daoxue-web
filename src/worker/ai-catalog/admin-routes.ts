@@ -8,6 +8,8 @@ import {
   adminModelConfigSchema,
   validateModelConfig,
 } from './validation';
+import { COMPILED_ADAPTER_TYPES } from '../courseware/adapters/registry';
+import { getCoursewareFeatureStatus, setCoursewareFeatureEnabled } from './feature-settings';
 
 const providerCreateSchema = z
   .object({
@@ -23,6 +25,10 @@ const providerUpdateSchema = z
     enabled: z.boolean(),
   })
   .strict();
+
+const coursewareFeatureStatusSchema = z.object({
+  enabled: z.boolean(),
+}).strict();
 
 const voiceSchema = z
   .object({
@@ -49,7 +55,7 @@ const ADAPTER_CAPABILITY = {
   openai_text: 'structured_text',
   token_plan_tts: 'speech_synthesis',
   token_plan_image: 'image_generation',
-} as const;
+} as const satisfies Record<(typeof COMPILED_ADAPTER_TYPES)[number], AICapability>;
 
 interface ProviderRow {
   id: number;
@@ -156,6 +162,18 @@ async function endpointProtocol(
 }
 
 export const adminAICatalogRoutes = new Hono<AppContext>();
+export const coursewareAdminRoutes = new Hono<AppContext>();
+
+coursewareAdminRoutes.get('/status', async (c) =>
+  ok(c, await getCoursewareFeatureStatus(c.env.DB)),
+);
+
+coursewareAdminRoutes.put('/status', async (c) => {
+  const parsed = coursewareFeatureStatusSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
+  await setCoursewareFeatureEnabled(c.env.DB, parsed.data.enabled);
+  return ok(c, await getCoursewareFeatureStatus(c.env.DB));
+});
 
 adminAICatalogRoutes.get('/providers', async (c) => {
   const [providersResult, endpointsResult, modelsResult] = await Promise.all([

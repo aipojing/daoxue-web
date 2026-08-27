@@ -53,6 +53,17 @@ describe('客户端关键交互结构', () => {
     expect(coursewareSettingsSource).not.toContain('baseUrl');
   });
 
+  it('设置页只为管理员挂载课件目录与开关管理', () => {
+    const settingsSource = clientSource('pages/SettingsPage.tsx');
+    const adminCatalogSource = clientSource('components/ModelCatalogAdminCard.tsx');
+
+    expect(settingsSource).toContain('ModelCatalogAdminCard');
+    expect(adminCatalogSource).toContain('课件功能开关');
+    expect(adminCatalogSource).toContain('服务商与模型目录');
+    expect(adminCatalogSource).toContain('Base URL');
+    expect(adminCatalogSource).toContain('停用');
+  });
+
   it('课件设置逐项管理异步请求、预览和错误关联', () => {
     const source = clientSource('components/CoursewareAISettingsCard.tsx');
 

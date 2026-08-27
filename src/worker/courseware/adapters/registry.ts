@@ -10,6 +10,13 @@ import type {
 export type AdapterType = 'openai_text' | 'token_plan_tts' | 'token_plan_image';
 export type AdapterKind = 'text' | 'speech' | 'image';
 
+/** The only adapter identifiers administrators may persist in the catalog. */
+export const COMPILED_ADAPTER_TYPES = [
+  'openai_text',
+  'token_plan_tts',
+  'token_plan_image',
+] as const satisfies readonly AdapterType[];
+
 export function getAdapterKind(adapterType: AdapterType): AdapterKind {
   if (adapterType === 'openai_text') return 'text';
   if (adapterType === 'token_plan_tts') return 'speech';

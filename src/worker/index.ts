@@ -10,7 +10,7 @@ import { selfLearnRoutes } from './selflearn/routes';
 import { userAISettingsRoutes } from './settings/routes';
 import { adminRoutes } from './admin/routes';
 import { aiCatalogRoutes, coursewareAISettingsRoutes } from './ai-catalog/routes';
-import { adminAICatalogRoutes } from './ai-catalog/admin-routes';
+import { adminAICatalogRoutes, coursewareAdminRoutes } from './ai-catalog/admin-routes';
 import { toHttpError } from './lib/errors';
 import { coursewareRoutes, coursewareStudentRoutes } from './courseware/routes';
 import { consumeCoursewareQueue, type CoursewareQueueMessage } from './courseware/queue';
@@ -42,6 +42,7 @@ app.route('/api/ai-settings', userAISettingsRoutes);
 app.route('/api/ai-catalog', aiCatalogRoutes);
 app.route('/api/courseware-ai-settings', coursewareAISettingsRoutes);
 app.route('/api/admin/ai-catalog', adminAICatalogRoutes);
+app.route('/api/admin/courseware', coursewareAdminRoutes);
 app.route('/api/admin', adminRoutes);
 
 app.notFound((c) => err(c, '接口不存在', 404));
