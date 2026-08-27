@@ -5,6 +5,7 @@ import {
   applyCurrentRequestResult,
   CoursewareRequestGuard,
   CoursewareSettingsRevision,
+  CoursewareSettingsReadEpoch,
   CoursewareSettingsWriteTracker,
   mergeCredentialSettings,
   mergePreferenceSettings,
@@ -155,5 +156,14 @@ describe('courseware AI settings client', () => {
     expect(writes.settle(credentialB, true)).toBe(false);
     expect(writes.settle(preferences, true)).toBe(false);
     expect(writes.settle(credentialA, true)).toBe(true);
+  });
+
+  it('drops delayed authority read A after a later test read B observes new health', () => {
+    const reads = new CoursewareSettingsReadEpoch();
+    const authorityA = reads.begin();
+    const testReadB = reads.begin();
+
+    expect(reads.isCurrent(authorityA)).toBe(false);
+    expect(reads.isCurrent(testReadB)).toBe(true);
   });
 });

@@ -6,6 +6,7 @@ import {
   applyCurrentRequestResult,
   CoursewareRequestGuard,
   CoursewareSettingsRevision,
+  CoursewareSettingsReadEpoch,
   CoursewareSettingsWriteTracker,
   mergeCredentialSettings,
   mergePreferenceSettings,
@@ -205,6 +206,7 @@ export default function CoursewareAISettingsCard() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState('');
   const [syncError, setSyncError] = useState('');
+  const [syncStatus, setSyncStatus] = useState('');
   const [credentialNotices, setCredentialNotices] = useState<Record<number, string>>({});
   const [audioUrls, setAudioUrls] = useState<Record<'teacher_tts' | 'student_tts', string>>({
     teacher_tts: '',
@@ -212,9 +214,11 @@ export default function CoursewareAISettingsCard() {
   });
   const [imageUrl, setImageUrl] = useState('');
   const pendingProviderIdsRef = useRef(new Set<number>());
+  const savingPreferencesRef = useRef(false);
   const pendingTestsRef = useRef(new Set<TestKind>());
   const requestGuardRef = useRef(new CoursewareRequestGuard());
   const settingsRevisionRef = useRef(new CoursewareSettingsRevision());
+  const settingsReadEpochRef = useRef(new CoursewareSettingsReadEpoch());
   const settingsWritesRef = useRef(new CoursewareSettingsWriteTracker());
   const requestControllersRef = useRef(new Set<AbortController>());
   const audioUrlRefs = useRef<Partial<Record<'teacher_tts' | 'student_tts', string>>>({});
@@ -246,6 +250,7 @@ export default function CoursewareAISettingsCard() {
   const load = useCallback(async () => {
     const scope = 'load';
     const token = requestGuardRef.current.begin(scope);
+    const settingsRead = settingsReadEpochRef.current.begin();
     const settingsRevision = settingsRevisionRef.current.captureRefresh();
     const controller = beginRequest();
     try {
@@ -255,6 +260,7 @@ export default function CoursewareAISettingsCard() {
       ]);
       if (
         !requestGuardRef.current.isCurrent(scope, token) ||
+        !settingsReadEpochRef.current.isCurrent(settingsRead) ||
         !settingsRevisionRef.current.isRefreshCurrent(settingsRevision)
       ) return;
       applyLoaded(loadedCatalog, loadedSettings);
@@ -262,6 +268,7 @@ export default function CoursewareAISettingsCard() {
     } catch (error) {
       if (
         !requestGuardRef.current.isCurrent(scope, token) ||
+        !settingsReadEpochRef.current.isCurrent(settingsRead) ||
         !settingsRevisionRef.current.isRefreshCurrent(settingsRevision) ||
         isAbort(error, controller)
       ) return;
@@ -274,6 +281,7 @@ export default function CoursewareAISettingsCard() {
   useEffect(() => {
     requestGuardRef.current = new CoursewareRequestGuard();
     settingsRevisionRef.current = new CoursewareSettingsRevision();
+    settingsReadEpochRef.current = new CoursewareSettingsReadEpoch();
     settingsWritesRef.current = new CoursewareSettingsWriteTracker();
     return () => {
       requestGuardRef.current.dispose();
@@ -303,6 +311,7 @@ export default function CoursewareAISettingsCard() {
     if (authoritative && settingsWritesRef.current.hasPending()) return;
     const scope = authoritative ? 'settings-authority-refresh' : 'settings-refresh';
     const token = requestGuardRef.current.begin(scope);
+    const settingsRead = settingsReadEpochRef.current.begin();
     const settingsRevision = settingsRevisionRef.current.captureRefresh();
     const controller = beginRequest();
     try {
@@ -312,15 +321,18 @@ export default function CoursewareAISettingsCard() {
       );
       if (
         requestGuardRef.current.isCurrent(scope, token) &&
+        settingsReadEpochRef.current.isCurrent(settingsRead) &&
         settingsRevisionRef.current.isRefreshCurrent(settingsRevision)
       ) {
         setSettings(refreshed);
         if (authoritative) setSyncError('');
+        if (authoritative) setSyncStatus('');
       }
     } catch (error) {
       if (
         !isAbort(error, controller) &&
         requestGuardRef.current.isCurrent(scope, token) &&
+        settingsReadEpochRef.current.isCurrent(settingsRead) &&
         settingsRevisionRef.current.isRefreshCurrent(settingsRevision)
       ) {
         if (authoritative) {
@@ -336,6 +348,7 @@ export default function CoursewareAISettingsCard() {
 
   const settleSettingsWrite = (writeId: number, succeeded: boolean) => {
     if (settingsWritesRef.current.settle(writeId, succeeded)) {
+      setSyncStatus('正在同步设置状态。');
       void refreshSettings('sync', true);
     }
   };
@@ -352,9 +365,12 @@ export default function CoursewareAISettingsCard() {
     const scope = `credential-${providerId}`;
     const token = requestGuardRef.current.begin(scope);
     const settingsWriteRevision = settingsRevisionRef.current.beginWrite();
+    settingsReadEpochRef.current.invalidate();
     const writeId = settingsWritesRef.current.begin();
     requestGuardRef.current.invalidate('load');
     requestGuardRef.current.invalidate('settings-refresh');
+    setSyncError('');
+    setSyncStatus('设置正在保存，完成后会自动同步。');
     pendingProviderIdsRef.current.add(providerId);
     setPendingProviderIds((current) => new Set(current).add(providerId));
     setErrors((current) => ({ ...current, [`credential-${providerId}`]: '' }));
@@ -394,7 +410,7 @@ export default function CoursewareAISettingsCard() {
   };
 
   const savePreferences = async () => {
-    if (savingPreferences) return;
+    if (savingPreferencesRef.current) return;
     let body: ReturnType<typeof buildCoursewarePreferences>;
     try {
       body = buildCoursewarePreferences({ catalog, includeImages, text, image, teacherSpeech, studentSpeech });
@@ -405,9 +421,13 @@ export default function CoursewareAISettingsCard() {
     const scope = 'preferences';
     const token = requestGuardRef.current.begin(scope);
     const settingsWriteRevision = settingsRevisionRef.current.beginWrite();
+    settingsReadEpochRef.current.invalidate();
     const writeId = settingsWritesRef.current.begin();
     requestGuardRef.current.invalidate('load');
     requestGuardRef.current.invalidate('settings-refresh');
+    savingPreferencesRef.current = true;
+    setSyncError('');
+    setSyncStatus('设置正在保存，完成后会自动同步。');
     setErrors((current) => ({ ...current, preferences: '' }));
     setSavingPreferences(true);
     const controller = beginRequest();
@@ -429,6 +449,7 @@ export default function CoursewareAISettingsCard() {
     } finally {
       finishRequest(controller);
       if (requestGuardRef.current.isCurrent(scope, token)) {
+        savingPreferencesRef.current = false;
         setSavingPreferences(false);
         settleSettingsWrite(writeId, succeeded);
       }
@@ -497,11 +518,14 @@ export default function CoursewareAISettingsCard() {
     return <div className="form-error" role="alert">{errors.load} <button type="button" className="btn-link" onClick={() => void load()}>重新加载</button></div>;
   }
 
+  const syncRetryDisabled = settingsWritesRef.current.hasPending();
+
   return (
     <div className="courseware-settings" aria-busy={!settings}>
       {readinessNotice && <div className="courseware-readiness" role="status">{readinessNotice}</div>}
       {notice && <div className="courseware-notice" role="status">{notice}</div>}
-      {syncError && <div className="form-error" role="alert">{syncError} <button type="button" className="btn-link" onClick={() => void refreshSettings('sync', true)}>重新同步</button></div>}
+      {syncStatus && <div className="courseware-notice" role="status">{syncStatus}</div>}
+      {syncError && <div className="form-error" role="alert">{syncError} <button type="button" className="btn-link" disabled={syncRetryDisabled} onClick={() => void refreshSettings('sync', true)}>重新同步</button>{syncRetryDisabled && <span>设置仍在保存，完成后会自动同步。</span>}</div>}
 
       <section className="courseware-settings-section" aria-labelledby="courseware-credential-title">
         <h3 id="courseware-credential-title">服务商密钥</h3>

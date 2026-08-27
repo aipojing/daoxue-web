@@ -78,6 +78,23 @@ export class CoursewareSettingsRevision {
   }
 }
 
+export class CoursewareSettingsReadEpoch {
+  private epoch = 0;
+
+  begin(): number {
+    this.epoch += 1;
+    return this.epoch;
+  }
+
+  invalidate(): void {
+    this.epoch += 1;
+  }
+
+  isCurrent(token: number): boolean {
+    return token === this.epoch;
+  }
+}
+
 export class CoursewareSettingsWriteTracker {
   private nextId = 1;
   private pending = new Set<number>();

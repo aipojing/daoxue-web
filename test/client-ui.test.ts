@@ -63,5 +63,9 @@ describe('客户端关键交互结构', () => {
     expect(source).toContain('audioUrls.student_tts');
     expect(source).toContain('aria-invalid');
     expect(source).toContain('aria-describedby');
+    expect(source).toContain('settingsReadEpochRef.current.begin()');
+    expect(source).toContain('settingsReadEpochRef.current.isCurrent');
+    expect(source).toContain('savingPreferencesRef.current');
+    expect(source).toContain('完成后会自动同步');
   });
 });
