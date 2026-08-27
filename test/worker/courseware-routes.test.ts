@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoursewareModelPreference } from '../../src/shared/ai-catalog';
 import { saveCredential } from '../../src/worker/ai-catalog/credentials';
 import { saveUserModelPreferences } from '../../src/worker/ai-catalog/repository';
-import { createCourseware } from '../../src/worker/courseware/service';
+import { createCourseware, drainCoursewareMediaTombstones } from '../../src/worker/courseware/service';
 import { createCoursewareRepository } from '../../src/worker/courseware/repository';
 import { buildCoursewareMediaAttemptKey, deleteCoursewareMedia } from '../../src/worker/courseware/media';
 
@@ -234,6 +234,85 @@ describe('courseware routes', () => {
       'SELECT enqueue_token, enqueue_kind FROM coursewares WHERE id = ?',
     ).bind(created.data?.id).first<{ enqueue_token: string | null; enqueue_kind: string | null }>();
     expect(enqueue).toEqual({ enqueue_token: null, enqueue_kind: null });
+  });
+
+  it('recovers an expired create enqueue during owned detail polling and ignores its delayed message', async () => {
+    const account = await register('recover-create-poll@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId, 'queued', 'queued');
+    await env.DB.prepare(
+      `UPDATE coursewares SET enqueue_token = 'create-crash', enqueue_kind = 'create',
+         enqueue_expires_at = datetime('now', '-1 minute') WHERE id = ?`,
+    ).bind(coursewareId).run();
+    const other = await register('recover-create-intruder@example.com');
+    expect((await api(`/api/coursewares/${coursewareId}`, {}, other.cookie)).status).toBe(403);
+    const untouched = await env.DB.prepare('SELECT status, enqueue_token FROM coursewares WHERE id = ?')
+      .bind(coursewareId).first();
+    expect(untouched).toEqual({ status: 'queued', enqueue_token: 'create-crash' });
+    const response = await api(`/api/coursewares/${coursewareId}`, {}, account.cookie);
+    expect(response.status).toBe(200);
+    const detail = await json<{ status: string; generationStage: string; retryable: boolean; errorCode: string }>(response);
+    expect(detail.data).toMatchObject({
+      status: 'failed', generationStage: 'queued', retryable: true, errorCode: 'enqueue_timeout',
+    });
+    expect(await createCoursewareRepository(env.DB).claimStage(
+      coursewareId, 'queued', 'scripting', 'delayed-worker', '2099-01-01 00:00:00',
+    )).toBe(false);
+    const sent: unknown[] = [];
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockImplementation(async (message) => {
+      sent.push(message);
+      return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+    });
+    expect((await api(`/api/coursewares/${coursewareId}/retry`, { method: 'POST' }, account.cookie)).status).toBe(200);
+    expect(sent).toEqual([{ coursewareId }]);
+  });
+
+  it('recovers an expired full retry enqueue on progress polling but not a fresh or actively leased enqueue', async () => {
+    const account = await register('recover-full-poll@example.com');
+    const studentId = await createStudent(account.cookie);
+    const expiredId = await insertCourseware(studentId, 'generating', 'speech');
+    const freshId = await insertCourseware(studentId, 'generating', 'speech');
+    const activeId = await insertCourseware(studentId, 'generating', 'speech');
+    await env.DB.prepare(
+      `UPDATE coursewares SET enqueue_token = ?, enqueue_kind = 'full_retry',
+         enqueue_expires_at = datetime('now', ?), lease_token = ?, lease_expires_at = ?
+       WHERE id = ?`,
+    ).bind('expired', '-1 minute', null, null, expiredId).run();
+    await env.DB.prepare(
+      `UPDATE coursewares SET enqueue_token = ?, enqueue_kind = 'full_retry',
+         enqueue_expires_at = datetime('now', ?), lease_token = ?, lease_expires_at = ?
+       WHERE id = ?`,
+    ).bind('fresh', '+5 minutes', null, null, freshId).run();
+    await env.DB.prepare(
+      `UPDATE coursewares SET enqueue_token = ?, enqueue_kind = 'full_retry',
+         enqueue_expires_at = datetime('now', ?), lease_token = ?, lease_expires_at = datetime('now', '+5 minutes')
+       WHERE id = ?`,
+    ).bind('active', '-1 minute', 'worker-active', activeId).run();
+    for (const id of [expiredId, freshId, activeId]) {
+      expect((await api(`/api/coursewares/${id}/progress`, {}, account.cookie)).status).toBe(200);
+    }
+    const { results } = await env.DB.prepare(
+      `SELECT id, status, generation_stage, retryable, enqueue_token, lease_token
+       FROM coursewares WHERE id IN (?, ?, ?) ORDER BY id`,
+    ).bind(expiredId, freshId, activeId).all<{
+      id: number; status: string; generation_stage: string; retryable: number;
+      enqueue_token: string | null; lease_token: string | null;
+    }>();
+    expect(results).toEqual([
+      { id: expiredId, status: 'failed', generation_stage: 'speech', retryable: 1, enqueue_token: null, lease_token: null },
+      { id: freshId, status: 'generating', generation_stage: 'speech', retryable: 0, enqueue_token: 'fresh', lease_token: null },
+      { id: activeId, status: 'generating', generation_stage: 'speech', retryable: 0, enqueue_token: 'active', lease_token: 'worker-active' },
+    ]);
+    const listRecoveredId = await insertCourseware(studentId, 'generating', 'images');
+    await env.DB.prepare(
+      `UPDATE coursewares SET enqueue_token = 'list-expired', enqueue_kind = 'full_retry',
+         enqueue_expires_at = datetime('now', '-1 minute') WHERE id = ?`,
+    ).bind(listRecoveredId).run();
+    expect((await api(`/api/students/${studentId}/coursewares`, {}, account.cookie)).status).toBe(200);
+    const listRecovered = await env.DB.prepare(
+      'SELECT status, generation_stage, retryable FROM coursewares WHERE id = ?',
+    ).bind(listRecoveredId).first();
+    expect(listRecovered).toEqual({ status: 'failed', generation_stage: 'images', retryable: 1 });
   });
 
   it('lets a create message acquire its worker lease before Queue.send resolves', async () => {
@@ -681,6 +760,55 @@ describe('courseware routes', () => {
     expect(await env.DB.prepare(
       'SELECT student_id FROM courseware_student_tombstones WHERE user_id = ? AND student_id = ?',
     ).bind(account.id, studentId).first()).toBeNull();
+    expect(await env.COURSEWARE_MEDIA.head(key)).toBeNull();
+  });
+
+  it('drains media cleanup tombstones with a limit and retains failures for an idempotent retry', async () => {
+    const keys = Array.from({ length: 12 }, (_, index) => `courseware/1/1/1/audio/${index + 1}.attempt-test.mp3`);
+    for (const key of keys) {
+      await env.COURSEWARE_MEDIA.put(key, 'stale');
+      await env.DB.prepare(
+        'INSERT INTO courseware_media_tombstones(object_key, retry_count) VALUES (?, 1)',
+      ).bind(key).run();
+    }
+    const first = await drainCoursewareMediaTombstones(env, 10);
+    expect(first).toEqual({ attempted: 10, deleted: 10, failed: 0 });
+    expect(JSON.stringify(first)).not.toContain('courseware/');
+    const remaining = await env.DB.prepare(
+      'SELECT COUNT(*) AS count FROM courseware_media_tombstones',
+    ).first<{ count: number }>();
+    expect(remaining?.count).toBe(2);
+
+    vi.spyOn(env.COURSEWARE_MEDIA, 'delete').mockRejectedValueOnce(new Error('storage unavailable'));
+    expect(await drainCoursewareMediaTombstones(env, 10)).toEqual({ attempted: 2, deleted: 1, failed: 1 });
+    const retained = await env.DB.prepare(
+      'SELECT retry_count FROM courseware_media_tombstones',
+    ).first<{ retry_count: number }>();
+    expect(retained?.retry_count).toBe(2);
+    vi.restoreAllMocks();
+    const duplicate = await Promise.all([
+      drainCoursewareMediaTombstones(env, 10),
+      drainCoursewareMediaTombstones(env, 10),
+    ]);
+    expect(duplicate.every((result) => !('objectKey' in result))).toBe(true);
+    expect(await env.DB.prepare('SELECT object_key FROM courseware_media_tombstones').first()).toBeNull();
+  });
+
+  it('opportunistically drains media tombstones from an authenticated courseware request', async () => {
+    const account = await register('drain-opportunity@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId);
+    const key = `courseware/${account.id}/${studentId}/${coursewareId}/audio/99.attempt-stale.mp3`;
+    await env.COURSEWARE_MEDIA.put(key, 'stale');
+    await env.DB.prepare(
+      'INSERT INTO courseware_media_tombstones(object_key, retry_count) VALUES (?, 1)',
+    ).bind(key).run();
+    expect((await api(`/api/coursewares/${coursewareId}`, {}, account.cookie)).status).toBe(200);
+    await vi.waitFor(async () => {
+      expect(await env.DB.prepare(
+        'SELECT object_key FROM courseware_media_tombstones WHERE object_key = ?',
+      ).bind(key).first()).toBeNull();
+    });
     expect(await env.COURSEWARE_MEDIA.head(key)).toBeNull();
   });
 

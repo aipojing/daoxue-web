@@ -12,7 +12,7 @@ import type { AppContext } from '../env';
 import { ok, err } from '../lib/envelope';
 import { UserFacingError } from '../lib/errors';
 import { getOwnedStudent } from '../students/routes';
-import { createCourseware } from './service';
+import { createCourseware, drainCoursewareMediaTombstones } from './service';
 import {
   createCoursewareRepository,
   type CoursewareDetailRow,
@@ -198,10 +198,17 @@ async function mapDetail(db: D1Database, userId: number, row: CoursewareDetailRo
 async function ownedDetail(c: Context<AppContext>): Promise<CoursewareDetailRow | null> {
   const coursewareId = parseId(c.req.param('coursewareId'));
   if (!coursewareId) return null;
-  return createCoursewareRepository(c.env.DB).getOwned(c.get('user').id, coursewareId);
+  const repository = createCoursewareRepository(c.env.DB);
+  await repository.recoverOwnedExpiredEnqueues(c.get('user').id, coursewareId);
+  return repository.getOwned(c.get('user').id, coursewareId);
 }
 
 export const coursewareStudentRoutes = new Hono<AppContext>();
+
+coursewareStudentRoutes.use('*', async (c, next) => {
+  c.executionCtx.waitUntil(drainCoursewareMediaTombstones(c.env).then(() => undefined).catch(() => undefined));
+  await next();
+});
 
 coursewareStudentRoutes.post('/:studentId/coursewares', async (c) => {
   const studentId = parseId(c.req.param('studentId'));
@@ -219,10 +226,11 @@ coursewareStudentRoutes.get('/:studentId/coursewares', async (c) => {
   const rawLimit = c.req.query('limit');
   const requestedLimit = rawLimit === undefined ? 20 : Number(rawLimit);
   if (!Number.isInteger(requestedLimit) || requestedLimit < 1) return err(c, '分页参数不合法', 400);
-  const page = await createCoursewareRepository(c.env.DB).listOwned(
+  const repository = createCoursewareRepository(c.env.DB);
+  await repository.recoverOwnedExpiredEnqueues(user.id);
+  const page = await repository.listOwned(
     user.id, studentId, c.req.query('cursor') ?? '', requestedLimit,
   );
-  const repository = createCoursewareRepository(c.env.DB);
   const items = await Promise.all(page.items.map(async (summary) => {
     let imageRetryAvailable = false;
     if (summary.imageRetryAvailable) {
@@ -235,6 +243,11 @@ coursewareStudentRoutes.get('/:studentId/coursewares', async (c) => {
 });
 
 export const coursewareRoutes = new Hono<AppContext>();
+
+coursewareRoutes.use('*', async (c, next) => {
+  c.executionCtx.waitUntil(drainCoursewareMediaTombstones(c.env).then(() => undefined).catch(() => undefined));
+  await next();
+});
 
 coursewareRoutes.get('/:coursewareId', async (c) => {
   const detail = await ownedDetail(c);

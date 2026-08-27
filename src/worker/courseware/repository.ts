@@ -123,6 +123,7 @@ export interface OwnedCoursewareCoordinates {
 
 export interface CoursewareRepository {
   create(input: CreateCoursewareRow): Promise<CoursewareSummary | null>;
+  recoverOwnedExpiredEnqueues(userId: number, coursewareId?: number): Promise<number>;
   listOwned(userId: number, studentId: number, cursor: string, limit: number): Promise<CoursewarePage>;
   getOwned(userId: number, coursewareId: number): Promise<CoursewareDetailRow | null>;
   getForWorker(coursewareId: number): Promise<CoursewareDetailRow | null>;
@@ -247,6 +248,30 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
         .bind(row.id).first<SummaryRow>();
       if (!created) throw new Error('courseware insert unavailable');
       return mapSummaryRow(created);
+    },
+
+    async recoverOwnedExpiredEnqueues(userId, coursewareId) {
+      const idClause = coursewareId === undefined ? '' : 'AND id = ?';
+      const statement = db.prepare(
+        `UPDATE coursewares SET status = 'failed', retryable = 1,
+           error_code = 'enqueue_timeout',
+           error_message = '课件生成请求未成功入队，请重试',
+           enqueue_token = NULL, enqueue_kind = NULL, enqueue_expires_at = NULL,
+           lease_token = NULL, lease_expires_at = NULL, updated_at = datetime('now')
+         WHERE enqueue_token IS NOT NULL AND enqueue_expires_at <= datetime('now')
+           AND (lease_token IS NULL OR lease_expires_at <= datetime('now'))
+           AND ((status = 'queued' AND enqueue_kind = 'create')
+             OR (status = 'generating' AND enqueue_kind = 'full_retry'))
+           ${idClause}
+           AND EXISTS (
+             SELECT 1 FROM students s
+             WHERE s.id = coursewares.student_id AND s.user_id = ?
+           )`,
+      );
+      const result = coursewareId === undefined
+        ? await statement.bind(userId).run()
+        : await statement.bind(coursewareId, userId).run();
+      return result.meta.changes ?? 0;
     },
 
     async listOwned(userId, studentId, cursor, requestedLimit) {

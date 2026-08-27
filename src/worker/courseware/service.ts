@@ -50,6 +50,33 @@ export async function cleanupCoursewareMediaTombstone(env: Env, objectKey: strin
   return true;
 }
 
+export interface MediaTombstoneDrainResult {
+  attempted: number;
+  deleted: number;
+  failed: number;
+}
+
+export async function drainCoursewareMediaTombstones(
+  env: Env,
+  requestedLimit = 10,
+): Promise<MediaTombstoneDrainResult> {
+  const limit = Math.max(1, Math.min(10, Number.isInteger(requestedLimit) ? requestedLimit : 10));
+  const { results } = await env.DB.prepare(
+    `SELECT object_key FROM courseware_media_tombstones
+     ORDER BY updated_at, object_key LIMIT ?`,
+  ).bind(limit).all<{ object_key: string }>();
+  const outcome: MediaTombstoneDrainResult = { attempted: results.length, deleted: 0, failed: 0 };
+  for (const row of results) {
+    try {
+      await cleanupAttemptObject(env, row.object_key);
+      outcome.deleted += 1;
+    } catch {
+      outcome.failed += 1;
+    }
+  }
+  return outcome;
+}
+
 /**
  * Task 9 writes bytes before its D1 artifact CAS. If ownership of the state lease was
  * lost (most importantly to deleting), remove exactly the just-written private object.
