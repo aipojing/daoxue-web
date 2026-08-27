@@ -9,6 +9,9 @@ interface Props {
   studentId: number;
   settings: CoursewareAISettings;
   onCreated: (courseware: CoursewareSummary) => void;
+  routeToken: number;
+  isRouteCurrent: (token: number) => boolean;
+  routeSignal: AbortSignal;
 }
 
 const EMPTY_DRAFT: CoursewareCreateDraft = { subject: '', topic: '', learningGoal: '', sourceText: '', sourceConversationId: '', includeImages: false };
@@ -17,7 +20,7 @@ function readinessLabel(value: CoursewareAISettings['readiness'][keyof Coursewar
   return value === 'ready' ? '已就绪' : value === 'disabled' ? '未启用' : value === 'quota_exhausted' ? '额度已用完' : value === 'invalid_credential' ? '密钥无效' : '尚未配置';
 }
 
-export default function CoursewareCreatePanel({ studentId, settings, onCreated }: Props) {
+export default function CoursewareCreatePanel({ studentId, settings, onCreated, routeToken, isRouteCurrent, routeSignal }: Props) {
   const [draft, setDraft] = useState(EMPTY_DRAFT);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -41,7 +44,8 @@ export default function CoursewareCreatePanel({ studentId, settings, onCreated }
     setSubmitting(true);
     setError('');
     try {
-      const created = await apiPost<CoursewareSummary>(`/api/students/${studentId}/coursewares`, payload);
+      const created = await apiPost<CoursewareSummary>(`/api/students/${studentId}/coursewares`, payload, { signal: routeSignal });
+      if (!isRouteCurrent(routeToken) || routeSignal.aborted) return;
       onCreated(created);
       setDraft(EMPTY_DRAFT);
     } catch (cause) {

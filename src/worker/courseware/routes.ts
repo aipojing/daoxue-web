@@ -80,6 +80,13 @@ function parseStrings(value: string): string[] {
   }
 }
 
+function requiredAudioCounts(segments: CoursewareSegmentRow[]): { ready: number; total: number } {
+  return segments.reduce((counts, segment) => ({
+    ready: counts.ready + (segment.audio_status === 'ready' ? 1 : 0) + (segment.alternate_audio_status === 'ready' ? 1 : 0),
+    total: counts.total + 1 + (segment.alternate_audio_status === 'not_required' ? 0 : 1),
+  }), { ready: 0, total: 0 });
+}
+
 function parseCheckpoint(value: string): CoursewareCheckpoint | undefined {
   const parsed = parseObject(value);
   return typeof parsed.prompt === 'string' && typeof parsed.correctAnswer === 'string'
@@ -164,6 +171,7 @@ async function canRetryImages(db: D1Database, userId: number, detail: Courseware
 }
 
 async function mapDetail(db: D1Database, userId: number, row: CoursewareDetailRow): Promise<CoursewareDetail> {
+  const audioCounts = requiredAudioCounts(row.segments);
   const summary: CoursewareSummary = withIsoDates({
     id: row.id,
     studentId: row.student_id,
@@ -173,6 +181,8 @@ async function mapDetail(db: D1Database, userId: number, row: CoursewareDetailRo
     status: row.status,
     generationStage: row.generation_stage,
     progressPercent: row.progress_percent,
+    requiredAudioReadyCount: audioCounts.ready,
+    requiredAudioTotalCount: audioCounts.total,
     retryable: row.retryable === 1,
     imageRetryAvailable: await canRetryImages(db, userId, row),
     errorCode: row.error_code,

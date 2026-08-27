@@ -355,6 +355,27 @@ describe('courseware routes', () => {
     expect(body.data?.items[0]?.studentId).toBe(ownerStudent);
   });
 
+  it('returns exact required-audio ready and total counts in list summaries', async () => {
+    const account = await register('audio-counts@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId, 'generating', 'speech');
+    const first = await insertSegment(coursewareId);
+    await env.DB.prepare(
+      "UPDATE courseware_segments SET alternate_audio_status = 'ready' WHERE id = ?",
+    ).bind(first).run();
+    await env.DB.prepare(
+      `INSERT INTO courseware_segments
+       (courseware_id, position, segment_key, kind, speaker, title, display_markdown, speech_text,
+        audio_status, alternate_audio_status, image_status)
+       VALUES (?, 1, 'explain', 'teacher_explanation', 'teacher', '讲解', '正文', '正文',
+         'pending', 'not_required', 'not_required')`,
+    ).bind(coursewareId).run();
+
+    const response = await api(`/api/students/${studentId}/coursewares`, {}, account.cookie);
+    const body = await json<{ items: Array<{ requiredAudioReadyCount: number; requiredAudioTotalCount: number }> }>(response);
+    expect(body.data?.items[0]).toMatchObject({ requiredAudioReadyCount: 2, requiredAudioTotalCount: 3 });
+  });
+
   it('returns progress and a ready courseware without exposing R2 keys', async () => {
     const account = await register('detail@example.com');
     const studentId = await createStudent(account.cookie);

@@ -61,6 +61,8 @@ export interface CoursewareSummary {
   status: CoursewareStatus;
   generationStage: CoursewareGenerationStage;
   progressPercent: number;
+  requiredAudioReadyCount: number;
+  requiredAudioTotalCount: number;
   retryable: boolean;
   imageRetryAvailable: boolean;
   errorCode: string;

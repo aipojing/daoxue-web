@@ -172,6 +172,8 @@ interface SummaryRow {
   status: CoursewareStatus;
   generation_stage: CoursewareGenerationStage;
   progress_percent: number;
+  required_audio_ready_count: number;
+  required_audio_total_count: number;
   retryable: number;
   error_code: string;
   error_message: string;
@@ -200,6 +202,8 @@ export function mapSummaryRow(row: SummaryRow): CoursewareSummary {
     status: row.status,
     generationStage: row.generation_stage,
     progressPercent: row.progress_percent,
+    requiredAudioReadyCount: row.required_audio_ready_count,
+    requiredAudioTotalCount: row.required_audio_total_count,
     retryable: row.retryable === 1,
     imageRetryAvailable: row.failed_images > 0,
     errorCode: row.error_code,
@@ -213,6 +217,13 @@ export function mapSummaryRow(row: SummaryRow): CoursewareSummary {
 const SUMMARY_COLUMNS = `c.id, c.student_id, c.title, c.subject, c.topic, c.status,
   c.generation_stage, c.progress_percent, c.retryable, c.error_code, c.error_message,
   c.warnings_json, c.created_at, c.updated_at,
+  (SELECT COUNT(*) FROM courseware_segments cs WHERE cs.courseware_id = c.id
+     AND cs.audio_status = 'ready') +
+  (SELECT COUNT(*) FROM courseware_segments cs WHERE cs.courseware_id = c.id
+     AND cs.alternate_audio_status = 'ready') AS required_audio_ready_count,
+  (SELECT COUNT(*) FROM courseware_segments cs WHERE cs.courseware_id = c.id) +
+  (SELECT COUNT(*) FROM courseware_segments cs WHERE cs.courseware_id = c.id
+     AND cs.alternate_audio_status != 'not_required') AS required_audio_total_count,
   (SELECT COUNT(*) FROM courseware_segments cs
    WHERE cs.courseware_id = c.id AND cs.image_status = 'failed') AS failed_images`;
 
