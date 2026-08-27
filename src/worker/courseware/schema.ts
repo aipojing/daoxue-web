@@ -1,47 +1,199 @@
 import { z } from 'zod';
-import type { CoursewareScript } from '../../shared/courseware';
+import type { CoursewareScript, CoursewareScriptSegment } from '../../shared/courseware';
 
 const MAX_RAW_JSON_CHARS = 64 * 1024;
 const MAX_JSON_DEPTH = 8;
-const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/;
-const HTML_TAG = /<\/?[a-zA-Z!][^>]*>/;
-const EXECUTABLE_CONTENT = /(?:javascript|vbscript)\s*:|data\s*:\s*text\/html/i;
-const MARKDOWN_CODE = /```|`/;
-const RAW_LATEX_CONTROL_SEQUENCE = /\\[a-zA-Z]+/;
-const URL = /(?:https?:\/\/|www\.)/i;
-const MARKDOWN_IN_SPEECH = /(?:\[[^\]]*\]\([^)]*\)|(?:^|\s)[#>*]\s|\*\*|__|~~)/m;
+const SAFE_PARSE_ERROR = '课件脚本无效';
+export const MAX_COURSEWARE_SCRIPT_TEXT_CHARS = 18_000;
+
+const SAFE_KATEX_COMMANDS = new Set([
+  'alpha', 'beta', 'cdot', 'div', 'frac', 'ge', 'le', 'left', 'mathrm', 'neq', 'overline',
+  'pm', 'prod', 'right', 'sqrt', 'sum', 'text', 'times', 'underline',
+]);
 const FORMAL_ASSESSMENT = /(?:\bL[1-4]\b|正式(?:测评|测验)|掌握(?:等级|结论)|学习等级)/i;
 
-function textSchema(maximum: number, field: string, options: { display?: boolean; speech?: boolean } = {}): z.ZodType<string> {
+function containsControlCharacters(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function decodeHtmlEntitiesOnce(value: string): string {
+  let output = '';
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== '&') {
+      output += value[index];
+      continue;
+    }
+    const end = value.indexOf(';', index + 1);
+    if (end === -1 || end - index > 16) {
+      output += '&';
+      continue;
+    }
+    const entity = value.slice(index + 1, end);
+    const named = new Map<string, string>([
+      ['amp', '&'], ['apos', "'"], ['colon', ':'], ['gt', '>'], ['lt', '<'],
+      ['newline', '\n'], ['quot', '"'], ['tab', '\t'],
+    ]);
+    let decoded = named.get(entity.toLowerCase());
+    if (!decoded && entity.startsWith('#')) {
+      const radix = entity[1]?.toLowerCase() === 'x' ? 16 : 10;
+      const digits = entity.slice(radix === 16 ? 2 : 1);
+      if (digits.length > 0 && digits.length <= 8 && [...digits].every((character) => {
+        const code = character.charCodeAt(0);
+        return radix === 16
+          ? (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102)
+          : code >= 48 && code <= 57;
+      })) {
+        const codePoint = Number.parseInt(digits, radix);
+        if (codePoint >= 0 && codePoint <= 0x10ffff) decoded = String.fromCodePoint(codePoint);
+      }
+    }
+    if (decoded === undefined) {
+      output += '&';
+      continue;
+    }
+    output += decoded;
+    index = end;
+  }
+  return output;
+}
+
+function decodePercentOnce(value: string): string {
+  let output = '';
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== '%' || index + 2 >= value.length) {
+      output += value[index];
+      continue;
+    }
+    const digits = value.slice(index + 1, index + 3);
+    if (![...digits].every((character) => {
+      const code = character.charCodeAt(0);
+      return (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
+    })) {
+      output += '%';
+      continue;
+    }
+    output += String.fromCharCode(Number.parseInt(digits, 16));
+    index += 2;
+  }
+  return output;
+}
+
+function canonicalizeForSafetyCheck(value: string): string {
+  let decoded = value;
+  for (let index = 0; index < 4; index += 1) {
+    const next = decodeHtmlEntitiesOnce(decodePercentOnce(decoded));
+    if (next === decoded) break;
+    decoded = next;
+  }
+  let compact = '';
+  for (const character of decoded) {
+    const code = character.codePointAt(0)!;
+    if (code <= 0x20 || code === 0x7f || code === 0xa0 || code === 0x200b) continue;
+    compact += character;
+  }
+  return compact.toLowerCase();
+}
+
+function hasMarkupOrExecutableContent(value: string): boolean {
+  const canonical = canonicalizeForSafetyCheck(value);
+  return canonical.includes('<')
+    || canonical.includes('>')
+    || canonical.includes('javascript:')
+    || canonical.includes('vbscript:')
+    || canonical.includes('data:')
+    || canonical.includes('http:')
+    || canonical.includes('https:')
+    || canonical.includes('www.');
+}
+
+function hasPlainTextMarkdown(value: string): boolean {
+  return value.includes('`')
+    || value.includes('[')
+    || value.includes(']')
+    || value.includes('*')
+    || value.includes('_')
+    || value.includes('~')
+    || value.includes('\\')
+    || value.includes('#');
+}
+
+function isSafePlainText(value: string): boolean {
+  return !containsControlCharacters(value)
+    && !hasMarkupOrExecutableContent(value)
+    && !hasPlainTextMarkdown(value);
+}
+
+function isSafeSpeechText(value: string): boolean {
+  return isSafePlainText(value) && !value.includes('$');
+}
+
+function isSafeKaTeX(value: string): boolean {
+  if (value.length === 0 || hasMarkupOrExecutableContent(value)) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (!'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 +-*/=^_{}().,，。：！？'.includes(character) && character !== '\\') {
+      return false;
+    }
+    if (character !== '\\') continue;
+    const commandStart = index + 1;
+    let commandEnd = commandStart;
+    while (commandEnd < value.length && /[A-Za-z]/.test(value[commandEnd]!)) commandEnd += 1;
+    if (commandEnd === commandStart || !SAFE_KATEX_COMMANDS.has(value.slice(commandStart, commandEnd))) return false;
+    index = commandEnd - 1;
+  }
+  return true;
+}
+
+function isSafeDisplayMarkdown(value: string): boolean {
+  if (containsControlCharacters(value) || hasMarkupOrExecutableContent(value)) return false;
+  let outsideMath = '';
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== '$') {
+      outsideMath += value[index];
+      continue;
+    }
+    const mathEnd = value.indexOf('$', index + 1);
+    if (mathEnd === -1 || !isSafeKaTeX(value.slice(index + 1, mathEnd))) return false;
+    index = mathEnd;
+  }
+  if (outsideMath.includes('`') || outsideMath.includes('[') || outsideMath.includes(']')
+    || outsideMath.includes('\\') || outsideMath.includes('_') || outsideMath.includes('~')
+    || outsideMath.includes('#') || outsideMath.includes('>')) return false;
+
+  let singleMarkers = 0;
+  let doubleMarkers = 0;
+  for (let index = 0; index < outsideMath.length; index += 1) {
+    if (outsideMath[index] !== '*') continue;
+    const run = outsideMath[index + 1] === '*' ? 2 : 1;
+    if (run === 2) {
+      if (outsideMath[index + 2] === '*') return false;
+      doubleMarkers += 1;
+    } else {
+      singleMarkers += 1;
+    }
+    index += run - 1;
+  }
+  return singleMarkers % 2 === 0 && doubleMarkers % 2 === 0;
+}
+
+function schemaText(maximum: number, field: string, validator: (value: string) => boolean): z.ZodType<string> {
   return z.string().min(1, `${field} 不能为空`).max(maximum, `${field} 过长`).superRefine((value, context) => {
-    if (CONTROL_CHARACTERS.test(value)) {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: `${field} 包含控制字符` });
-    }
-    if (EXECUTABLE_CONTENT.test(value)) {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: `${field} 包含可执行内容` });
-    }
-    if (HTML_TAG.test(value)) {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: `${field} 包含 HTML` });
-    }
-    if (options.display && MARKDOWN_CODE.test(value)) {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: `${field} 只能是安全的普通 Markdown 或 KaTeX` });
-    }
-    if (options.speech && (MARKDOWN_CODE.test(value) || RAW_LATEX_CONTROL_SEQUENCE.test(value) || URL.test(value) || MARKDOWN_IN_SPEECH.test(value) || value.includes('$'))) {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: `${field} 必须是自然口语文本` });
-    }
+    if (!validator(value)) context.addIssue({ code: z.ZodIssueCode.custom, message: `${field} 包含不允许的内容` });
   });
 }
 
-const titleSchema = textSchema(80, 'title');
-const displayTextSchema = textSchema(240, 'displayMarkdown', { display: true });
-const speechTextSchema = textSchema(260, 'speechText', { speech: true });
-const visualPromptSchema = textSchema(300, 'visual.prompt');
-const altTextSchema = textSchema(160, 'visual.altText');
-const checkpointTextSchema = textSchema(240, 'checkpoint');
+const plainText = (maximum: number, field: string): z.ZodType<string> => schemaText(maximum, field, isSafePlainText);
+const displayText = schemaText(240, 'displayMarkdown', isSafeDisplayMarkdown);
+const speechText = schemaText(260, 'speechText', isSafeSpeechText);
+const titleText = plainText(80, 'title');
 
 const alternateExplanationSchema = z.object({
-  displayMarkdown: displayTextSchema,
-  speechText: speechTextSchema,
+  displayMarkdown: displayText,
+  speechText,
 }).strict();
 
 const visualSchema = z.discriminatedUnion('mode', [
@@ -49,16 +201,16 @@ const visualSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('formula') }).strict(),
   z.object({
     mode: z.literal('generated_image'),
-    prompt: visualPromptSchema,
-    altText: altTextSchema,
+    prompt: plainText(300, 'visual.prompt'),
+    altText: plainText(160, 'visual.altText'),
   }).strict(),
 ]);
 
 const checkpointSchema = z.object({
-  prompt: checkpointTextSchema,
-  options: z.array(textSchema(120, 'checkpoint.options')).min(2).max(4),
-  correctAnswer: textSchema(120, 'checkpoint.correctAnswer'),
-  explanation: checkpointTextSchema,
+  prompt: plainText(240, 'checkpoint.prompt'),
+  options: z.array(plainText(120, 'checkpoint.options')).min(2).max(4),
+  correctAnswer: plainText(120, 'checkpoint.correctAnswer'),
+  explanation: plainText(240, 'checkpoint.explanation'),
 }).strict().superRefine((checkpoint, context) => {
   if (new Set(checkpoint.options).size !== checkpoint.options.length) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'checkpoint options 不能重复' });
@@ -75,18 +227,13 @@ const checkpointSchema = z.object({
 const segmentSchema = z.object({
   segmentKey: z.string().regex(/^[a-zA-Z0-9_-]{1,40}$/),
   kind: z.enum([
-    'teacher_intro',
-    'teacher_explanation',
-    'student_question',
-    'student_misconception',
-    'teacher_reframe',
-    'checkpoint',
-    'summary',
+    'teacher_intro', 'teacher_explanation', 'student_question', 'student_misconception',
+    'teacher_reframe', 'checkpoint', 'summary',
   ]),
   speaker: z.enum(['teacher', 'student', 'system']),
-  title: titleSchema,
-  displayMarkdown: displayTextSchema,
-  speechText: speechTextSchema,
+  title: titleText,
+  displayMarkdown: displayText,
+  speechText,
   alternateExplanation: alternateExplanationSchema.optional(),
   visual: visualSchema,
   checkpoint: checkpointSchema.optional(),
@@ -94,79 +241,71 @@ const segmentSchema = z.object({
 
 const scriptSchema = z.object({
   schemaVersion: z.literal(1),
-  title: titleSchema,
-  subject: textSchema(40, 'subject'),
-  grade: textSchema(40, 'grade'),
-  topic: textSchema(120, 'topic'),
-  learningObjectives: z.array(textSchema(120, 'learningObjectives')).min(1).max(6),
+  title: titleText,
+  subject: plainText(40, 'subject'),
+  grade: plainText(40, 'grade'),
+  topic: plainText(120, 'topic'),
+  learningObjectives: z.array(plainText(120, 'learningObjectives')).min(1).max(6),
   estimatedMinutes: z.number().int().min(1).max(60),
   segments: z.array(segmentSchema).min(7).max(30),
-}).strict().superRefine((script, context) => {
-  const segments = script.segments;
-  const first = segments[0];
-  const last = segments[segments.length - 1];
-  if (first?.kind !== 'teacher_intro' || last?.kind !== 'summary') {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: '课件必须以 teacher_intro 开始并以 summary 结束' });
-  }
+}).strict();
 
+function segmentTextLength(segment: CoursewareScriptSegment): number {
+  let length = segment.segmentKey.length + segment.title.length + segment.displayMarkdown.length + segment.speechText.length;
+  if (segment.alternateExplanation) length += segment.alternateExplanation.displayMarkdown.length + segment.alternateExplanation.speechText.length;
+  if (segment.visual.mode === 'generated_image') length += (segment.visual.prompt?.length ?? 0) + (segment.visual.altText?.length ?? 0);
+  if (segment.checkpoint) {
+    length += segment.checkpoint.prompt.length + segment.checkpoint.correctAnswer.length + segment.checkpoint.explanation.length;
+    for (const option of segment.checkpoint.options ?? []) length += option.length;
+  }
+  return length;
+}
+
+export function getCoursewareScriptTextLength(script: CoursewareScript): number {
+  let length = script.title.length + script.subject.length + script.grade.length + script.topic.length;
+  for (const objective of script.learningObjectives) length += objective.length;
+  for (const segment of script.segments) length += segmentTextLength(segment);
+  return length;
+}
+
+function validateScriptInvariants(script: CoursewareScript): boolean {
+  const segments = script.segments;
   const keys = new Set<string>();
-  let questionCount = 0;
-  let misconceptionCount = 0;
-  let checkpointCount = 0;
+  const speakerByKind = {
+    teacher_intro: 'teacher', teacher_explanation: 'teacher', student_question: 'student',
+    student_misconception: 'student', teacher_reframe: 'teacher', checkpoint: 'system', summary: 'teacher',
+  } as const;
+  let questions = 0;
+  let misconceptions = 0;
+  let checkpoints = 0;
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index]!;
-    if (keys.has(segment.segmentKey)) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ['segments', index, 'segmentKey'], message: 'segmentKey 必须唯一' });
-    }
+    if (keys.has(segment.segmentKey) || segment.speaker !== speakerByKind[segment.kind]) return false;
     keys.add(segment.segmentKey);
-
-    const speakerByKind = {
-      teacher_intro: 'teacher',
-      teacher_explanation: 'teacher',
-      student_question: 'student',
-      student_misconception: 'student',
-      teacher_reframe: 'teacher',
-      checkpoint: 'system',
-      summary: 'teacher',
-    } as const;
-    if (segment.speaker !== speakerByKind[segment.kind]) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ['segments', index, 'speaker'], message: 'kind 与 speaker 不兼容' });
-    }
-
-    if ((segment.kind === 'teacher_explanation' || segment.kind === 'teacher_reframe') && !segment.alternateExplanation) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ['segments', index, 'alternateExplanation'], message: '核心老师讲解必须预先提供备用讲解' });
-    }
-    if (segment.kind === 'checkpoint') {
-      checkpointCount += 1;
-      if (!segment.checkpoint) {
-        context.addIssue({ code: z.ZodIssueCode.custom, path: ['segments', index, 'checkpoint'], message: 'checkpoint 必须有检查内容' });
-      }
-    } else if (segment.checkpoint) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ['segments', index, 'checkpoint'], message: '只有 checkpoint 可以有检查内容' });
-    }
-    if (segment.kind === 'student_question') questionCount += 1;
+    if ((segment.kind === 'teacher_intro' && index !== 0) || (segment.kind === 'summary' && index !== segments.length - 1)) return false;
+    const allowsAlternate = segment.kind === 'teacher_explanation' || segment.kind === 'teacher_reframe';
+    if (allowsAlternate !== Boolean(segment.alternateExplanation)) return false;
+    if ((segment.kind === 'checkpoint') !== Boolean(segment.checkpoint)) return false;
+    if (segment.kind === 'student_question') questions += 1;
     if (segment.kind === 'student_misconception') {
-      misconceptionCount += 1;
-      if (segments[index + 1]?.kind !== 'teacher_reframe') {
-        context.addIssue({ code: z.ZodIssueCode.custom, path: ['segments', index], message: 'student_misconception 后必须紧接 teacher_reframe' });
-      }
+      misconceptions += 1;
+      if (segments[index + 1]?.kind !== 'teacher_reframe') return false;
     }
-    if (segment.kind === 'teacher_reframe' && segments[index - 1]?.kind !== 'student_misconception') {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ['segments', index], message: 'teacher_reframe 必须紧接 student_misconception' });
-    }
+    if (segment.kind === 'teacher_reframe' && segments[index - 1]?.kind !== 'student_misconception') return false;
+    if (segment.kind === 'checkpoint') checkpoints += 1;
   }
-  if (questionCount === 0 || misconceptionCount === 0 || checkpointCount === 0) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: '课件必须包含学生提问、学生误解和课内检查' });
-  }
-  if (checkpointCount > 3) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: '课内检查最多三项' });
-  }
-});
+  return segments[0]?.kind === 'teacher_intro'
+    && segments[segments.length - 1]?.kind === 'summary'
+    && questions > 0
+    && misconceptions > 0
+    && checkpoints > 0
+    && checkpoints <= 3
+    && getCoursewareScriptTextLength(script) <= MAX_COURSEWARE_SCRIPT_TEXT_CHARS;
+}
 
 function assertSafeJsonStructure(raw: string): void {
-  if (raw.length === 0 || raw.length > MAX_RAW_JSON_CHARS) throw new Error('课件 JSON 长度无效');
+  if (raw.length === 0 || raw.length > MAX_RAW_JSON_CHARS) throw new Error('invalid');
   let index = 0;
-
   const skipWhitespace = (): void => {
     while (index < raw.length && /[\t\n\r ]/.test(raw[index]!)) index += 1;
   };
@@ -175,89 +314,69 @@ function assertSafeJsonStructure(raw: string): void {
     index += 1;
     let escaped = false;
     while (index < raw.length) {
-      const char = raw[index++]!;
-      if (escaped) {
-        escaped = false;
-      } else if (char === '\\') {
-        escaped = true;
-      } else if (char === '"') {
-        return JSON.parse(raw.slice(start, index)) as string;
-      }
+      const character = raw[index++]!;
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') return JSON.parse(raw.slice(start, index)) as string;
     }
-    throw new Error('JSON 字符串未结束');
+    throw new Error('invalid');
   };
   const readValue = (depth: number): void => {
-    if (depth > MAX_JSON_DEPTH) throw new Error('JSON 嵌套过深');
+    if (depth > MAX_JSON_DEPTH) throw new Error('invalid');
     skipWhitespace();
     const current = raw[index];
     if (current === '{') {
       index += 1;
-      const objectKeys = new Set<string>();
+      const keys = new Set<string>();
       skipWhitespace();
-      if (raw[index] === '}') {
-        index += 1;
-        return;
-      }
+      if (raw[index] === '}') { index += 1; return; }
       while (true) {
         skipWhitespace();
-        if (raw[index] !== '"') throw new Error('JSON 对象键无效');
+        if (raw[index] !== '"') throw new Error('invalid');
         const key = readString();
-        if (objectKeys.has(key)) throw new Error('JSON 包含重复字段');
-        objectKeys.add(key);
+        if (keys.has(key)) throw new Error('invalid');
+        keys.add(key);
         skipWhitespace();
-        if (raw[index] !== ':') throw new Error('JSON 对象缺少冒号');
+        if (raw[index] !== ':') throw new Error('invalid');
         index += 1;
         readValue(depth + 1);
         skipWhitespace();
-        if (raw[index] === '}') {
-          index += 1;
-          return;
-        }
-        if (raw[index] !== ',') throw new Error('JSON 对象缺少逗号');
+        if (raw[index] === '}') { index += 1; return; }
+        if (raw[index] !== ',') throw new Error('invalid');
         index += 1;
       }
     }
     if (current === '[') {
       index += 1;
       skipWhitespace();
-      if (raw[index] === ']') {
-        index += 1;
-        return;
-      }
+      if (raw[index] === ']') { index += 1; return; }
       while (true) {
         readValue(depth + 1);
         skipWhitespace();
-        if (raw[index] === ']') {
-          index += 1;
-          return;
-        }
-        if (raw[index] !== ',') throw new Error('JSON 数组缺少逗号');
+        if (raw[index] === ']') { index += 1; return; }
+        if (raw[index] !== ',') throw new Error('invalid');
         index += 1;
       }
     }
-    if (current === '"') {
-      readString();
-      return;
-    }
+    if (current === '"') { readString(); return; }
     const start = index;
     while (index < raw.length && !/[\t\n\r ,\]}]/.test(raw[index]!)) index += 1;
-    if (index === start) throw new Error('JSON 值无效');
+    if (index === start) throw new Error('invalid');
   };
 
   readValue(1);
   skipWhitespace();
-  if (index !== raw.length) throw new Error('JSON 尾部内容无效');
+  if (index !== raw.length) throw new Error('invalid');
 }
 
 export function parseCoursewareScript(raw: string): CoursewareScript {
-  assertSafeJsonStructure(raw);
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    assertSafeJsonStructure(raw);
+    const parsed: unknown = JSON.parse(raw);
+    const result = scriptSchema.safeParse(parsed);
+    if (!result.success || !validateScriptInvariants(result.data as CoursewareScript)) throw new Error('invalid');
+    return result.data as CoursewareScript;
   } catch {
-    throw new Error('课件脚本不是有效 JSON');
+    throw new Error(SAFE_PARSE_ERROR);
   }
-  const result = scriptSchema.safeParse(parsed);
-  if (!result.success) throw new Error('课件脚本不满足协议');
-  return result.data as CoursewareScript;
 }
