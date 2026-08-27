@@ -17,32 +17,37 @@ const ERROR_DETAILS: Record<NormalizedProviderErrorCode, { message: string; retr
 };
 
 export class ProviderCallError extends Error {
+  readonly retryable: boolean;
+
   constructor(
-    message: string,
     readonly errorCode: NormalizedProviderErrorCode,
-    readonly retryable: boolean,
     readonly status: number,
-    readonly requestId = '',
   ) {
-    super(message);
+    const details = ERROR_DETAILS[errorCode];
+    super(details.message);
     this.name = 'ProviderCallError';
+    this.retryable = details.retryable;
   }
 }
 
-function providerError(errorCode: NormalizedProviderErrorCode, status: number, requestId = ''): ProviderCallError {
-  const details = ERROR_DETAILS[errorCode];
-  return new ProviderCallError(details.message, errorCode, details.retryable, status, requestId);
+function providerError(errorCode: NormalizedProviderErrorCode, status: number): ProviderCallError {
+  return new ProviderCallError(errorCode, status);
 }
 
-export function normalizeProviderFailure(status: number, requestId = ''): ProviderCallError {
-  if (status === 401 || status === 403) return providerError('invalid_credential', status, requestId);
-  if (status === 402) return providerError('quota_exhausted', status, requestId);
-  if (status === 408 || status === 504) return providerError('provider_timeout', status, requestId);
-  if (status === 429) return providerError('rate_limited', status, requestId);
-  if (status === 404 || status === 422) return providerError('model_unavailable', status, requestId);
+export function normalizeProviderFailure(status: number): ProviderCallError {
+  if (status === 401 || status === 403) return providerError('invalid_credential', status);
+  if (status === 402) return providerError('quota_exhausted', status);
+  if (status === 408 || status === 504) return providerError('provider_timeout', status);
+  if (status === 429) return providerError('rate_limited', status);
+  if (status === 404 || status === 422) return providerError('model_unavailable', status);
+  if (status >= 500) return providerError('provider_unavailable', status);
+  return providerError('internal_error', status);
+}
 
-  const error = providerError('provider_unavailable', status, requestId);
-  return new ProviderCallError(error.message, error.errorCode, status >= 500, status, requestId);
+function hasExplicitHttpClassification(status: number): boolean {
+  return status === 401 || status === 403 || status === 402 ||
+    status === 408 || status === 504 || status === 429 ||
+    status === 404 || status === 422 || status >= 500;
 }
 
 function canReadErrorBody(contentType: string | null): boolean {
@@ -125,17 +130,16 @@ function normalizeProviderCode(code: string): NormalizedProviderErrorCode | null
 
 export async function normalizeProviderResponse(
   response: Response,
-  requestId = '',
 ): Promise<ProviderCallError> {
-  if (!canReadErrorBody(response.headers.get('content-type'))) {
-    return normalizeProviderFailure(response.status, requestId);
+  if (hasExplicitHttpClassification(response.status) || !canReadErrorBody(response.headers.get('content-type'))) {
+    return normalizeProviderFailure(response.status);
   }
 
   const contentType = response.headers.get('content-type');
   try {
     const code = normalizeProviderCode(providerCodeFromBody(await readBoundedBody(response), contentType));
-    return code ? providerError(code, response.status, requestId) : normalizeProviderFailure(response.status, requestId);
+    return code ? providerError(code, response.status) : normalizeProviderFailure(response.status);
   } catch {
-    return normalizeProviderFailure(response.status, requestId);
+    return normalizeProviderFailure(response.status);
   }
 }

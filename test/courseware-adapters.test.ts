@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ProviderCallError,
   normalizeProviderFailure,
   normalizeProviderResponse,
 } from '../src/worker/courseware/adapters/errors';
@@ -73,6 +74,44 @@ describe('courseware adapter errors', () => {
       errorCode: 'provider_unavailable',
       retryable: true,
     });
+  });
+
+  it('derives public message and retryability exclusively from the error code', () => {
+    const quota = new ProviderCallError('quota_exhausted', 402);
+    const credential = new ProviderCallError('invalid_credential', 401);
+    const unsupported = new ProviderCallError('model_unavailable', 404);
+
+    expect(quota).toMatchObject({ errorCode: 'quota_exhausted', retryable: false });
+    expect(credential).toMatchObject({ errorCode: 'invalid_credential', retryable: false });
+    expect(unsupported).toMatchObject({ errorCode: 'model_unavailable', retryable: false });
+    expect(JSON.stringify(quota)).not.toContain('requestId');
+  });
+
+  it.each([
+    [401, 'Throttling', 'invalid_credential', false],
+    [402, 'ModelNotFound', 'quota_exhausted', false],
+    [404, 'RequestTimeout', 'model_unavailable', false],
+    [503, 'InvalidApiKey', 'provider_unavailable', true],
+  ] as const)('keeps explicit HTTP %s classification when provider code conflicts', async (
+    status,
+    code,
+    errorCode,
+    retryable,
+  ) => {
+    const error = await normalizeProviderResponse(new Response(JSON.stringify({
+      code,
+      message: 'raw message must not escape',
+    }), {
+      status,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Request-Id': 'raw-provider-request-id',
+      },
+    }));
+
+    expect(error).toMatchObject({ errorCode, retryable });
+    expect(error.message).not.toContain('raw message');
+    expect(JSON.stringify(error)).not.toContain('raw-provider-request-id');
   });
 });
 
