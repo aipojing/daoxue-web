@@ -142,6 +142,18 @@ export function applyPollingUpdates(
   );
 }
 
+export class CoursewareItemsCoordinator {
+  private items: CoursewareSummary[] = [];
+  constructor(private readonly onWake: () => void) {}
+  current(): CoursewareSummary[] { return this.items; }
+  commit(next: CoursewareSummary[]): CoursewareSummary[] {
+    const wasActive = this.items.some((item) => shouldPollCourseware(item));
+    this.items = next;
+    if (!wasActive && next.some((item) => shouldPollCourseware(item))) this.onWake();
+    return next;
+  }
+}
+
 interface CoursewareTimerHost {
   setTimeout(callback: () => void, delay: number): number;
   clearTimeout(id: number): void;
@@ -153,6 +165,8 @@ export class CoursewarePollChain {
   private generation = 0;
   private attempt = 0;
   private running = false;
+  private inFlight = false;
+  private wakeRequested = false;
 
   constructor(
     private readonly host: CoursewareTimerHost,
@@ -163,9 +177,9 @@ export class CoursewarePollChain {
   start(): void { this.running = true; this.schedule(); }
 
   wake(): void {
-    this.generation += 1;
-    this.clearTimer();
-    if (this.running) this.run(this.generation);
+    if (!this.running) return;
+    if (this.inFlight) { this.wakeRequested = true; return; }
+    this.generation += 1; this.clearTimer(); this.run(this.generation);
   }
 
   resetForFocus(): void {
@@ -173,7 +187,7 @@ export class CoursewarePollChain {
     this.wake();
   }
 
-  stop(): void { this.running = false; this.generation += 1; this.clearTimer(); }
+  stop(): void { this.running = false; this.generation += 1; this.wakeRequested = false; this.clearTimer(); }
 
   private clearTimer(): void {
     if (this.timer !== null) this.host.clearTimeout(this.timer);
@@ -194,9 +208,13 @@ export class CoursewarePollChain {
   }
 
   private run(generation: number): void {
-    if (!this.running || generation !== this.generation || !this.hasActiveCourseware()) return;
+    if (!this.running || this.inFlight || generation !== this.generation || !this.hasActiveCourseware()) return;
+    this.inFlight = true;
     void this.poll().finally(() => {
-      if (this.running && generation === this.generation) this.schedule();
+      this.inFlight = false;
+      if (!this.running || generation !== this.generation) return;
+      if (this.wakeRequested) { this.wakeRequested = false; this.generation += 1; this.run(this.generation); return; }
+      this.schedule();
     });
   }
 }

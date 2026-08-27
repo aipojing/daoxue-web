@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CoursewareOperationGuard,
+  CoursewareItemsCoordinator,
   CoursewarePollChain,
   CoursewareRequestEpoch,
   applyPollingUpdates,
@@ -123,10 +124,13 @@ describe('courseware library helpers', () => {
     [...scheduled.values()][0]!();
     chain.resetForFocus();
     expect(cleared).toHaveLength(1);
-    expect(completions).toHaveLength(2);
+    expect(completions).toHaveLength(1);
+    chain.resetForFocus();
+    chain.resetForFocus();
+    expect(completions).toHaveLength(1);
     completions[0]!();
     await Promise.resolve();
-    expect(scheduled.size).toBe(0);
+    expect(completions).toHaveLength(2);
     completions[1]!();
     await Promise.resolve();
     expect(scheduled.size).toBe(1);
@@ -155,5 +159,19 @@ describe('courseware library helpers', () => {
   it('continues polling when an otherwise ready lesson retries optional images', () => {
     expect(shouldPollCourseware({ ...summary(8, 'ready'), generationStage: 'images' })).toBe(true);
     expect(shouldPollCourseware({ ...summary(8, 'ready'), generationStage: 'ready' })).toBe(false);
+  });
+
+  it('wakes only after each idle to active entry commits its next list', () => {
+    let wakes = 0;
+    const coordinator = new CoursewareItemsCoordinator(() => { wakes += 1; });
+    const queued = summary(1, 'queued');
+    coordinator.commit([queued]); // initial load
+    coordinator.commit([]);
+    coordinator.commit([queued]); // create
+    coordinator.commit([{ ...summary(2, 'failed'), retryable: true }]);
+    coordinator.commit([{ ...summary(2, 'generating'), generationStage: 'speech' }]); // full retry
+    coordinator.commit([summary(3, 'ready')]);
+    coordinator.commit([{ ...summary(3, 'ready'), generationStage: 'images' }]); // image retry
+    expect(wakes).toBe(4);
   });
 });

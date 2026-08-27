@@ -33,10 +33,12 @@ export default function CoursewareGenerationStatus({ courseware, onQueued, route
   };
   const active = courseware.status === 'queued' || courseware.status === 'generating'
     || (courseware.status === 'ready' && courseware.generationStage === 'images');
+  const imageOnlyRetry = courseware.status === 'ready' && courseware.generationStage === 'images';
   return (
     <div className="courseware-generation-status" aria-live="polite">
-      <p className="courseware-stage"><strong>{generationStageLabel(courseware.generationStage)}</strong>{active && <span> {courseware.progressPercent}%</span>}</p>
-      {active && <><div className="courseware-progress" aria-label={`生成进度 ${courseware.progressPercent}%`}><span style={{ width: `${courseware.progressPercent}%` }} /></div><p>必需语音：已完成 {courseware.requiredAudioReadyCount} / {courseware.requiredAudioTotalCount}。老师语音和 AI 同学语音完成后才能上课。可以离开，后台会继续。</p></>}
+      <p className="courseware-stage"><strong>{imageOnlyRetry ? '课件已可上课，正在补充配图' : generationStageLabel(courseware.generationStage)}</strong>{active && !imageOnlyRetry && <span> {courseware.progressPercent}%</span>}</p>
+      {active && !imageOnlyRetry && <><div className="courseware-progress" aria-label={`生成进度 ${courseware.progressPercent}%`}><span style={{ width: `${courseware.progressPercent}%` }} /></div><p>必需语音：已完成 {courseware.requiredAudioReadyCount} / {courseware.requiredAudioTotalCount}。老师语音和 AI 同学语音完成后才能上课。可以离开，后台会继续。</p></>}
+      {imageOnlyRetry && <p>必需语音：已完成 {courseware.requiredAudioReadyCount} / {courseware.requiredAudioTotalCount}。课件已可继续上课，可以离开，后台会继续补充配图。</p>}
       {courseware.warnings.length > 0 && <p className="courseware-warning">配图提醒：{courseware.warnings.join('；')}</p>}
       {courseware.status === 'failed' && <p className="courseware-error" role="alert">{courseware.errorMessage || '生成未完成，请检查配置后重试。'}</p>}
       {error && <p className="courseware-error" role="alert">{error}</p>}
