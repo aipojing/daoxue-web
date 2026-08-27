@@ -464,6 +464,214 @@ describe('courseware AI HTTP APIs', () => {
     }
   });
 
+  it('rebuilds public legacy voice entries without unknown or invalid-role fields', async () => {
+    const admin = await createAdmin();
+    const ttsModel = await env.DB.prepare(
+      `SELECT id, voices_json FROM ai_models WHERE model_id = 'qwen-audio-3.0-tts-plus'`,
+    ).first<{ id: number; voices_json: string }>();
+    if (!ttsModel) throw new Error('missing seeded TTS model');
+
+    try {
+      await env.DB.prepare('UPDATE ai_models SET voices_json = ? WHERE id = ?')
+        .bind(
+          JSON.stringify([
+            {
+              id: 'safe-teacher',
+              name: 'Safe Teacher',
+              recommendedRole: 'teacher',
+              secretToken: 'voice-secret-sentinel',
+              internalConfig: { account: 'private' },
+            },
+            {
+              id: 'safe-student',
+              name: 'Safe Student',
+              recommendedRole: 'administrator',
+              secretToken: 'second-secret-sentinel',
+            },
+          ]),
+          ttsModel.id,
+        )
+        .run();
+      const response = await api('/api/ai-catalog', {}, admin.cookie);
+      const catalog = await json<import('../../src/shared/ai-catalog').AIProviderCatalogItem[]>(
+        response,
+      );
+      const voices = catalog.data
+        ?.flatMap((provider) => provider.models)
+        .find((model) => model.id === ttsModel.id)?.voices;
+      expect(voices).toEqual([
+        { id: 'safe-teacher', name: 'Safe Teacher', recommendedRole: 'teacher' },
+        { id: 'safe-student', name: 'Safe Student' },
+      ]);
+      expect(JSON.stringify(catalog.data)).not.toContain('voice-secret-sentinel');
+      expect(JSON.stringify(catalog.data)).not.toContain('internalConfig');
+      expect(JSON.stringify(catalog.data)).not.toContain('administrator');
+    } finally {
+      await env.DB.prepare('UPDATE ai_models SET voices_json = ? WHERE id = ?')
+        .bind(ttsModel.voices_json, ttsModel.id)
+        .run();
+    }
+  });
+
+  it('keeps concurrent endpoint changes and model creation capability-consistent', async () => {
+    const admin = await createAdmin();
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const provider = await env.DB.prepare(
+        `INSERT INTO ai_providers (slug, display_name) VALUES (?, 'Race Provider') RETURNING id`,
+      )
+        .bind(`test-api-create-race-${attempt}`)
+        .first<{ id: number }>();
+      const endpoint = await env.DB.prepare(
+        `INSERT INTO ai_provider_endpoints
+         (provider_id, capability, adapter_type, base_url)
+         VALUES (?, 'structured_text', 'openai_text', 'https://race.example/v1') RETURNING id`,
+      )
+        .bind(provider?.id)
+        .first<{ id: number }>();
+      if (!provider || !endpoint) throw new Error('failed create-race setup');
+
+      const [endpointResponse, modelResponse] = await Promise.all([
+        api(
+          `/api/admin/ai-catalog/endpoints/${endpoint.id}`,
+          {
+            method: 'PUT',
+            body: JSON.stringify({
+              providerId: provider.id,
+              capability: 'speech_synthesis',
+              adapterType: 'token_plan_tts',
+              baseUrl: 'https://race.example/tts',
+              config: {},
+              enabled: true,
+            }),
+          },
+          admin.cookie,
+        ),
+        api(
+          '/api/admin/ai-catalog/models',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              endpointId: endpoint.id,
+              modelId: `race-model-${attempt}`,
+              displayName: 'Race Model',
+              config: {},
+              voices: [],
+              recommended: false,
+              enabled: true,
+              sortOrder: 0,
+            }),
+          },
+          admin.cookie,
+        ),
+      ]);
+      expect([200, 409]).toContain(endpointResponse.status);
+      expect([200, 409]).toContain(modelResponse.status);
+      const row = await env.DB.prepare(
+        `SELECT e.capability AS endpoint_capability, m.capability AS model_capability
+         FROM ai_provider_endpoints e
+         LEFT JOIN ai_models m ON m.endpoint_id = e.id
+         WHERE e.id = ?`,
+      )
+        .bind(endpoint.id)
+        .first<{ endpoint_capability: AICapability; model_capability: AICapability | null }>();
+      if (modelResponse.status === 200) {
+        expect(row?.model_capability).toBe(row?.endpoint_capability);
+      }
+    }
+  });
+
+  it('keeps concurrent endpoint changes and model movement capability-consistent', async () => {
+    const admin = await createAdmin();
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const sourceProvider = await env.DB.prepare(
+        `INSERT INTO ai_providers (slug, display_name) VALUES (?, 'Race Source') RETURNING id`,
+      )
+        .bind(`test-api-move-source-${attempt}`)
+        .first<{ id: number }>();
+      const targetProvider = await env.DB.prepare(
+        `INSERT INTO ai_providers (slug, display_name) VALUES (?, 'Race Target') RETURNING id`,
+      )
+        .bind(`test-api-move-target-${attempt}`)
+        .first<{ id: number }>();
+      const sourceEndpoint = await env.DB.prepare(
+        `INSERT INTO ai_provider_endpoints
+         (provider_id, capability, adapter_type, base_url)
+         VALUES (?, 'structured_text', 'openai_text', 'https://source.example/v1') RETURNING id`,
+      )
+        .bind(sourceProvider?.id)
+        .first<{ id: number }>();
+      const targetEndpoint = await env.DB.prepare(
+        `INSERT INTO ai_provider_endpoints
+         (provider_id, capability, adapter_type, base_url)
+         VALUES (?, 'structured_text', 'openai_text', 'https://target.example/v1') RETURNING id`,
+      )
+        .bind(targetProvider?.id)
+        .first<{ id: number }>();
+      const model = await env.DB.prepare(
+        `INSERT INTO ai_models (endpoint_id, capability, model_id, display_name)
+         VALUES (?, 'structured_text', ?, 'Moving Model') RETURNING id`,
+      )
+        .bind(sourceEndpoint?.id, `moving-model-${attempt}`)
+        .first<{ id: number }>();
+      if (!sourceProvider || !targetProvider || !sourceEndpoint || !targetEndpoint || !model) {
+        throw new Error('failed move-race setup');
+      }
+
+      const [endpointResponse, modelResponse] = await Promise.all([
+        api(
+          `/api/admin/ai-catalog/endpoints/${targetEndpoint.id}`,
+          {
+            method: 'PUT',
+            body: JSON.stringify({
+              providerId: targetProvider.id,
+              capability: 'speech_synthesis',
+              adapterType: 'token_plan_tts',
+              baseUrl: 'https://target.example/tts',
+              config: {},
+              enabled: true,
+            }),
+          },
+          admin.cookie,
+        ),
+        api(
+          `/api/admin/ai-catalog/models/${model.id}`,
+          {
+            method: 'PUT',
+            body: JSON.stringify({
+              endpointId: targetEndpoint.id,
+              modelId: `moving-model-${attempt}`,
+              displayName: 'Moving Model',
+              config: {},
+              voices: [],
+              recommended: false,
+              enabled: true,
+              sortOrder: 0,
+            }),
+          },
+          admin.cookie,
+        ),
+      ]);
+      expect([200, 409]).toContain(endpointResponse.status);
+      expect([200, 409]).toContain(modelResponse.status);
+      const row = await env.DB.prepare(
+        `SELECT e.capability AS endpoint_capability, m.capability AS model_capability,
+                m.endpoint_id
+         FROM ai_models m JOIN ai_provider_endpoints e ON e.id = m.endpoint_id
+         WHERE m.id = ?`,
+      )
+        .bind(model.id)
+        .first<{
+          endpoint_capability: AICapability;
+          model_capability: AICapability;
+          endpoint_id: number;
+        }>();
+      if (modelResponse.status === 200) {
+        expect(row?.endpoint_id).toBe(targetEndpoint.id);
+        expect(row?.model_capability).toBe(row?.endpoint_capability);
+      }
+    }
+  });
+
   it('rejects endpoint protocol changes when models exist and preserves saved preferences', async () => {
     const admin = await createAdmin();
     const deepseek = await env.DB.prepare(

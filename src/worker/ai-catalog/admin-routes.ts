@@ -134,15 +134,25 @@ function resourceId(value: string): number | null {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-async function endpointCapability(
+interface EndpointProtocol {
+  capability: AICapability;
+  adapterType: keyof typeof ADAPTER_CAPABILITY;
+}
+
+async function endpointProtocol(
   db: D1Database,
   endpointId: number,
-): Promise<AICapability | null> {
+): Promise<EndpointProtocol | null> {
   const endpoint = await db
-    .prepare('SELECT capability FROM ai_provider_endpoints WHERE id = ?')
+    .prepare('SELECT capability, adapter_type FROM ai_provider_endpoints WHERE id = ?')
     .bind(endpointId)
-    .first<{ capability: AICapability }>();
-  return endpoint?.capability ?? null;
+    .first<{
+      capability: AICapability;
+      adapter_type: keyof typeof ADAPTER_CAPABILITY;
+    }>();
+  return endpoint
+    ? { capability: endpoint.capability, adapterType: endpoint.adapter_type }
+    : null;
 }
 
 export const adminAICatalogRoutes = new Hono<AppContext>();
@@ -284,25 +294,6 @@ adminAICatalogRoutes.put('/endpoints/:id', async (c) => {
   if (ADAPTER_CAPABILITY[parsed.data.adapterType] !== parsed.data.capability) {
     return err(c, '适配器能力与端点能力不匹配');
   }
-  const existing = await c.env.DB.prepare(
-    `SELECT e.capability, e.adapter_type,
-            EXISTS(SELECT 1 FROM ai_models m WHERE m.endpoint_id = e.id) AS has_models
-     FROM ai_provider_endpoints e WHERE e.id = ?`,
-  )
-    .bind(id)
-    .first<{
-      capability: AICapability;
-      adapter_type: keyof typeof ADAPTER_CAPABILITY;
-      has_models: number;
-    }>();
-  if (!existing) return err(c, '端点不存在', 404);
-  if (
-    existing.has_models === 1 &&
-    (existing.capability !== parsed.data.capability ||
-      existing.adapter_type !== parsed.data.adapterType)
-  ) {
-    return err(c, '已有模型的端点不能更改能力或适配器', 409);
-  }
   const provider = await c.env.DB.prepare('SELECT id FROM ai_providers WHERE id = ?')
     .bind(parsed.data.providerId)
     .first<{ id: number }>();
@@ -312,7 +303,14 @@ adminAICatalogRoutes.put('/endpoints/:id', async (c) => {
       `UPDATE ai_provider_endpoints
        SET provider_id = ?, capability = ?, adapter_type = ?, base_url = ?,
            config_json = ?, enabled = ?, updated_at = datetime('now')
-       WHERE id = ? RETURNING id`,
+       WHERE id = ?
+         AND (
+           (capability = ? AND adapter_type = ?)
+           OR NOT EXISTS (
+             SELECT 1 FROM ai_models m WHERE m.endpoint_id = ai_provider_endpoints.id
+           )
+         )
+       RETURNING id`,
     )
       .bind(
         parsed.data.providerId,
@@ -322,20 +320,34 @@ adminAICatalogRoutes.put('/endpoints/:id', async (c) => {
         JSON.stringify(parsed.data.config),
         parsed.data.enabled ? 1 : 0,
         id,
+        parsed.data.capability,
+        parsed.data.adapterType,
       )
       .first<{ id: number }>(),
   );
   if (endpoint === UNIQUE_CONFLICT) return err(c, '相同能力的适配器端点已存在', 409);
-  if (!endpoint) return err(c, '端点不存在', 404);
+  if (!endpoint) {
+    const stillExists = await c.env.DB.prepare(
+      'SELECT id FROM ai_provider_endpoints WHERE id = ?',
+    )
+      .bind(id)
+      .first<{ id: number }>();
+    return stillExists
+      ? err(c, '已有模型的端点不能更改能力或适配器', 409)
+      : err(c, '端点不存在', 404);
+  }
   return ok(c, endpoint);
 });
 
 adminAICatalogRoutes.post('/models', async (c) => {
   const parsed = modelSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
-  const capability = await endpointCapability(c.env.DB, parsed.data.endpointId);
-  if (!capability) return err(c, '端点不存在', 404);
-  const validatedConfig = validateModelConfig(capability, parsed.data.config);
+  const protocol = await endpointProtocol(c.env.DB, parsed.data.endpointId);
+  if (!protocol) return err(c, '端点不存在', 404);
+  if (ADAPTER_CAPABILITY[protocol.adapterType] !== protocol.capability) {
+    return err(c, '目标端点协议配置不一致', 409);
+  }
+  const validatedConfig = validateModelConfig(protocol.capability, parsed.data.config);
   if (!validatedConfig.success) {
     return err(c, validatedConfig.error.issues[0]?.message ?? '模型配置不合法');
   }
@@ -344,11 +356,12 @@ adminAICatalogRoutes.post('/models', async (c) => {
       `INSERT INTO ai_models
          (endpoint_id, capability, model_id, display_name, config_json, voices_json,
           recommended, enabled, sort_order)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+       SELECT e.id, e.capability, ?, ?, ?, ?, ?, ?, ?
+       FROM ai_provider_endpoints e
+       WHERE e.id = ? AND e.capability = ? AND e.adapter_type = ?
+       RETURNING id`,
     )
       .bind(
-        parsed.data.endpointId,
-        capability,
         parsed.data.modelId,
         parsed.data.displayName,
         JSON.stringify(validatedConfig.data),
@@ -356,10 +369,14 @@ adminAICatalogRoutes.post('/models', async (c) => {
         parsed.data.recommended ? 1 : 0,
         parsed.data.enabled ? 1 : 0,
         parsed.data.sortOrder,
+        parsed.data.endpointId,
+        protocol.capability,
+        protocol.adapterType,
       )
       .first<{ id: number }>(),
   );
   if (model === UNIQUE_CONFLICT) return err(c, '端点中已存在相同模型 ID', 409);
+  if (!model) return err(c, '目标端点协议已变更，请重试', 409);
   return ok(c, model);
 });
 
@@ -368,9 +385,12 @@ adminAICatalogRoutes.put('/models/:id', async (c) => {
   if (!id) return err(c, '模型不存在', 404);
   const parsed = modelSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
-  const capability = await endpointCapability(c.env.DB, parsed.data.endpointId);
-  if (!capability) return err(c, '端点不存在', 404);
-  const validatedConfig = validateModelConfig(capability, parsed.data.config);
+  const protocol = await endpointProtocol(c.env.DB, parsed.data.endpointId);
+  if (!protocol) return err(c, '端点不存在', 404);
+  if (ADAPTER_CAPABILITY[protocol.adapterType] !== protocol.capability) {
+    return err(c, '目标端点协议配置不一致', 409);
+  }
+  const validatedConfig = validateModelConfig(protocol.capability, parsed.data.config);
   if (!validatedConfig.success) {
     return err(c, validatedConfig.error.issues[0]?.message ?? '模型配置不合法');
   }
@@ -380,11 +400,16 @@ adminAICatalogRoutes.put('/models/:id', async (c) => {
        SET endpoint_id = ?, capability = ?, model_id = ?, display_name = ?,
            config_json = ?, voices_json = ?, recommended = ?, enabled = ?, sort_order = ?,
            updated_at = datetime('now')
-       WHERE id = ? RETURNING id`,
+       WHERE id = ?
+         AND EXISTS (
+           SELECT 1 FROM ai_provider_endpoints e
+           WHERE e.id = ? AND e.capability = ? AND e.adapter_type = ?
+         )
+       RETURNING id`,
     )
       .bind(
         parsed.data.endpointId,
-        capability,
+        protocol.capability,
         parsed.data.modelId,
         parsed.data.displayName,
         JSON.stringify(validatedConfig.data),
@@ -393,10 +418,20 @@ adminAICatalogRoutes.put('/models/:id', async (c) => {
         parsed.data.enabled ? 1 : 0,
         parsed.data.sortOrder,
         id,
+        parsed.data.endpointId,
+        protocol.capability,
+        protocol.adapterType,
       )
       .first<{ id: number }>(),
   );
   if (model === UNIQUE_CONFLICT) return err(c, '端点中已存在相同模型 ID', 409);
-  if (!model) return err(c, '模型不存在', 404);
+  if (!model) {
+    const stillExists = await c.env.DB.prepare('SELECT id FROM ai_models WHERE id = ?')
+      .bind(id)
+      .first<{ id: number }>();
+    return stillExists
+      ? err(c, '目标端点协议已变更，请重试', 409)
+      : err(c, '模型不存在', 404);
+  }
   return ok(c, model);
 });

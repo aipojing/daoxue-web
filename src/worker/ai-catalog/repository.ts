@@ -89,13 +89,27 @@ function parseVoices(value: string | null): AIVoiceOption[] {
   if (!value) return [];
   const parsed: unknown = JSON.parse(value);
   if (!Array.isArray(parsed)) return [];
-  return parsed.filter(
-    (voice): voice is AIVoiceOption =>
-      voice !== null &&
-      typeof voice === 'object' &&
-      typeof (voice as { id?: unknown }).id === 'string' &&
-      typeof (voice as { name?: unknown }).name === 'string',
-  );
+  const voices: AIVoiceOption[] = [];
+  for (const candidate of parsed) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const raw = candidate as Record<string, unknown>;
+    if (
+      typeof raw.id !== 'string' ||
+      raw.id.length < 1 ||
+      raw.id.length > 150 ||
+      typeof raw.name !== 'string' ||
+      raw.name.length < 1 ||
+      raw.name.length > 150
+    ) {
+      continue;
+    }
+    const voice: AIVoiceOption = { id: raw.id, name: raw.name };
+    if (raw.recommendedRole === 'teacher' || raw.recommendedRole === 'student') {
+      voice.recommendedRole = raw.recommendedRole;
+    }
+    voices.push(voice);
+  }
+  return voices;
 }
 
 function includesValue(values: unknown[], candidate: unknown): boolean {
