@@ -383,7 +383,6 @@ export default function CoursewaresPage() {
               created,
               ...itemsRef.current.filter((item) => item.id !== created.id),
             ]);
-            chainRef.current?.wake();
           }
         }}
       />
