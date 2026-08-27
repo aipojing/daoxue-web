@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildSystemPrompt, isSubject, SUBJECTS, SUBJECT_NAMES } from '../src/worker/chat/prompt-builder';
 import { getBasePrompt } from '../src/worker/chat/prompts';
+import { COURSEWARE_SCRIPT_PROMPT } from '../src/worker/courseware/prompt-builder';
 
 const student = { name: '小明', grade: '初二', textbook: '人教版', region: '北京', notes: '' };
 
@@ -68,5 +69,14 @@ describe('subjects', () => {
     expect(prompt).toContain('full_solution');
     expect(prompt).toContain('五个失分定位维度');
     expect(prompt).toContain('不编造人物、年代、事件、出处、数据和引文');
+  });
+});
+
+describe('courseware script prompt', () => {
+  it('ships the versioned voice courseware prompt', () => {
+    expect(COURSEWARE_SCRIPT_PROMPT).toContain('schemaVersion');
+    expect(COURSEWARE_SCRIPT_PROMPT).toContain('student_question');
+    expect(COURSEWARE_SCRIPT_PROMPT).toContain('student_misconception');
+    expect(COURSEWARE_SCRIPT_PROMPT).toContain('alternateExplanation');
   });
 });
