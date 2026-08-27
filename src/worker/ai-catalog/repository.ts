@@ -10,7 +10,7 @@ import type {
 import type { Env } from '../env';
 import { UserFacingError } from '../lib/errors';
 import { resolveCredential } from './credentials';
-import { preferenceListSchema } from './validation';
+import { preferenceListSchema, projectPublicModelConfig } from './validation';
 
 type AdapterType = 'openai_text' | 'token_plan_tts' | 'token_plan_image';
 type CredentialHealth = 'unknown' | 'valid' | 'invalid' | 'quota_exhausted';
@@ -214,7 +214,8 @@ export async function getPublicCatalog(db: D1Database): Promise<AIProviderCatalo
               m.recommended
        FROM ai_providers p
        JOIN ai_provider_endpoints e ON e.provider_id = p.id AND e.enabled = 1
-       JOIN ai_models m ON m.endpoint_id = e.id AND m.enabled = 1
+       JOIN ai_models m
+         ON m.endpoint_id = e.id AND m.enabled = 1 AND m.capability = e.capability
        WHERE p.enabled = 1
        ORDER BY p.id, m.sort_order, m.id`,
     )
@@ -241,7 +242,7 @@ export async function getPublicCatalog(db: D1Database): Promise<AIProviderCatalo
       capability: row.capability,
       modelId: row.external_model_id,
       displayName: row.model_display_name,
-      config: parseObject(row.model_config_json),
+      config: projectPublicModelConfig(row.capability, parseObject(row.model_config_json)),
       voices: parseVoices(row.voices_json),
       recommended: row.recommended === 1,
     };

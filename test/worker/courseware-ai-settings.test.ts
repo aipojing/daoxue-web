@@ -398,6 +398,309 @@ describe('courseware AI HTTP APIs', () => {
     ]);
     expect(responses.map((response) => response.status)).toEqual([400, 400, 400]);
   });
+
+  it('rejects private model config fields and projects legacy config through a public whitelist', async () => {
+    const admin = await createAdmin();
+    const ttsModel = await env.DB.prepare(
+      `SELECT id, endpoint_id, config_json, voices_json
+       FROM ai_models WHERE model_id = 'qwen-audio-3.0-tts-plus'`,
+    ).first<{ id: number; endpoint_id: number; config_json: string; voices_json: string }>();
+    if (!ttsModel) throw new Error('missing seeded TTS model');
+
+    try {
+      const rejected = await api(
+        `/api/admin/ai-catalog/models/${ttsModel.id}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            endpointId: ttsModel.endpoint_id,
+            modelId: 'qwen-audio-3.0-tts-plus',
+            displayName: 'Qwen Audio 3.0 TTS Plus',
+            config: {
+              format: 'mp3',
+              sampleRate: 24000,
+              internalConfig: { baseUrl: 'https://internal.example' },
+              secretToken: 'sentinel-secret',
+            },
+            voices: [],
+            recommended: true,
+            enabled: true,
+            sortOrder: 10,
+          }),
+        },
+        admin.cookie,
+      );
+      expect(rejected.status).toBe(400);
+
+      await env.DB.prepare('UPDATE ai_models SET config_json = ? WHERE id = ?')
+        .bind(
+          JSON.stringify({
+            format: 'mp3',
+            sampleRate: 24000,
+            baseUrl: 'https://legacy-internal.example',
+            internalConfig: { timeout: 1234 },
+            secretToken: 'sentinel-secret',
+          }),
+          ttsModel.id,
+        )
+        .run();
+      const response = await api('/api/ai-catalog', {}, admin.cookie);
+      const catalog = await json<import('../../src/shared/ai-catalog').AIProviderCatalogItem[]>(
+        response,
+      );
+      const model = catalog.data
+        ?.flatMap((provider) => provider.models)
+        .find((item) => item.id === ttsModel.id);
+      expect(model?.config).toEqual({ format: 'mp3', sampleRate: 24000 });
+      expect(JSON.stringify(catalog.data)).not.toContain('sentinel-secret');
+      expect(JSON.stringify(catalog.data)).not.toContain('legacy-internal.example');
+      expect(JSON.stringify(catalog.data)).not.toContain('internalConfig');
+    } finally {
+      await env.DB.prepare(
+        'UPDATE ai_models SET config_json = ?, voices_json = ? WHERE id = ?',
+      )
+        .bind(ttsModel.config_json, ttsModel.voices_json, ttsModel.id)
+        .run();
+    }
+  });
+
+  it('rejects endpoint protocol changes when models exist and preserves saved preferences', async () => {
+    const admin = await createAdmin();
+    const deepseek = await env.DB.prepare(
+      `SELECT e.id AS endpoint_id, e.provider_id, e.capability, e.adapter_type,
+              e.base_url, e.config_json, e.enabled, m.id AS model_id
+       FROM ai_provider_endpoints e
+       JOIN ai_models m ON m.endpoint_id = e.id
+       WHERE e.adapter_type = 'openai_text' AND m.model_id = 'deepseek-chat'`,
+    ).first<{
+      endpoint_id: number;
+      provider_id: number;
+      capability: AICapability;
+      adapter_type: string;
+      base_url: string;
+      config_json: string;
+      enabled: number;
+      model_id: number;
+    }>();
+    if (!deepseek) throw new Error('missing seeded DeepSeek model');
+    await saveUserModelPreferences(env.DB, admin.body.data?.id ?? 0, {
+      preferences: [
+        {
+          purpose: 'courseware_text',
+          endpointId: deepseek.endpoint_id,
+          modelCatalogId: deepseek.model_id,
+          customModelId: '',
+          voiceId: '',
+          params: {},
+        },
+      ],
+    });
+
+    try {
+      const response = await api(
+        `/api/admin/ai-catalog/endpoints/${deepseek.endpoint_id}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            providerId: deepseek.provider_id,
+            capability: 'speech_synthesis',
+            adapterType: 'token_plan_tts',
+            baseUrl: 'https://safe.example/tts',
+            config: {},
+            enabled: true,
+          }),
+        },
+        admin.cookie,
+      );
+      expect(response.status).toBe(409);
+      expect(
+        await resolvePreference(env.DB, admin.body.data?.id ?? 0, 'courseware_text'),
+      ).toMatchObject({
+        endpointId: deepseek.endpoint_id,
+        modelId: 'deepseek-chat',
+        capability: 'structured_text',
+      });
+    } finally {
+      await env.DB.prepare(
+        `UPDATE ai_provider_endpoints
+         SET provider_id = ?, capability = ?, adapter_type = ?, base_url = ?,
+             config_json = ?, enabled = ? WHERE id = ?`,
+      )
+        .bind(
+          deepseek.provider_id,
+          deepseek.capability,
+          deepseek.adapter_type,
+          deepseek.base_url,
+          deepseek.config_json,
+          deepseek.enabled,
+          deepseek.endpoint_id,
+        )
+        .run();
+    }
+  });
+
+  it('fails public catalog and saved preferences closed on model capability drift', async () => {
+    const admin = await createAdmin();
+    const textModel = await env.DB.prepare(
+      `SELECT m.id, m.endpoint_id, m.capability
+       FROM ai_models m WHERE m.model_id = 'deepseek-chat'`,
+    ).first<{ id: number; endpoint_id: number; capability: AICapability }>();
+    if (!textModel) throw new Error('missing seeded DeepSeek model');
+    await saveUserModelPreferences(env.DB, admin.body.data?.id ?? 0, {
+      preferences: [
+        {
+          purpose: 'courseware_text',
+          endpointId: textModel.endpoint_id,
+          modelCatalogId: textModel.id,
+          customModelId: '',
+          voiceId: '',
+          params: {},
+        },
+      ],
+    });
+
+    try {
+      await env.DB.prepare("UPDATE ai_models SET capability = 'image_generation' WHERE id = ?")
+        .bind(textModel.id)
+        .run();
+      const response = await api('/api/ai-catalog', {}, admin.cookie);
+      const catalog = await json<import('../../src/shared/ai-catalog').AIProviderCatalogItem[]>(
+        response,
+      );
+      expect(
+        catalog.data?.flatMap((provider) => provider.models).some((model) => model.id === textModel.id),
+      ).toBe(false);
+      expect(await resolvePreference(env.DB, admin.body.data?.id ?? 0, 'courseware_text')).toBeNull();
+    } finally {
+      await env.DB.prepare('UPDATE ai_models SET capability = ? WHERE id = ?')
+        .bind(textModel.capability, textModel.id)
+        .run();
+    }
+  });
+
+  it('maps provider, endpoint and model uniqueness conflicts to safe 409 responses', async () => {
+    const admin = await createAdmin();
+    const seeded = await env.DB.prepare(
+      `SELECT p.id AS provider_id, p.slug, e.id AS endpoint_id, e.capability,
+              e.adapter_type, e.base_url, e.config_json,
+              m.id AS model_id, m.model_id AS external_model_id
+       FROM ai_providers p
+       JOIN ai_provider_endpoints e ON e.provider_id = p.id
+       JOIN ai_models m ON m.endpoint_id = e.id
+       WHERE m.model_id = 'qwen3.7-plus'`,
+    ).first<{
+      provider_id: number;
+      slug: string;
+      endpoint_id: number;
+      capability: AICapability;
+      adapter_type: 'openai_text';
+      base_url: string;
+      config_json: string;
+      model_id: number;
+      external_model_id: string;
+    }>();
+    if (!seeded) throw new Error('missing seeded catalog rows');
+    const testProvider = await env.DB.prepare(
+      `INSERT INTO ai_providers (slug, display_name) VALUES ('test-api-conflict', 'Conflict')
+       RETURNING id`,
+    ).first<{ id: number }>();
+    const testEndpoint = await env.DB.prepare(
+      `INSERT INTO ai_provider_endpoints
+       (provider_id, capability, adapter_type, base_url, config_json)
+       VALUES (?, 'structured_text', 'openai_text', 'https://conflict.example/v1', '{}')
+       RETURNING id`,
+    )
+      .bind(testProvider?.id)
+      .first<{ id: number }>();
+    const testModel = await env.DB.prepare(
+      `INSERT INTO ai_models
+       (endpoint_id, capability, model_id, display_name)
+       VALUES (?, 'structured_text', 'test-conflict-model', 'Conflict Model')
+       RETURNING id`,
+    )
+      .bind(testEndpoint?.id)
+      .first<{ id: number }>();
+    if (!testProvider || !testEndpoint || !testModel) throw new Error('failed conflict setup');
+
+    const responses = [
+      await api(
+        '/api/admin/ai-catalog/providers',
+        {
+          method: 'POST',
+          body: JSON.stringify({ slug: seeded.slug, displayName: 'Duplicate', enabled: true }),
+        },
+        admin.cookie,
+      ),
+      await api(
+        '/api/admin/ai-catalog/endpoints',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            providerId: seeded.provider_id,
+            capability: seeded.capability,
+            adapterType: seeded.adapter_type,
+            baseUrl: seeded.base_url,
+            config: JSON.parse(seeded.config_json),
+            enabled: true,
+          }),
+        },
+        admin.cookie,
+      ),
+      await api(
+        `/api/admin/ai-catalog/endpoints/${testEndpoint.id}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            providerId: seeded.provider_id,
+            capability: seeded.capability,
+            adapterType: seeded.adapter_type,
+            baseUrl: 'https://conflict.example/v2',
+            config: {},
+            enabled: true,
+          }),
+        },
+        admin.cookie,
+      ),
+      await api(
+        '/api/admin/ai-catalog/models',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            endpointId: seeded.endpoint_id,
+            modelId: seeded.external_model_id,
+            displayName: 'Duplicate Model',
+            config: {},
+            voices: [],
+            recommended: false,
+            enabled: true,
+            sortOrder: 99,
+          }),
+        },
+        admin.cookie,
+      ),
+      await api(
+        `/api/admin/ai-catalog/models/${testModel.id}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            endpointId: seeded.endpoint_id,
+            modelId: seeded.external_model_id,
+            displayName: 'Moved Duplicate Model',
+            config: {},
+            voices: [],
+            recommended: false,
+            enabled: true,
+            sortOrder: 99,
+          }),
+        },
+        admin.cookie,
+      ),
+    ];
+    expect(responses.map((response) => response.status)).toEqual([409, 409, 409, 409, 409]);
+    for (const response of responses) {
+      expect((await json(response)).error).not.toMatch(/D1|SQLITE|UNIQUE|constraint/i);
+    }
+  });
 });
 
 describe('courseware AI credentials', () => {

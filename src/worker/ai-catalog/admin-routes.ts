@@ -3,7 +3,11 @@ import { z } from 'zod';
 import type { AICapability, AIVoiceOption } from '../../shared/ai-catalog';
 import type { AppContext } from '../env';
 import { ok, err } from '../lib/envelope';
-import { adminEndpointSchema } from './validation';
+import {
+  adminEndpointSchema,
+  adminModelConfigSchema,
+  validateModelConfig,
+} from './validation';
 
 const providerCreateSchema = z
   .object({
@@ -33,7 +37,7 @@ const modelSchema = z
     endpointId: z.number().int().positive(),
     modelId: z.string().trim().min(1).max(150),
     displayName: z.string().trim().min(1).max(150),
-    config: z.record(z.unknown()).default({}),
+    config: adminModelConfigSchema.default({}),
     voices: z.array(voiceSchema).max(100).default([]),
     recommended: z.boolean(),
     enabled: z.boolean(),
@@ -74,6 +78,35 @@ interface ModelRow {
   recommended: number;
   enabled: number;
   sort_order: number;
+}
+
+const UNIQUE_CONFLICT = Symbol('unique-conflict');
+
+function isUniqueConstraintError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    if (current instanceof Error) {
+      if (
+        current.message.includes('UNIQUE constraint failed') ||
+        current.message.includes('SQLITE_CONSTRAINT_UNIQUE')
+      ) {
+        return true;
+      }
+      current = current.cause;
+    } else {
+      return false;
+    }
+  }
+  return false;
+}
+
+async function catalogWrite<T>(operation: () => Promise<T>): Promise<T | typeof UNIQUE_CONFLICT> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return UNIQUE_CONFLICT;
+    throw error;
+  }
 }
 
 function parseObject(value: string): Record<string, unknown> {
@@ -185,12 +218,15 @@ function renderModel(model: ModelRow) {
 adminAICatalogRoutes.post('/providers', async (c) => {
   const parsed = providerCreateSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
-  const provider = await c.env.DB.prepare(
-    `INSERT INTO ai_providers (slug, display_name, enabled)
-     VALUES (?, ?, ?) RETURNING id`,
-  )
-    .bind(parsed.data.slug, parsed.data.displayName, parsed.data.enabled ? 1 : 0)
-    .first<{ id: number }>();
+  const provider = await catalogWrite(() =>
+    c.env.DB.prepare(
+      `INSERT INTO ai_providers (slug, display_name, enabled)
+       VALUES (?, ?, ?) RETURNING id`,
+    )
+      .bind(parsed.data.slug, parsed.data.displayName, parsed.data.enabled ? 1 : 0)
+      .first<{ id: number }>(),
+  );
+  if (provider === UNIQUE_CONFLICT) return err(c, '服务商标识已存在', 409);
   return ok(c, provider);
 });
 
@@ -220,20 +256,23 @@ adminAICatalogRoutes.post('/endpoints', async (c) => {
     .bind(parsed.data.providerId)
     .first<{ id: number }>();
   if (!provider) return err(c, '服务商不存在', 404);
-  const endpoint = await c.env.DB.prepare(
-    `INSERT INTO ai_provider_endpoints
-       (provider_id, capability, adapter_type, base_url, config_json, enabled)
-     VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
-  )
-    .bind(
-      parsed.data.providerId,
-      parsed.data.capability,
-      parsed.data.adapterType,
-      parsed.data.baseUrl,
-      JSON.stringify(parsed.data.config),
-      parsed.data.enabled ? 1 : 0,
+  const endpoint = await catalogWrite(() =>
+    c.env.DB.prepare(
+      `INSERT INTO ai_provider_endpoints
+         (provider_id, capability, adapter_type, base_url, config_json, enabled)
+       VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
     )
-    .first<{ id: number }>();
+      .bind(
+        parsed.data.providerId,
+        parsed.data.capability,
+        parsed.data.adapterType,
+        parsed.data.baseUrl,
+        JSON.stringify(parsed.data.config),
+        parsed.data.enabled ? 1 : 0,
+      )
+      .first<{ id: number }>(),
+  );
+  if (endpoint === UNIQUE_CONFLICT) return err(c, '相同能力的适配器端点已存在', 409);
   return ok(c, endpoint);
 });
 
@@ -245,26 +284,48 @@ adminAICatalogRoutes.put('/endpoints/:id', async (c) => {
   if (ADAPTER_CAPABILITY[parsed.data.adapterType] !== parsed.data.capability) {
     return err(c, '适配器能力与端点能力不匹配');
   }
+  const existing = await c.env.DB.prepare(
+    `SELECT e.capability, e.adapter_type,
+            EXISTS(SELECT 1 FROM ai_models m WHERE m.endpoint_id = e.id) AS has_models
+     FROM ai_provider_endpoints e WHERE e.id = ?`,
+  )
+    .bind(id)
+    .first<{
+      capability: AICapability;
+      adapter_type: keyof typeof ADAPTER_CAPABILITY;
+      has_models: number;
+    }>();
+  if (!existing) return err(c, '端点不存在', 404);
+  if (
+    existing.has_models === 1 &&
+    (existing.capability !== parsed.data.capability ||
+      existing.adapter_type !== parsed.data.adapterType)
+  ) {
+    return err(c, '已有模型的端点不能更改能力或适配器', 409);
+  }
   const provider = await c.env.DB.prepare('SELECT id FROM ai_providers WHERE id = ?')
     .bind(parsed.data.providerId)
     .first<{ id: number }>();
   if (!provider) return err(c, '服务商不存在', 404);
-  const endpoint = await c.env.DB.prepare(
-    `UPDATE ai_provider_endpoints
-     SET provider_id = ?, capability = ?, adapter_type = ?, base_url = ?,
-         config_json = ?, enabled = ?, updated_at = datetime('now')
-     WHERE id = ? RETURNING id`,
-  )
-    .bind(
-      parsed.data.providerId,
-      parsed.data.capability,
-      parsed.data.adapterType,
-      parsed.data.baseUrl,
-      JSON.stringify(parsed.data.config),
-      parsed.data.enabled ? 1 : 0,
-      id,
+  const endpoint = await catalogWrite(() =>
+    c.env.DB.prepare(
+      `UPDATE ai_provider_endpoints
+       SET provider_id = ?, capability = ?, adapter_type = ?, base_url = ?,
+           config_json = ?, enabled = ?, updated_at = datetime('now')
+       WHERE id = ? RETURNING id`,
     )
-    .first<{ id: number }>();
+      .bind(
+        parsed.data.providerId,
+        parsed.data.capability,
+        parsed.data.adapterType,
+        parsed.data.baseUrl,
+        JSON.stringify(parsed.data.config),
+        parsed.data.enabled ? 1 : 0,
+        id,
+      )
+      .first<{ id: number }>(),
+  );
+  if (endpoint === UNIQUE_CONFLICT) return err(c, '相同能力的适配器端点已存在', 409);
   if (!endpoint) return err(c, '端点不存在', 404);
   return ok(c, endpoint);
 });
@@ -274,24 +335,31 @@ adminAICatalogRoutes.post('/models', async (c) => {
   if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
   const capability = await endpointCapability(c.env.DB, parsed.data.endpointId);
   if (!capability) return err(c, '端点不存在', 404);
-  const model = await c.env.DB.prepare(
-    `INSERT INTO ai_models
-       (endpoint_id, capability, model_id, display_name, config_json, voices_json,
-        recommended, enabled, sort_order)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-  )
-    .bind(
-      parsed.data.endpointId,
-      capability,
-      parsed.data.modelId,
-      parsed.data.displayName,
-      JSON.stringify(parsed.data.config),
-      JSON.stringify(parsed.data.voices),
-      parsed.data.recommended ? 1 : 0,
-      parsed.data.enabled ? 1 : 0,
-      parsed.data.sortOrder,
+  const validatedConfig = validateModelConfig(capability, parsed.data.config);
+  if (!validatedConfig.success) {
+    return err(c, validatedConfig.error.issues[0]?.message ?? '模型配置不合法');
+  }
+  const model = await catalogWrite(() =>
+    c.env.DB.prepare(
+      `INSERT INTO ai_models
+         (endpoint_id, capability, model_id, display_name, config_json, voices_json,
+          recommended, enabled, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
     )
-    .first<{ id: number }>();
+      .bind(
+        parsed.data.endpointId,
+        capability,
+        parsed.data.modelId,
+        parsed.data.displayName,
+        JSON.stringify(validatedConfig.data),
+        JSON.stringify(parsed.data.voices),
+        parsed.data.recommended ? 1 : 0,
+        parsed.data.enabled ? 1 : 0,
+        parsed.data.sortOrder,
+      )
+      .first<{ id: number }>(),
+  );
+  if (model === UNIQUE_CONFLICT) return err(c, '端点中已存在相同模型 ID', 409);
   return ok(c, model);
 });
 
@@ -302,26 +370,33 @@ adminAICatalogRoutes.put('/models/:id', async (c) => {
   if (!parsed.success) return err(c, parsed.error.issues[0]?.message ?? '输入不合法');
   const capability = await endpointCapability(c.env.DB, parsed.data.endpointId);
   if (!capability) return err(c, '端点不存在', 404);
-  const model = await c.env.DB.prepare(
-    `UPDATE ai_models
-     SET endpoint_id = ?, capability = ?, model_id = ?, display_name = ?,
-         config_json = ?, voices_json = ?, recommended = ?, enabled = ?, sort_order = ?,
-         updated_at = datetime('now')
-     WHERE id = ? RETURNING id`,
-  )
-    .bind(
-      parsed.data.endpointId,
-      capability,
-      parsed.data.modelId,
-      parsed.data.displayName,
-      JSON.stringify(parsed.data.config),
-      JSON.stringify(parsed.data.voices),
-      parsed.data.recommended ? 1 : 0,
-      parsed.data.enabled ? 1 : 0,
-      parsed.data.sortOrder,
-      id,
+  const validatedConfig = validateModelConfig(capability, parsed.data.config);
+  if (!validatedConfig.success) {
+    return err(c, validatedConfig.error.issues[0]?.message ?? '模型配置不合法');
+  }
+  const model = await catalogWrite(() =>
+    c.env.DB.prepare(
+      `UPDATE ai_models
+       SET endpoint_id = ?, capability = ?, model_id = ?, display_name = ?,
+           config_json = ?, voices_json = ?, recommended = ?, enabled = ?, sort_order = ?,
+           updated_at = datetime('now')
+       WHERE id = ? RETURNING id`,
     )
-    .first<{ id: number }>();
+      .bind(
+        parsed.data.endpointId,
+        capability,
+        parsed.data.modelId,
+        parsed.data.displayName,
+        JSON.stringify(validatedConfig.data),
+        JSON.stringify(parsed.data.voices),
+        parsed.data.recommended ? 1 : 0,
+        parsed.data.enabled ? 1 : 0,
+        parsed.data.sortOrder,
+        id,
+      )
+      .first<{ id: number }>(),
+  );
+  if (model === UNIQUE_CONFLICT) return err(c, '端点中已存在相同模型 ID', 409);
   if (!model) return err(c, '模型不存在', 404);
   return ok(c, model);
 });

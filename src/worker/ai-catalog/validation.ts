@@ -1,5 +1,63 @@
 import { z } from 'zod';
 
+const speechModelConfigSchema = z
+  .object({
+    format: z.enum(['mp3', 'wav', 'pcm', 'opus', 'aac']).optional(),
+    sampleRate: z.union([
+      z.literal(8000),
+      z.literal(16000),
+      z.literal(22050),
+      z.literal(24000),
+      z.literal(44100),
+      z.literal(48000),
+    ]).optional(),
+  })
+  .strict();
+
+const imageModelConfigSchema = z
+  .object({
+    size: z.enum(['512*512', '768*768', '1024*1024', '1280*720', '720*1280']).optional(),
+  })
+  .strict();
+
+const textModelConfigSchema = z.object({}).strict();
+
+const modelConfigByCapability = {
+  structured_text: textModelConfigSchema,
+  speech_synthesis: speechModelConfigSchema,
+  image_generation: imageModelConfigSchema,
+} as const;
+
+export const adminModelConfigSchema = z.union([
+  speechModelConfigSchema,
+  imageModelConfigSchema,
+  textModelConfigSchema,
+]);
+
+export function validateModelConfig(
+  capability: keyof typeof modelConfigByCapability,
+  config: unknown,
+) {
+  return modelConfigByCapability[capability].safeParse(config);
+}
+
+export function projectPublicModelConfig(
+  capability: keyof typeof modelConfigByCapability,
+  config: Record<string, unknown>,
+): Record<string, unknown> {
+  const candidate =
+    capability === 'speech_synthesis'
+      ? { format: config.format, sampleRate: config.sampleRate }
+      : capability === 'image_generation'
+        ? { size: config.size }
+        : {};
+  const withoutUndefined = Object.fromEntries(
+    Object.entries(candidate).filter((entry) => entry[1] !== undefined),
+  );
+  const parsed = modelConfigByCapability[capability].safeParse(withoutUndefined);
+  return parsed.success ? parsed.data : {};
+}
+
 export const credentialPatchSchema = z
   .object({
     apiKey: z.string().trim().min(1).max(500).nullable(),
