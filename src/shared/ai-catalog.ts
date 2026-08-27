@@ -15,6 +15,7 @@ export interface AIVoiceOption {
 export interface AIModelOption {
   id: number;
   endpointId: number;
+  allowCustomModelId: boolean;
   capability: AICapability;
   modelId: string;
   displayName: string;

@@ -13,6 +13,7 @@ import {
   resolvePreference,
   saveUserModelPreferences,
 } from '../../src/worker/ai-catalog/repository';
+import { UserFacingError } from '../../src/worker/lib/errors';
 import { saveUserAISettings } from '../../src/worker/lib/user-ai-settings';
 
 async function insertUser(id: number, email: string): Promise<void> {
@@ -31,6 +32,73 @@ async function providerIdBySlug(slug: string): Promise<number> {
 
 async function seededProviderId(): Promise<number> {
   return providerIdBySlug('bailian-token-plan');
+}
+
+interface StoredCredential {
+  key_ciphertext: string;
+  key_iv: string;
+  key_tail: string;
+}
+
+async function storedCredential(userId: number, providerId: number): Promise<StoredCredential> {
+  const row = await env.DB.prepare(
+    `SELECT key_ciphertext, key_iv, key_tail
+     FROM user_ai_credentials WHERE user_id = ? AND provider_id = ?`,
+  )
+    .bind(userId, providerId)
+    .first<StoredCredential>();
+  if (!row) throw new Error('missing stored test credential');
+  return row;
+}
+
+function mutateBase64(value: string, byteIndex: number): string {
+  const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+  const resolvedIndex = byteIndex < 0 ? bytes.length + byteIndex : byteIndex;
+  bytes[resolvedIndex] = (bytes[resolvedIndex] ?? 0) ^ 1;
+  return btoa(String.fromCharCode(...bytes));
+}
+
+async function captureCredentialFailure(
+  userId: number,
+  providerId: number,
+): Promise<string> {
+  let caught: unknown;
+  try {
+    await resolveCredential(env.DB, env, userId, providerId);
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(UserFacingError);
+  return caught instanceof Error ? `${caught.name}: ${caught.message}` : String(caught);
+}
+
+async function expectCredentialCorruptionFailsClosed(
+  column: 'key_ciphertext' | 'key_iv',
+  mutate: (stored: StoredCredential) => string,
+): Promise<void> {
+  await insertUser(1, 'integrity@example.com');
+  const providerId = await seededProviderId();
+  const fakeKey = 'test-only-integrity-value';
+  await saveCredential(env.DB, env, 1, providerId, fakeKey);
+  await saveUserModelPreferences(
+    env.DB,
+    1,
+    await seededPreferences({ teacherVoice: 'longanlingxin' }),
+  );
+  const stored = await storedCredential(1, providerId);
+  await env.DB.prepare(
+    `UPDATE user_ai_credentials SET ${column} = ? WHERE user_id = ? AND provider_id = ?`,
+  )
+    .bind(mutate(stored), 1, providerId)
+    .run();
+
+  const settings = await getUserCoursewareAISettings(env.DB, env, 1);
+  expect(settings.readiness.text).toBe('invalid_credential');
+  const renderedError = await captureCredentialFailure(1, providerId);
+  expect(renderedError.includes(fakeKey)).toBe(false);
+  expect(renderedError.includes(stored.key_ciphertext)).toBe(false);
+  expect(renderedError.includes('OperationError')).toBe(false);
+  expect(renderedError.toLowerCase().includes('decrypt')).toBe(false);
 }
 
 async function seededPreferences(
@@ -108,6 +176,123 @@ describe('courseware AI credentials', () => {
     expect(await resolveCredential(env.DB, env, 1, providerId)).toBe('');
   });
 
+  it('fails readiness closed when the encryption master key is unavailable', async () => {
+    await insertUser(1, 'missing-master@example.com');
+    const providerId = await seededProviderId();
+    await saveCredential(env.DB, env, 1, providerId, 'test-only-missing-master');
+    await saveUserModelPreferences(
+      env.DB,
+      1,
+      await seededPreferences({ teacherVoice: 'longanlingxin' }),
+    );
+
+    const settings = await getUserCoursewareAISettings(
+      env.DB,
+      { ...env, AI_SETTINGS_ENCRYPTION_KEY: undefined },
+      1,
+    );
+    expect(settings.readiness).toEqual({
+      text: 'invalid_credential',
+      teacherSpeech: 'invalid_credential',
+      studentSpeech: 'invalid_credential',
+      image: 'invalid_credential',
+    });
+  });
+
+  it('fails readiness and resolution closed for corrupted ciphertext payload', async () => {
+    await expectCredentialCorruptionFailsClosed('key_ciphertext', (stored) =>
+      mutateBase64(stored.key_ciphertext, 0),
+    );
+  });
+
+  it('fails readiness and resolution closed for a corrupted IV', async () => {
+    await expectCredentialCorruptionFailsClosed('key_iv', (stored) =>
+      mutateBase64(stored.key_iv, 0),
+    );
+  });
+
+  it('fails readiness and resolution closed for a corrupted authentication tag', async () => {
+    await expectCredentialCorruptionFailsClosed('key_ciphertext', (stored) =>
+      mutateBase64(stored.key_ciphertext, -1),
+    );
+  });
+
+  it('rejects ciphertext moved to another user without leaking sensitive details', async () => {
+    await insertUser(1, 'source@example.com');
+    await insertUser(2, 'target@example.com');
+    const providerId = await seededProviderId();
+    const fakeKey = 'test-only-user-bound';
+    await saveCredential(env.DB, env, 1, providerId, fakeKey);
+    const stored = await storedCredential(1, providerId);
+    await env.DB.prepare(
+      `INSERT INTO user_ai_credentials
+       (user_id, provider_id, key_ciphertext, key_iv, key_tail)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+      .bind(2, providerId, stored.key_ciphertext, stored.key_iv, stored.key_tail)
+      .run();
+
+    await saveUserModelPreferences(
+      env.DB,
+      2,
+      await seededPreferences({ teacherVoice: 'longanlingxin' }),
+    );
+    const settings = await getUserCoursewareAISettings(env.DB, env, 2);
+    expect(settings.readiness.text).toBe('invalid_credential');
+
+    const renderedError = await captureCredentialFailure(2, providerId);
+    expect(renderedError.includes(fakeKey)).toBe(false);
+    expect(renderedError.includes(stored.key_ciphertext)).toBe(false);
+    expect(renderedError.includes('OperationError')).toBe(false);
+    expect(renderedError.toLowerCase().includes('decrypt')).toBe(false);
+  });
+
+  it('rejects ciphertext moved to another provider without leaking sensitive details', async () => {
+    await insertUser(1, 'provider-bound@example.com');
+    const sourceProviderId = await seededProviderId();
+    const targetProviderId = await providerIdBySlug('deepseek');
+    const fakeKey = 'test-only-provider-bound';
+    await saveCredential(env.DB, env, 1, sourceProviderId, fakeKey);
+    const stored = await storedCredential(1, sourceProviderId);
+    await env.DB.prepare(
+      `INSERT INTO user_ai_credentials
+       (user_id, provider_id, key_ciphertext, key_iv, key_tail)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+      .bind(1, targetProviderId, stored.key_ciphertext, stored.key_iv, stored.key_tail)
+      .run();
+
+    const deepseekModel = await env.DB.prepare(
+      `SELECT m.id AS model_catalog_id, m.endpoint_id
+       FROM ai_models m
+       JOIN ai_provider_endpoints e ON e.id = m.endpoint_id
+       WHERE e.provider_id = ? AND m.model_id = 'deepseek-chat'`,
+    )
+      .bind(targetProviderId)
+      .first<{ model_catalog_id: number; endpoint_id: number }>();
+    if (!deepseekModel) throw new Error('missing seeded DeepSeek model');
+    await saveUserModelPreferences(env.DB, 1, {
+      preferences: [
+        {
+          purpose: 'courseware_text',
+          endpointId: deepseekModel.endpoint_id,
+          modelCatalogId: deepseekModel.model_catalog_id,
+          customModelId: '',
+          voiceId: '',
+          params: {},
+        },
+      ],
+    });
+    const settings = await getUserCoursewareAISettings(env.DB, env, 1);
+    expect(settings.readiness.text).toBe('invalid_credential');
+
+    const renderedError = await captureCredentialFailure(1, targetProviderId);
+    expect(renderedError.includes(fakeKey)).toBe(false);
+    expect(renderedError.includes(stored.key_ciphertext)).toBe(false);
+    expect(renderedError.includes('OperationError')).toBe(false);
+    expect(renderedError.toLowerCase().includes('decrypt')).toBe(false);
+  });
+
   it('reuses only the existing personal DeepSeek key for the DeepSeek catalog provider', async () => {
     await insertUser(1, 'a@example.com');
     const fakeKey = 'test-only-personal-deepseek';
@@ -178,14 +363,25 @@ describe('courseware AI credentials', () => {
 });
 
 describe('courseware AI catalog and preferences', () => {
-  it('returns the enabled public catalog without Base URLs', async () => {
+  it('returns only safe public endpoint metadata without Base URLs or internal endpoint config', async () => {
     const catalog = await getPublicCatalog(env.DB);
     expect(catalog.map((provider) => provider.slug)).toEqual(
       expect.arrayContaining(['bailian-token-plan', 'deepseek']),
     );
     expect(catalog.flatMap((provider) => provider.models).length).toBeGreaterThan(0);
+    const qwenText = catalog
+      .flatMap((provider) => provider.models)
+      .find((model) => model.modelId === 'qwen3.7-plus');
+    const tts = catalog
+      .flatMap((provider) => provider.models)
+      .find((model) => model.capability === 'speech_synthesis');
+    expect(qwenText).toMatchObject({ allowCustomModelId: true });
+    expect(tts).toMatchObject({ allowCustomModelId: false });
     expect(JSON.stringify(catalog)).not.toContain('baseUrl');
     expect(JSON.stringify(catalog)).not.toContain('https://');
+    expect(JSON.stringify(catalog)).not.toContain('mediaHostSuffixes');
+    expect(JSON.stringify(catalog)).not.toContain('sampleRates');
+    expect(JSON.stringify(catalog)).not.toContain('"formats"');
   });
 
   it('rejects a voice that is absent from the selected model catalog entry', async () => {
@@ -276,6 +472,141 @@ describe('courseware AI catalog and preferences', () => {
     } finally {
       await env.DB.prepare('UPDATE ai_provider_endpoints SET config_json = ? WHERE id = ?')
         .bind(original.config_json, endpointId)
+        .run();
+    }
+  });
+
+  it('invalidates a saved speech preference when its voice is removed from the catalog', async () => {
+    await insertUser(1, 'voice-drift@example.com');
+    const providerId = await seededProviderId();
+    await saveCredential(env.DB, env, 1, providerId, 'test-only-voice-drift');
+    const input = await seededPreferences({ teacherVoice: 'longanlingxin' });
+    await saveUserModelPreferences(env.DB, 1, input);
+    const teacher = input.preferences.find((item) => item.purpose === 'teacher_tts')!;
+    const original = await env.DB.prepare('SELECT voices_json FROM ai_models WHERE id = ?')
+      .bind(teacher.modelCatalogId)
+      .first<{ voices_json: string }>();
+    if (!original) throw new Error('missing seeded speech model');
+
+    try {
+      await env.DB.prepare(
+        `UPDATE ai_models SET voices_json =
+         '[{"id":"longanlufeng","name":"student-test-voice"}]' WHERE id = ?`,
+      )
+        .bind(teacher.modelCatalogId)
+        .run();
+      expect(await resolvePreference(env.DB, 1, 'teacher_tts')).toBeNull();
+      const settings = await getUserCoursewareAISettings(env.DB, env, 1);
+      expect(settings.readiness.teacherSpeech).toBe('unconfigured');
+      expect(settings.readiness.studentSpeech).toBe('ready');
+    } finally {
+      await env.DB.prepare('UPDATE ai_models SET voices_json = ? WHERE id = ?')
+        .bind(original.voices_json, teacher.modelCatalogId)
+        .run();
+    }
+  });
+
+  it('invalidates saved params when the catalog declaration is tightened', async () => {
+    await insertUser(1, 'param-drift@example.com');
+    const providerId = await seededProviderId();
+    await saveCredential(env.DB, env, 1, providerId, 'test-only-param-drift');
+    const input = await seededPreferences({ teacherVoice: 'longanlingxin' });
+    input.preferences = [input.preferences.find((item) => item.purpose === 'courseware_text')!];
+    input.preferences[0]!.params = { temperature: 0.5 };
+    const endpointId = input.preferences[0]!.endpointId;
+    const original = await env.DB.prepare(
+      'SELECT config_json FROM ai_provider_endpoints WHERE id = ?',
+    )
+      .bind(endpointId)
+      .first<{ config_json: string }>();
+    if (!original) throw new Error('missing seeded text endpoint');
+
+    try {
+      await env.DB.prepare(
+        `UPDATE ai_provider_endpoints SET config_json = json_set(
+           config_json, '$.allowedUserParams.temperature',
+           json('{"type":"number","minimum":0,"maximum":1}')
+         ) WHERE id = ?`,
+      )
+        .bind(endpointId)
+        .run();
+      await saveUserModelPreferences(env.DB, 1, input);
+      await env.DB.prepare(
+        `UPDATE ai_provider_endpoints SET config_json = json_set(
+           config_json, '$.allowedUserParams.temperature.maximum', 0.1
+         ) WHERE id = ?`,
+      )
+        .bind(endpointId)
+        .run();
+
+      expect(await resolvePreference(env.DB, 1, 'courseware_text')).toBeNull();
+      const settings = await getUserCoursewareAISettings(env.DB, env, 1);
+      expect(settings.readiness.text).toBe('unconfigured');
+    } finally {
+      await env.DB.prepare('UPDATE ai_provider_endpoints SET config_json = ? WHERE id = ?')
+        .bind(original.config_json, endpointId)
+        .run();
+    }
+  });
+
+  it('invalidates a saved custom model when the endpoint revokes custom IDs', async () => {
+    await insertUser(1, 'custom-drift@example.com');
+    const providerId = await seededProviderId();
+    await saveCredential(env.DB, env, 1, providerId, 'test-only-custom-drift');
+    const input = await seededPreferences({ teacherVoice: 'longanlingxin' });
+    const text = input.preferences.find((item) => item.purpose === 'courseware_text')!;
+    text.modelCatalogId = null;
+    text.customModelId = 'vendor/custom-model';
+    input.preferences = [text];
+    await saveUserModelPreferences(env.DB, 1, input);
+    const original = await env.DB.prepare(
+      'SELECT config_json FROM ai_provider_endpoints WHERE id = ?',
+    )
+      .bind(text.endpointId)
+      .first<{ config_json: string }>();
+    if (!original) throw new Error('missing seeded custom-model endpoint');
+
+    try {
+      await env.DB.prepare(
+        `UPDATE ai_provider_endpoints
+         SET config_json = json_set(config_json, '$.allowCustomModelId', json('false'))
+         WHERE id = ?`,
+      )
+        .bind(text.endpointId)
+        .run();
+      expect(await resolvePreference(env.DB, 1, 'courseware_text')).toBeNull();
+      const settings = await getUserCoursewareAISettings(env.DB, env, 1);
+      expect(settings.readiness.text).toBe('unconfigured');
+    } finally {
+      await env.DB.prepare('UPDATE ai_provider_endpoints SET config_json = ? WHERE id = ?')
+        .bind(original.config_json, text.endpointId)
+        .run();
+    }
+  });
+
+  it('keeps readiness invalid when a saved endpoint capability changes', async () => {
+    await insertUser(1, 'capability-drift@example.com');
+    const providerId = await seededProviderId();
+    await saveCredential(env.DB, env, 1, providerId, 'test-only-capability-drift');
+    const input = await seededPreferences({ teacherVoice: 'longanlingxin' });
+    input.preferences = [input.preferences.find((item) => item.purpose === 'courseware_text')!];
+    await saveUserModelPreferences(env.DB, 1, input);
+    const endpointId = input.preferences[0]!.endpointId;
+
+    try {
+      await env.DB.prepare(
+        "UPDATE ai_provider_endpoints SET capability = 'image_generation' WHERE id = ?",
+      )
+        .bind(endpointId)
+        .run();
+      expect(await resolvePreference(env.DB, 1, 'courseware_text')).toBeNull();
+      const settings = await getUserCoursewareAISettings(env.DB, env, 1);
+      expect(settings.readiness.text).toBe('unconfigured');
+    } finally {
+      await env.DB.prepare(
+        "UPDATE ai_provider_endpoints SET capability = 'structured_text' WHERE id = ?",
+      )
+        .bind(endpointId)
         .run();
     }
   });

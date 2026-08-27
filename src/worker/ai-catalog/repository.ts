@@ -9,6 +9,7 @@ import type {
 } from '../../shared/ai-catalog';
 import type { Env } from '../env';
 import { UserFacingError } from '../lib/errors';
+import { resolveCredential } from './credentials';
 import { preferenceListSchema } from './validation';
 
 type AdapterType = 'openai_text' | 'token_plan_tts' | 'token_plan_image';
@@ -34,6 +35,7 @@ interface CatalogRow {
   provider_slug: string;
   provider_display_name: string;
   endpoint_id: number;
+  endpoint_config_json: string;
   capability: AICapability;
   model_id: number;
   external_model_id: string;
@@ -205,7 +207,7 @@ export async function getPublicCatalog(db: D1Database): Promise<AIProviderCatalo
     .prepare(
       `SELECT p.id AS provider_id, p.slug AS provider_slug,
               p.display_name AS provider_display_name,
-              e.id AS endpoint_id, e.capability,
+              e.id AS endpoint_id, e.config_json AS endpoint_config_json, e.capability,
               m.id AS model_id, m.model_id AS external_model_id,
               m.display_name AS model_display_name,
               m.config_json AS model_config_json, m.voices_json,
@@ -235,6 +237,7 @@ export async function getPublicCatalog(db: D1Database): Promise<AIProviderCatalo
     const model: AIModelOption = {
       id: row.model_id,
       endpointId: row.endpoint_id,
+      allowCustomModelId: parseObject(row.endpoint_config_json).allowCustomModelId === true,
       capability: row.capability,
       modelId: row.external_model_id,
       displayName: row.model_display_name,
@@ -409,6 +412,21 @@ export async function resolvePreference(
     }>();
   if (!row || row.capability !== PURPOSE_CAPABILITY[purpose]) return null;
 
+  const preference: CoursewareModelPreference = {
+    purpose: row.purpose,
+    endpointId: row.endpoint_id,
+    modelCatalogId: row.model_catalog_id,
+    customModelId: row.custom_model_id,
+    voiceId: row.voice_id,
+    params: parseObject(row.params_json),
+  };
+  try {
+    await validatePreferences(db, [preference]);
+  } catch (error) {
+    if (error instanceof UserFacingError) return null;
+    throw error;
+  }
+
   return {
     purpose: row.purpose,
     providerId: row.provider_id,
@@ -421,17 +439,22 @@ export async function resolvePreference(
     voiceId: row.voice_id,
     endpointConfig: parseObject(row.endpoint_config_json),
     modelConfig: parseObject(row.model_config_json),
-    params: parseObject(row.params_json),
+    params: preference.params,
   };
 }
 
 function readinessFor(
   preference: PreferenceRow | undefined,
   providers: Map<number, CoursewareAISettings['providers'][number]>,
+  resolvedPurposes: ReadonlySet<CoursewareModelPurpose>,
+  credentialIntegrity: ReadonlyMap<number, 'missing' | 'valid' | 'invalid'>,
 ): 'ready' | 'unconfigured' | 'invalid_credential' | 'quota_exhausted' {
-  if (!preference?.provider_id) return 'unconfigured';
+  if (!preference?.provider_id || !resolvedPurposes.has(preference.purpose)) return 'unconfigured';
   const provider = providers.get(preference.provider_id);
   if (!provider?.keySet) return 'unconfigured';
+  const integrity = credentialIntegrity.get(preference.provider_id);
+  if (integrity === 'invalid') return 'invalid_credential';
+  if (integrity !== 'valid') return 'unconfigured';
   if (provider.healthStatus === 'invalid') return 'invalid_credential';
   if (provider.healthStatus === 'quota_exhausted') return 'quota_exhausted';
   return 'ready';
@@ -439,7 +462,7 @@ function readinessFor(
 
 export async function getUserCoursewareAISettings(
   db: D1Database,
-  _env: Env,
+  env: Env,
   userId: number,
 ): Promise<CoursewareAISettings> {
   const [providerResult, preferenceResult, featureRow] = await Promise.all([
@@ -511,6 +534,34 @@ export async function getUserCoursewareAISettings(
   const preferenceByPurpose = new Map(
     preferenceResult.results.map((preference) => [preference.purpose, preference]),
   );
+  const [credentialChecks, preferenceChecks] = await Promise.all([
+    Promise.all(
+      providers.map(async (provider) => {
+        if (!provider.keySet) return [provider.providerId, 'missing'] as const;
+        try {
+          const resolved = await resolveCredential(db, env, userId, provider.providerId);
+          return [provider.providerId, resolved ? 'valid' : 'missing'] as const;
+        } catch {
+          return [provider.providerId, 'invalid'] as const;
+        }
+      }),
+    ),
+    Promise.all(
+      preferenceResult.results.map(
+        async (preference) =>
+          [
+            preference.purpose,
+            await resolvePreference(db, userId, preference.purpose),
+          ] as const,
+      ),
+    ),
+  ]);
+  const credentialIntegrity = new Map(credentialChecks);
+  const resolvedPurposes = new Set(
+    preferenceChecks
+      .filter((entry) => entry[1] !== null)
+      .map(([purpose]) => purpose),
+  );
   const imagePreference = preferenceByPurpose.get('courseware_image');
 
   return {
@@ -525,10 +576,27 @@ export async function getUserCoursewareAISettings(
       params: parseObject(preference.params_json),
     })),
     readiness: {
-      text: readinessFor(preferenceByPurpose.get('courseware_text'), providerMap),
-      teacherSpeech: readinessFor(preferenceByPurpose.get('teacher_tts'), providerMap),
-      studentSpeech: readinessFor(preferenceByPurpose.get('student_tts'), providerMap),
-      image: imagePreference ? readinessFor(imagePreference, providerMap) : 'disabled',
+      text: readinessFor(
+        preferenceByPurpose.get('courseware_text'),
+        providerMap,
+        resolvedPurposes,
+        credentialIntegrity,
+      ),
+      teacherSpeech: readinessFor(
+        preferenceByPurpose.get('teacher_tts'),
+        providerMap,
+        resolvedPurposes,
+        credentialIntegrity,
+      ),
+      studentSpeech: readinessFor(
+        preferenceByPurpose.get('student_tts'),
+        providerMap,
+        resolvedPurposes,
+        credentialIntegrity,
+      ),
+      image: imagePreference
+        ? readinessFor(imagePreference, providerMap, resolvedPurposes, credentialIntegrity)
+        : 'disabled',
     },
   };
 }
