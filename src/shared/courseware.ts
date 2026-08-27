@@ -78,6 +78,7 @@ export interface CoursewareDetail extends CoursewareSummary {
   estimatedMinutes: number;
   currentSegmentPosition: number;
   currentTimeMs: number;
+  progressRevision: number;
   checkpointAnswers: Record<string, number | 'skipped'>;
   assessmentConversationId: number | null;
   segments: Array<CoursewareScriptSegment & {
@@ -90,8 +91,12 @@ export interface CoursewareDetail extends CoursewareSummary {
   }>;
 }
 
-export interface CoursewareProgressPatch {
+export interface CoursewareProgressSnapshot {
   currentSegmentPosition: number;
   currentTimeMs: number;
   checkpointAnswers: Record<string, number | 'skipped'>;
+}
+
+export interface CoursewareProgressPatch extends CoursewareProgressSnapshot {
+  revision: number;
 }

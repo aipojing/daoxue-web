@@ -1,12 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import type { CoursewareProgressPatch } from '../src/shared/courseware';
+import type { CoursewareProgressPatch, CoursewareProgressSnapshot } from '../src/shared/courseware';
 import {
   initialPlayerState,
   isTerminalCoursewareLoadStatus,
   playerReducer,
   progressPatch,
   CoursewareProgressWriter,
+  CoursewareProgressRevisionClock,
   type CoursewarePlayerInput,
   type CoursewarePlayerState,
 } from '../src/client/lib/courseware-player';
@@ -99,15 +100,46 @@ describe('courseware player state', () => {
 });
 
 describe('courseware progress writer', () => {
+  it('assigns a higher revision to a final snapshot than an in-flight ordinary save', () => {
+    const normalCalls: Array<CoursewareProgressPatch & { revision: number }> = [];
+    const finalCalls: Array<CoursewareProgressPatch & { revision: number }> = [];
+    const writer = new CoursewareProgressWriter(
+      new CoursewareProgressRevisionClock(40),
+      async (patch) => { normalCalls.push(patch as CoursewareProgressPatch & { revision: number }); },
+      async (patch) => { finalCalls.push(patch as CoursewareProgressPatch & { revision: number }); },
+    );
+
+    writer.enqueue({ currentSegmentPosition: 0, currentTimeMs: 1_000, checkpointAnswers: {} });
+    writer.flushFinal({ currentSegmentPosition: 2, currentTimeMs: 8_000, checkpointAnswers: {} });
+
+    expect(normalCalls[0]?.revision).toBe(41);
+    expect(finalCalls[0]?.revision).toBe(42);
+  });
+
+  it('shares one revision clock across effect lifecycle replacements', () => {
+    const calls: CoursewareProgressPatch[] = [];
+    const clock = new CoursewareProgressRevisionClock(7);
+    const snapshot = { currentSegmentPosition: 1, currentTimeMs: 2_000, checkpointAnswers: {} };
+    const firstWriter = new CoursewareProgressWriter(clock, async (patch) => { calls.push(patch); });
+    firstWriter.dispose(snapshot);
+    const replacementWriter = new CoursewareProgressWriter(clock, async (patch) => { calls.push(patch); });
+    replacementWriter.enqueue(snapshot);
+
+    expect(calls.map((patch) => patch.revision)).toEqual([8, 9]);
+  });
+
   it('serializes requests and collapses queued writes to the newest complete snapshot', async () => {
     const calls: CoursewareProgressPatch[] = [];
     let releaseFirst: (() => void) | undefined;
     const firstPending = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    const writer = new CoursewareProgressWriter(async (patch) => {
-      calls.push(patch);
-      if (calls.length === 1) await firstPending;
-    });
-    const patchAt = (position: number): CoursewareProgressPatch => ({
+    const writer = new CoursewareProgressWriter(
+      new CoursewareProgressRevisionClock(0),
+      async (patch) => {
+        calls.push(patch);
+        if (calls.length === 1) await firstPending;
+      },
+    );
+    const patchAt = (position: number): CoursewareProgressSnapshot => ({
       currentSegmentPosition: position,
       currentTimeMs: position * 1_000,
       checkpointAnswers: position > 1 ? { s1: 0 } : {},
@@ -129,6 +161,7 @@ describe('courseware progress writer', () => {
     let releaseNormal: (() => void) | undefined;
     const pendingNormal = new Promise<void>((resolve) => { releaseNormal = resolve; });
     const writer = new CoursewareProgressWriter(
+      new CoursewareProgressRevisionClock(0),
       async (patch) => { normalCalls.push(patch); await pendingNormal; },
       async (patch) => { finalCalls.push(patch); },
     );
@@ -138,8 +171,8 @@ describe('courseware progress writer', () => {
     writer.enqueue(first);
     writer.flushFinal(latest);
     writer.flushFinal(latest);
-    expect(normalCalls).toEqual([first]);
-    expect(finalCalls).toEqual([latest]);
+    expect(normalCalls).toEqual([{ ...first, revision: 1 }]);
+    expect(finalCalls).toEqual([{ ...latest, revision: 2 }]);
     releaseNormal?.();
   });
 
@@ -147,13 +180,14 @@ describe('courseware progress writer', () => {
     const normalCalls: CoursewareProgressPatch[] = [];
     const finalCalls: CoursewareProgressPatch[] = [];
     const writer = new CoursewareProgressWriter(
+      new CoursewareProgressRevisionClock(0),
       async (patch) => { normalCalls.push(patch); },
       async (patch) => { finalCalls.push(patch); },
     );
     const finalPatch = { currentSegmentPosition: 3, currentTimeMs: 4_000, checkpointAnswers: { s2: 'skipped' as const } };
     writer.dispose(finalPatch);
     writer.enqueue({ currentSegmentPosition: 0, currentTimeMs: 0, checkpointAnswers: {} });
-    expect(finalCalls).toEqual([finalPatch]);
+    expect(finalCalls).toEqual([{ ...finalPatch, revision: 1 }]);
     expect(normalCalls).toEqual([]);
   });
 });

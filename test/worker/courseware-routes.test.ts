@@ -418,12 +418,40 @@ describe('courseware routes', () => {
     ).bind(coursewareId).run();
     const before = await env.DB.prepare('SELECT COUNT(*) AS count FROM knowledge_points').first<{ count: number }>();
     const response = await api(`/api/coursewares/${coursewareId}/progress`, {
-      method: 'PATCH', body: JSON.stringify({ currentSegmentPosition: 0, currentTimeMs: 900, checkpointAnswers: { 'check-1': 1 } }),
+      method: 'PATCH', body: JSON.stringify({ revision: 1, currentSegmentPosition: 0, currentTimeMs: 900, checkpointAnswers: { 'check-1': 1 } }),
     }, account.cookie);
     expect(response.status).toBe(200);
     const after = await env.DB.prepare('SELECT COUNT(*) AS count FROM knowledge_points').first<{ count: number }>();
     expect(after?.count).toBe(before?.count);
     expect((await json<{ currentTimeMs: number }>(response)).data?.currentTimeMs).toBe(900);
+  });
+
+  it('rejects an older progress revision that arrives after a newer final snapshot', async () => {
+    const account = await register('progress-order@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId);
+    await env.DB.prepare(
+      `INSERT INTO courseware_segments
+       (courseware_id, position, segment_key, kind, speaker, title, display_markdown, speech_text, audio_status)
+       VALUES (?, 0, 'intro', 'teacher_intro', 'teacher', '开始', '内容', '内容', 'ready'),
+              (?, 1, 'summary', 'summary', 'teacher', '总结', '总结', '总结', 'ready')`,
+    ).bind(coursewareId, coursewareId).run();
+
+    const newest = await api(`/api/coursewares/${coursewareId}/progress`, {
+      method: 'PATCH',
+      body: JSON.stringify({ revision: 2, currentSegmentPosition: 1, currentTimeMs: 8_000, checkpointAnswers: {} }),
+    }, account.cookie);
+    expect(newest.status).toBe(200);
+
+    const delayedOlder = await api(`/api/coursewares/${coursewareId}/progress`, {
+      method: 'PATCH',
+      body: JSON.stringify({ revision: 1, currentSegmentPosition: 0, currentTimeMs: 1_000, checkpointAnswers: {} }),
+    }, account.cookie);
+    expect(delayedOlder.status).toBe(409);
+
+    const progress = await api(`/api/coursewares/${coursewareId}/progress`, {}, account.cookie);
+    expect(await json<{ revision: number; currentSegmentPosition: number; currentTimeMs: number }>(progress))
+      .toMatchObject({ data: { revision: 2, currentSegmentPosition: 1, currentTimeMs: 8_000 } });
   });
 
   it('serves owned audio with content type, accept-ranges, and a valid 206 range response', async () => {

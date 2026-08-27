@@ -3,6 +3,7 @@ import type { CoursewareDetail, CoursewareProgressPatch } from '../../shared/cou
 import { apiPatch, ApiError } from '../api';
 import {
   CoursewareProgressWriter,
+  CoursewareProgressRevisionClock,
   initialPlayerState,
   playerReducer,
   progressPatch,
@@ -28,6 +29,7 @@ export default function CoursewarePlayer({ courseware }: Props) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const writerRef = useRef<CoursewareProgressWriter | null>(null);
   const writerSessionRef = useRef(0);
+  const revisionClockRef = useRef(new CoursewareProgressRevisionClock(courseware.progressRevision));
   stateRef.current = state;
 
   const applyAction = (action: PlayerAction, saveProgress = false) => {
@@ -42,6 +44,7 @@ export default function CoursewarePlayer({ courseware }: Props) {
     writerSessionRef.current = session;
     const path = `/api/coursewares/${courseware.id}/progress`;
     const writer = new CoursewareProgressWriter(
+      revisionClockRef.current,
       async (patch: CoursewareProgressPatch) => {
         try {
           await apiPatch<CoursewareProgressPatch>(path, patch);

@@ -80,6 +80,7 @@ export interface CoursewareDetailRow {
   progress_percent: number;
   current_segment_position: number;
   current_time_ms: number;
+  progress_revision: number;
   checkpoint_answers_json: string;
   learning_objectives_json: string;
   estimated_minutes: number;
@@ -467,12 +468,12 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
     async saveProgress(userId, coursewareId, input) {
       const result = await db.prepare(
         `UPDATE coursewares SET current_segment_position = ?, current_time_ms = ?,
-           checkpoint_answers_json = ?, updated_at = datetime('now')
+           checkpoint_answers_json = ?, progress_revision = ?, updated_at = datetime('now')
          WHERE id = ? AND status = 'ready' AND EXISTS (
            SELECT 1 FROM students s WHERE s.id = coursewares.student_id AND s.user_id = ?
-         )`,
+         ) AND progress_revision < ?`,
       ).bind(input.currentSegmentPosition, input.currentTimeMs,
-        JSON.stringify(input.checkpointAnswers), coursewareId, userId).run();
+        JSON.stringify(input.checkpointAnswers), input.revision, coursewareId, userId, input.revision).run();
       return result.meta.changes === 1;
     },
 

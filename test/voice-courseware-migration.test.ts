@@ -190,3 +190,18 @@ describe('0014 courseware lifecycle migration', () => {
     expect(queryJson(dbPath, 'PRAGMA foreign_key_check;')).toEqual([]);
   });
 });
+
+describe('0016 courseware progress revision migration', () => {
+  it('adds a non-negative revision guard to saved playback progress', () => {
+    const dbPath = freshDatabase();
+    insertOwnedStudent(dbPath);
+    insertCourseware(dbPath);
+    const revision = queryJson<{ progress_revision: number }>(
+      dbPath,
+      'SELECT progress_revision FROM coursewares WHERE id = 1',
+    );
+    expect(revision).toEqual([{ progress_revision: 0 }]);
+    expect(() => runSql(dbPath, 'UPDATE coursewares SET progress_revision = -1 WHERE id = 1'))
+      .toThrow(/CHECK constraint failed/);
+  });
+});

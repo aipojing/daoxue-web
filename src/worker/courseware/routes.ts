@@ -39,10 +39,16 @@ const checkpointAnswersSchema = z.record(
 ).refine((answers) => Object.keys(answers).length <= 30, '检查点答案过多');
 
 const progressPatchSchema = z.object({
+  revision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
   currentSegmentPosition: z.number().int().min(0).max(29).optional(),
   currentTimeMs: z.number().int().min(0).max(86_400_000).optional(),
   checkpointAnswers: checkpointAnswersSchema.optional(),
-}).strict().refine((value) => Object.keys(value).length > 0, '至少提供一个进度字段');
+}).strict().refine(
+  (value) => value.currentSegmentPosition !== undefined
+    || value.currentTimeMs !== undefined
+    || value.checkpointAnswers !== undefined,
+  '至少提供一个进度字段',
+);
 
 function parseId(value: string | undefined): number | null {
   if (value === undefined) return null;
@@ -199,6 +205,7 @@ async function mapDetail(db: D1Database, userId: number, row: CoursewareDetailRo
     estimatedMinutes: row.estimated_minutes,
     currentSegmentPosition: row.current_segment_position,
     currentTimeMs: row.current_time_ms,
+    progressRevision: row.progress_revision,
     checkpointAnswers,
     assessmentConversationId: row.assessment_conversation_id,
     segments: row.status === 'ready' ? row.segments.map((segment) => mapSegment(row.id, segment)) : [],
@@ -271,6 +278,7 @@ coursewareRoutes.get('/:coursewareId/progress', async (c) => {
   return ok(c, {
     currentSegmentPosition: detail.current_segment_position,
     currentTimeMs: detail.current_time_ms,
+    revision: detail.progress_revision,
     checkpointAnswers: parseObject(detail.checkpoint_answers_json),
     updatedAt: isoTimestamp(detail.updated_at),
   });
@@ -297,6 +305,7 @@ coursewareRoutes.patch('/:coursewareId/progress', async (c) => {
     }
   }
   const merged: CoursewareProgressPatch = {
+    revision: parsed.data.revision,
     currentSegmentPosition: parsed.data.currentSegmentPosition ?? detail.current_segment_position,
     currentTimeMs: parsed.data.currentTimeMs ?? detail.current_time_ms,
     checkpointAnswers: {

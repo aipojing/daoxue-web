@@ -1,6 +1,7 @@
 import type {
   CoursewareDetail,
   CoursewareProgressPatch,
+  CoursewareProgressSnapshot,
 } from '../../shared/courseware';
 
 export type PlayerMode = 'main' | 'alternate';
@@ -220,7 +221,7 @@ export function playerReducer(state: CoursewarePlayerState, action: PlayerAction
   }
 }
 
-export function progressPatch(state: CoursewarePlayerState): CoursewareProgressPatch {
+export function progressPatch(state: CoursewarePlayerState): CoursewareProgressSnapshot {
   return {
     currentSegmentPosition: state.segmentPosition,
     currentTimeMs: Math.max(0, state.currentTimeMs),
@@ -232,42 +233,58 @@ export function isTerminalCoursewareLoadStatus(status: number): boolean {
   return status === 401 || status === 403 || status === 404;
 }
 
-function cloneProgressPatch(patch: CoursewareProgressPatch): CoursewareProgressPatch {
+function cloneProgressSnapshot(patch: CoursewareProgressSnapshot): CoursewareProgressSnapshot {
   return {
-    ...patch,
+    currentSegmentPosition: patch.currentSegmentPosition,
+    currentTimeMs: patch.currentTimeMs,
     checkpointAnswers: { ...patch.checkpointAnswers },
   };
 }
 
+/** Shared across effect lifecycles so React StrictMode cannot reuse a revision. */
+export class CoursewareProgressRevisionClock {
+  private revision: number;
+
+  constructor(baseRevision: number) {
+    this.revision = Number.isSafeInteger(baseRevision) && baseRevision >= 0 ? baseRevision : 0;
+  }
+
+  next(): number {
+    this.revision += 1;
+    return this.revision;
+  }
+}
+
 /** Serializes saves and collapses queued updates to the newest full snapshot. */
 export class CoursewareProgressWriter {
-  private pending: CoursewareProgressPatch | null = null;
+  private pending: CoursewareProgressSnapshot | null = null;
   private inFlight = false;
   private disposed = false;
   private lastFinalSnapshot = '';
 
   constructor(
+    private readonly clock: CoursewareProgressRevisionClock,
     private readonly send: (patch: CoursewareProgressPatch) => Promise<unknown>,
     private readonly sendFinal: (patch: CoursewareProgressPatch) => Promise<unknown> = send,
   ) {}
 
-  enqueue(patch: CoursewareProgressPatch): void {
+  enqueue(patch: CoursewareProgressSnapshot): void {
     if (this.disposed) return;
-    this.pending = cloneProgressPatch(patch);
+    this.pending = cloneProgressSnapshot(patch);
     void this.drain();
   }
 
-  flushFinal(patch: CoursewareProgressPatch): void {
+  flushFinal(patch: CoursewareProgressSnapshot): void {
     if (this.disposed) return;
-    const snapshot = cloneProgressPatch(patch);
+    const snapshot = cloneProgressSnapshot(patch);
     const fingerprint = JSON.stringify(snapshot);
     if (fingerprint === this.lastFinalSnapshot) return;
     this.lastFinalSnapshot = fingerprint;
     this.pending = null;
-    void this.sendFinal(snapshot).catch(() => undefined);
+    void this.sendFinal(this.withRevision(snapshot)).catch(() => undefined);
   }
 
-  dispose(finalPatch: CoursewareProgressPatch): void {
+  dispose(finalPatch: CoursewareProgressSnapshot): void {
     if (this.disposed) return;
     this.flushFinal(finalPatch);
     this.disposed = true;
@@ -280,7 +297,7 @@ export class CoursewareProgressWriter {
     let failed = false;
     try {
       while (this.pending && !this.disposed) {
-        const next = this.pending;
+        const next = this.withRevision(this.pending);
         this.pending = null;
         try {
           await this.send(next);
@@ -294,5 +311,9 @@ export class CoursewareProgressWriter {
       this.inFlight = false;
       if (this.pending && !failed && !this.disposed) void this.drain();
     }
+  }
+
+  private withRevision(snapshot: CoursewareProgressSnapshot): CoursewareProgressPatch {
+    return { ...cloneProgressSnapshot(snapshot), revision: this.clock.next() };
   }
 }
