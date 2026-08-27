@@ -36,6 +36,12 @@ export class ProviderCallError extends Error {
   }
 }
 
+export function normalizeProviderError(error: unknown): ProviderCallError {
+  return error instanceof ProviderCallError
+    ? error
+    : new ProviderCallError('internal_error', 500);
+}
+
 function providerError(errorCode: NormalizedProviderErrorCode, status: number): ProviderCallError {
   return new ProviderCallError(errorCode, status);
 }

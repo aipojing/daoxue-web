@@ -53,6 +53,14 @@ export interface CoursewareSegmentRow {
   image_object_key: string;
   image_content_type: string;
   image_error_code: string;
+  audio_retry_count: number;
+  alternate_audio_retry_count: number;
+  image_retry_count: number;
+  audio_error_code: string;
+  audio_error_message: string;
+  alternate_audio_error_code: string;
+  alternate_audio_error_message: string;
+  image_error_message: string;
 }
 
 export interface CoursewareDetailRow {
@@ -76,6 +84,7 @@ export interface CoursewareDetailRow {
   learning_objectives_json: string;
   estimated_minutes: number;
   model_snapshot_json: string;
+  usage_json: string;
   warnings_json: string;
   error_code: string;
   error_message: string;
@@ -129,7 +138,12 @@ export interface CoursewareRepository {
   getForWorker(coursewareId: number): Promise<CoursewareDetailRow | null>;
   claimStage(coursewareId: number, expectedStage: string, nextStage: string, leaseToken: string, leaseUntil: string): Promise<boolean>;
   releaseLease(coursewareId: number, guard: CoursewareStateGuard): Promise<boolean>;
-  saveScript(coursewareId: number, script: CoursewareScript, guard: CoursewareStateGuard): Promise<boolean>;
+  saveScript(
+    coursewareId: number,
+    script: CoursewareScript,
+    guard: CoursewareStateGuard,
+    usage?: { inputTokens: number; outputTokens: number },
+  ): Promise<boolean>;
   saveArtifact(artifact: SavedArtifact, guard: CoursewareStateGuard): Promise<boolean>;
   saveProgress(userId: number, coursewareId: number, input: CoursewareProgressPatch): Promise<boolean>;
   markReady(coursewareId: number, guard: CoursewareStateGuard): Promise<boolean>;
@@ -341,15 +355,26 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
       return result.meta.changes === 1;
     },
 
-    async saveScript(coursewareId, script, guard) {
+    async saveScript(coursewareId, script, guard, usage) {
+      const snapshot = await db.prepare(
+        `SELECT COALESCE(json_extract(model_snapshot_json, '$.includeImages'), 0) AS include_images
+         FROM coursewares WHERE id = ? AND status = ? AND generation_stage = ?
+           AND ((? IS NULL AND lease_token IS NULL) OR lease_token = ?)`,
+      ).bind(coursewareId, guard.status, guard.stage, guard.leaseToken, guard.leaseToken)
+        .first<{ include_images: number }>();
+      if (!snapshot) return false;
       const statements: D1PreparedStatement[] = [
         db.prepare(
           `UPDATE coursewares SET title = ?, subject = ?, grade = ?, topic = ?,
-             learning_objectives_json = ?, estimated_minutes = ?, updated_at = datetime('now')
+             learning_objectives_json = ?, estimated_minutes = ?,
+             usage_json = CASE WHEN ? IS NULL THEN usage_json ELSE
+               json_set(usage_json, '$.textInputTokens', ?, '$.textOutputTokens', ?) END,
+             updated_at = datetime('now')
            WHERE id = ? AND status = ? AND generation_stage = ?
              AND ((? IS NULL AND lease_token IS NULL) OR lease_token = ?)`,
         ).bind(script.title, script.subject, script.grade, script.topic,
-          JSON.stringify(script.learningObjectives), script.estimatedMinutes, coursewareId,
+          JSON.stringify(script.learningObjectives), script.estimatedMinutes,
+          usage?.inputTokens ?? null, usage?.inputTokens ?? 0, usage?.outputTokens ?? 0, coursewareId,
           guard.status, guard.stage, guard.leaseToken, guard.leaseToken),
         db.prepare(
           `DELETE FROM courseware_segments WHERE courseware_id = ? AND EXISTS (
@@ -374,14 +399,19 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
           segment.displayMarkdown, segment.speechText, segment.alternateExplanation?.displayMarkdown ?? '',
           segment.alternateExplanation?.speechText ?? '', segment.visual.mode, segment.visual.prompt ?? '',
           segment.visual.altText ?? '', JSON.stringify(segment.checkpoint ?? {}),
-          segment.speaker === 'system' ? 'not_required' : 'pending',
+          'pending',
           segment.alternateExplanation ? 'pending' : 'not_required',
-          segment.visual.mode === 'generated_image' ? 'pending' : 'not_required',
+          snapshot.include_images === 1 && segment.visual.mode === 'generated_image' ? 'pending' : 'not_required',
           coursewareId, guard.status, guard.stage, guard.leaseToken, guard.leaseToken,
         ));
       });
+      statements.push(db.prepare(
+        `UPDATE coursewares SET generation_stage = 'speech', progress_percent = 10, updated_at = datetime('now')
+         WHERE id = ? AND status = ? AND generation_stage = ?
+           AND ((? IS NULL AND lease_token IS NULL) OR lease_token = ?)`,
+      ).bind(coursewareId, guard.status, guard.stage, guard.leaseToken, guard.leaseToken));
       const results = await db.batch(statements);
-      return results[0]?.meta.changes === 1;
+      return results[0]?.meta.changes === 1 && results.at(-1)?.meta.changes === 1;
     },
 
     async saveArtifact(artifact, guard) {

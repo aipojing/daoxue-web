@@ -13,6 +13,8 @@ import { aiCatalogRoutes, coursewareAISettingsRoutes } from './ai-catalog/routes
 import { adminAICatalogRoutes } from './ai-catalog/admin-routes';
 import { toHttpError } from './lib/errors';
 import { coursewareRoutes, coursewareStudentRoutes } from './courseware/routes';
+import { consumeCoursewareQueue, type CoursewareQueueMessage } from './courseware/queue';
+import type { Env } from './env';
 
 const app = new Hono<AppContext>();
 
@@ -50,4 +52,7 @@ app.onError((e, c) => {
   return err(c, httpError.message, httpError.status);
 });
 
-export default app;
+export default {
+  fetch: app.fetch,
+  queue: consumeCoursewareQueue,
+} satisfies ExportedHandler<Env, CoursewareQueueMessage>;
