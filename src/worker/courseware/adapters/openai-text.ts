@@ -1,7 +1,8 @@
 import {
   OutboundRequestError,
   assertPublicHttpsUrl,
-  readBoundedResponseBytes,
+  discardResponseBody,
+  readBoundedJson,
 } from '../../lib/outbound-url';
 import { ProviderCallError, normalizeProviderResponse } from './errors';
 import type { TextGenerationAdapter } from './types';
@@ -48,6 +49,10 @@ function isJsonContentType(response: Response): boolean {
   return mime === 'application/json' || mime.endsWith('+json');
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 export const openAITextAdapter: TextGenerationAdapter = {
   async generateStructured(request) {
     const endpoint = textEndpoint(request.baseUrl);
@@ -76,32 +81,44 @@ export const openAITextAdapter: TextGenerationAdapter = {
       throw new ProviderCallError('provider_unavailable', 503);
     }
     if (!response.ok) throw await normalizeProviderResponse(response);
-    if (!isJsonContentType(response)) throw new ProviderCallError('invalid_model_output', 502);
+    if (!isJsonContentType(response)) {
+      await discardResponseBody(response);
+      throw new ProviderCallError('invalid_model_output', 502);
+    }
 
-    let body: {
-      id?: unknown;
-      choices?: Array<{ message?: { content?: unknown } }>;
-      usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
-    };
+    let parsed: unknown;
     try {
-      const bytes = await readBoundedResponseBytes(response, MAX_TEXT_RESPONSE_BYTES);
-      body = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes)) as typeof body;
+      parsed = await readBoundedJson(response, MAX_TEXT_RESPONSE_BYTES);
     } catch (error) {
       throw normalizeReadError(error);
     }
-    const jsonText = body?.choices?.[0]?.message?.content;
+    if (!isRecord(parsed) || !Array.isArray(parsed.choices) ||
+        parsed.choices.length < 1 || parsed.choices.length > 16) {
+      throw new ProviderCallError('invalid_model_output', 502);
+    }
+    const firstChoice = parsed.choices[0];
+    if (!isRecord(firstChoice) || !isRecord(firstChoice.message)) {
+      throw new ProviderCallError('invalid_model_output', 502);
+    }
+    const jsonText = firstChoice.message.content;
     if (typeof jsonText !== 'string' || !jsonText.trim()) {
       throw new ProviderCallError('invalid_model_output', 502);
     }
+    const usage = parsed.usage;
+    if (usage !== undefined && !isRecord(usage)) {
+      throw new ProviderCallError('invalid_model_output', 502);
+    }
+    const inputTokens = usage?.prompt_tokens;
+    const outputTokens = usage?.completion_tokens;
     const headerRequestId = response.headers.get('x-request-id');
     return {
       jsonText,
-      requestId: safeRequestId(headerRequestId, request.apiKey) || safeRequestId(body.id, request.apiKey),
-      inputTokens: typeof body.usage?.prompt_tokens === 'number' && body.usage.prompt_tokens >= 0
-        ? body.usage.prompt_tokens
+      requestId: safeRequestId(headerRequestId, request.apiKey) || safeRequestId(parsed.id, request.apiKey),
+      inputTokens: Number.isSafeInteger(inputTokens) && (inputTokens as number) >= 0
+        ? inputTokens as number
         : 0,
-      outputTokens: typeof body.usage?.completion_tokens === 'number' && body.usage.completion_tokens >= 0
-        ? body.usage.completion_tokens
+      outputTokens: Number.isSafeInteger(outputTokens) && (outputTokens as number) >= 0
+        ? outputTokens as number
         : 0,
     };
   },

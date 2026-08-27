@@ -367,7 +367,7 @@ INSERT INTO ai_provider_endpoints
   (provider_id, capability, adapter_type, base_url, config_json)
 SELECT id, 'speech_synthesis', 'token_plan_tts',
   'https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer',
-  '{"formats":["mp3"],"sampleRates":[24000]}'
+  '{"formats":["mp3"],"sampleRates":[24000],"mediaHostSuffixes":["aliyuncs.com"]}'
 FROM ai_providers WHERE slug = 'bailian-token-plan';
 
 INSERT INTO ai_provider_endpoints
@@ -1476,6 +1476,7 @@ export interface SpeechSynthesisRequest {
   text: string;
   format: 'mp3';
   sampleRate: 24000;
+  allowedMediaHostSuffixes: string[];
   timeoutMs: number;
 }
 
@@ -1651,11 +1652,17 @@ it('calls OpenAI-compatible JSON generation without leaking the key', async () =
   });
 });
 
-it('returns Token Plan TTS bytes from the synchronous binary response', async () => {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
-    new Uint8Array([73, 68, 51]),
-    { status: 200, headers: { 'Content-Type': 'audio/mpeg', 'X-Request-Id': 'tts-1' } },
-  )));
+it('downloads Token Plan TTS audio from its bounded JSON response', async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      output: { audio: { url: 'http://cdn.example/audio.mp3' } },
+      request_id: 'tts-1',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    .mockResolvedValueOnce(new Response(new Uint8Array([73, 68, 51]), {
+      status: 200,
+      headers: { 'Content-Type': 'audio/mpeg' },
+    }));
+  vi.stubGlobal('fetch', fetchMock);
   const result = await tokenPlanTTSAdapter.synthesize({
     baseUrl: 'https://provider.example/tts',
     apiKey: 'sk-sp-test',
@@ -1664,10 +1671,13 @@ it('returns Token Plan TTS bytes from the synchronous binary response', async ()
     text: '你好',
     format: 'mp3',
     sampleRate: 24000,
+    allowedMediaHostSuffixes: ['cdn.example'],
     timeoutMs: 1000,
   });
   expect(result.contentType).toBe('audio/mpeg');
   expect(new Uint8Array(result.bytes)).toEqual(new Uint8Array([73, 68, 51]));
+  expect(fetchMock.mock.calls[1]?.[0]).toBe('https://cdn.example/audio.mp3');
+  expect(new Headers(fetchMock.mock.calls[1]?.[1]?.headers).has('authorization')).toBe(false);
 });
 
 it('downloads the temporary image URL returned by Token Plan', async () => {
@@ -1775,9 +1785,16 @@ export const openAITextAdapter: TextGenerationAdapter = {
 
 - [ ] **Step 4: Implement Token Plan TTS**
 
-Create src/worker/courseware/adapters/token-plan-tts.ts:
+Create src/worker/courseware/adapters/token-plan-tts.ts. The non-streaming
+`SpeechSynthesizer` call returns bounded JSON, not audio bytes. Strictly parse the
+temporary URL from `output.audio.url`, then download it through the same host-
+allowlisted, manual-redirect media path used by images. Token Plan may return an
+`http:` temporary URL; validate its public hostname and configured suffix first,
+upgrade it to `https:`, and never issue a plaintext request. Do not forward the
+provider Authorization header or cookies to the media host.
 
 ~~~typescript
+import { fetchAllowedMedia, readBoundedJson } from '../../lib/outbound-url';
 import { ProviderCallError, normalizeProviderResponse } from './errors';
 import type { SpeechSynthesisAdapter } from './types';
 
@@ -1808,13 +1825,16 @@ export const tokenPlanTTSAdapter: SpeechSynthesisAdapter = {
       }
       throw new ProviderCallError('语音服务连接失败', 'provider_unavailable', true, 503);
     }
-    const requestId = response.headers.get('x-request-id') ?? '';
-    if (!response.ok) throw await normalizeProviderResponse(response, requestId);
-    const contentType = response.headers.get('content-type')?.split(';')[0] ?? '';
-    if (!contentType.startsWith('audio/')) {
-      throw new ProviderCallError('语音服务未返回音频', 'invalid_model_output', true, 502, requestId);
-    }
-    return { bytes: await response.arrayBuffer(), contentType, requestId };
+    if (!response.ok) throw await normalizeProviderResponse(response);
+    const body: unknown = await readBoundedJson(response, 1024 * 1024);
+    const audioUrl = strictlyReadOutputAudioUrl(body);
+    const download = await fetchAllowedMedia(
+      audioUrl,
+      request.allowedMediaHostSuffixes,
+      request.timeoutMs,
+      { upgradeHttpToHttps: true },
+    );
+    return readTemporaryMedia(download, 2 * 1024 * 1024, new Set(['audio/mpeg']));
   },
 };
 ~~~
@@ -1882,8 +1902,8 @@ export const tokenPlanImageAdapter: ImageGenerationAdapter = {
 };
 ~~~
 
-Before reading bodies, reject declared `Content-Length` over 1 MiB for text JSON, 2 MiB for speech, and 8 MiB for images. After reading, enforce the same actual byte limits. Accept only `audio/mpeg` for the v1 speech catalog and `image/png`, `image/jpeg`, or `image/webp` for generated images; adapter config can narrow these allowlists but cannot expand them to executable content types.
-Wrap both image-generation and temporary-media fetches with the same timeout/network normalization used by text and speech. Do not let a raw `TypeError`, `DOMException`, response body, or temporary URL escape the adapter boundary.
+Before reading bodies, reject declared `Content-Length` over 1 MiB for provider JSON, 2 MiB for downloaded speech, and 8 MiB for downloaded images. After reading, enforce the same actual byte limits. Parse every provider JSON value from `unknown`, enforce bounded nesting and critical array lengths, and validate the complete adapter-specific shape before property access. Accept only `audio/mpeg` for the v1 speech catalog and `image/png`, `image/jpeg`, or `image/webp` for generated images; adapter config can narrow these allowlists but cannot expand them to executable content types.
+Wrap generation and temporary-media fetches with timeout/network normalization. Release response bodies on every early exit while ignoring cancellation failures. Temporary-media HTTP status mapping is independent from authenticated provider mapping: 401/403/404/410 are invalid temporary output, 429 is rate-limited, 408/504 are timeouts, and 5xx is provider-unavailable. Do not let a raw `TypeError`, `DOMException`, response body, temporary URL, Authorization value, or cookie escape the adapter boundary.
 
 - [ ] **Step 6: Complete adapter factories**
 

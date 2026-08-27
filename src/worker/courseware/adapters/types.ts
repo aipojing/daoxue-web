@@ -43,6 +43,7 @@ export interface SpeechSynthesisRequest {
   text: string;
   format: 'mp3';
   sampleRate: 24000;
+  allowedMediaHostSuffixes: string[];
   timeoutMs: number;
 }
 

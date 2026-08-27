@@ -1,4 +1,5 @@
 import type { NormalizedProviderErrorCode } from './types';
+import { discardResponseBody, ignoreCancelFailure } from '../../lib/outbound-url';
 
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 
@@ -78,7 +79,7 @@ async function readBoundedBody(response: Response): Promise<string> {
       if (chunk.byteLength < next.value.byteLength) break;
     }
   } finally {
-    await reader.cancel();
+    await ignoreCancelFailure(() => reader.cancel());
   }
 
   const bytes = new Uint8Array(total);
@@ -137,6 +138,7 @@ export async function normalizeProviderResponse(
   response: Response,
 ): Promise<ProviderCallError> {
   if (hasExplicitHttpClassification(response.status) || !canReadErrorBody(response.headers.get('content-type'))) {
+    await discardResponseBody(response);
     return normalizeProviderFailure(response.status);
   }
 

@@ -66,6 +66,11 @@ describe('0012 courseware AI catalog migration', () => {
       { model_id: 'qwen-audio-3.0-tts-plus', capability: 'speech_synthesis' },
       { model_id: 'qwen-image-3.0-pro', capability: 'image_generation' },
     ]));
+    expect(queryJson<{ media_host_suffixes: string }>(
+      dbPath,
+      `SELECT json_extract(config_json, '$.mediaHostSuffixes') AS media_host_suffixes
+       FROM ai_provider_endpoints WHERE adapter_type = 'token_plan_tts'`,
+    )).toEqual([{ media_host_suffixes: '["aliyuncs.com"]' }]);
   });
 
   it('rejects non-HTTPS endpoints and half credentials', () => {

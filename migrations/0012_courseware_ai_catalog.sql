@@ -105,7 +105,7 @@ INSERT INTO ai_provider_endpoints
   (provider_id, capability, adapter_type, base_url, config_json)
 SELECT id, 'speech_synthesis', 'token_plan_tts',
   'https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer',
-  '{"formats":["mp3"],"sampleRates":[24000]}'
+  '{"formats":["mp3"],"sampleRates":[24000],"mediaHostSuffixes":["aliyuncs.com"]}'
 FROM ai_providers WHERE slug = 'bailian-token-plan';
 
 INSERT INTO ai_provider_endpoints

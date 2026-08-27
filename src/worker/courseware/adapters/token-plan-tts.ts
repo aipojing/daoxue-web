@@ -1,12 +1,16 @@
 import {
-  OutboundRequestError,
   assertPublicHttpsUrl,
-  readBoundedResponseBytes,
+  discardResponseBody,
+  fetchAllowedMedia,
+  readBoundedJson,
 } from '../../lib/outbound-url';
 import { ProviderCallError, normalizeProviderResponse } from './errors';
+import { normalizeOutboundError, readTemporaryMedia } from './media-response';
 import type { SpeechSynthesisAdapter } from './types';
 
+const MAX_JSON_RESPONSE_BYTES = 1024 * 1024;
 const MAX_SPEECH_RESPONSE_BYTES = 2 * 1024 * 1024;
+const ALLOWED_SPEECH_CONTENT_TYPES = new Set(['audio/mpeg']);
 
 function isTimeoutError(error: unknown): boolean {
   return error instanceof Object &&
@@ -22,20 +26,20 @@ function endpointUrl(value: string): string {
   }
 }
 
-function normalizeReadError(error: unknown): ProviderCallError {
-  if (error instanceof OutboundRequestError && error.kind === 'timeout') {
-    return new ProviderCallError('provider_timeout', 408);
-  }
-  if (error instanceof OutboundRequestError && error.kind === 'unavailable') {
-    return new ProviderCallError('provider_unavailable', 503);
-  }
-  return new ProviderCallError('invalid_model_output', 502);
-}
-
-function safeRequestId(value: string | null, apiKey: string): string {
-  return value && value.length <= 200 && /^[A-Za-z0-9._:-]+$/.test(value) && !value.includes(apiKey)
+function safeRequestId(value: unknown, apiKey: string): string {
+  return typeof value === 'string' && value.length <= 200 &&
+    /^[A-Za-z0-9._:-]+$/.test(value) && !value.includes(apiKey)
     ? value
     : '';
+}
+
+function isJsonContentType(response: Response): boolean {
+  const mime = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+  return mime === 'application/json' || mime.endsWith('+json');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 export const tokenPlanTTSAdapter: SpeechSynthesisAdapter = {
@@ -66,18 +70,40 @@ export const tokenPlanTTSAdapter: SpeechSynthesisAdapter = {
       throw new ProviderCallError('provider_unavailable', 503);
     }
     if (!response.ok) throw await normalizeProviderResponse(response);
-    const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
-    if (contentType !== 'audio/mpeg') throw new ProviderCallError('invalid_model_output', 502);
-
-    try {
-      const bytes = await readBoundedResponseBytes(response, MAX_SPEECH_RESPONSE_BYTES);
-      return {
-        bytes: bytes.slice().buffer,
-        contentType,
-        requestId: safeRequestId(response.headers.get('x-request-id'), request.apiKey),
-      };
-    } catch (error) {
-      throw normalizeReadError(error);
+    if (!isJsonContentType(response)) {
+      await discardResponseBody(response);
+      throw new ProviderCallError('invalid_model_output', 502);
     }
+
+    let parsed: unknown;
+    try {
+      parsed = await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES);
+    } catch (error) {
+      throw normalizeOutboundError(error);
+    }
+    if (!isRecord(parsed) || !isRecord(parsed.output) || !isRecord(parsed.output.audio) ||
+        typeof parsed.output.audio.url !== 'string' || !parsed.output.audio.url) {
+      throw new ProviderCallError('invalid_model_output', 502);
+    }
+
+    let download: Response;
+    try {
+      download = await fetchAllowedMedia(
+        parsed.output.audio.url,
+        request.allowedMediaHostSuffixes,
+        request.timeoutMs,
+        { upgradeHttpToHttps: true },
+      );
+    } catch (error) {
+      throw normalizeOutboundError(error);
+    }
+    const requestId = safeRequestId(response.headers.get('x-request-id'), request.apiKey) ||
+      safeRequestId(parsed.request_id, request.apiKey);
+    return readTemporaryMedia(
+      download,
+      MAX_SPEECH_RESPONSE_BYTES,
+      ALLOWED_SPEECH_CONTENT_TYPES,
+      requestId,
+    );
   },
 };

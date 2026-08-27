@@ -18,6 +18,7 @@ import type {
   ImageGenerationAdapter,
   ImageGenerationRequest,
   SpeechSynthesisAdapter,
+  SpeechSynthesisRequest,
   TextGenerationAdapter,
 } from '../src/worker/courseware/adapters/types';
 import type { ResolvedModelSelection } from '../src/worker/ai-catalog/repository';
@@ -43,6 +44,51 @@ function mockImageGenerationResponse(imageUrl: string): void {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
     output: { choices: [{ message: { content: [{ image: imageUrl }] } }] },
   }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+}
+
+function speechRequest(
+  overrides: Partial<SpeechSynthesisRequest> = {},
+): SpeechSynthesisRequest {
+  return {
+    baseUrl: 'https://provider.example/tts',
+    apiKey: 'sk-sp-test',
+    modelId: 'qwen-audio-3.0-tts-plus',
+    voiceId: 'longanlingxin',
+    text: '你好',
+    format: 'mp3',
+    sampleRate: 24000,
+    allowedMediaHostSuffixes: ['cdn.example'],
+    timeoutMs: 1000,
+    ...overrides,
+  };
+}
+
+function nestedJson(depth: number): Record<string, unknown> {
+  const root: Record<string, unknown> = {};
+  let current = root;
+  for (let index = 0; index < depth; index += 1) {
+    const child: Record<string, unknown> = {};
+    current.child = child;
+    current = child;
+  }
+  return root;
+}
+
+function cancelTrackedResponse(
+  body: Uint8Array,
+  init: ResponseInit,
+  onCancel: () => void,
+  rejectCancel = false,
+): Response {
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(body);
+    },
+    cancel() {
+      onCancel();
+      if (rejectCancel) throw new Error('raw cancel failure');
+    },
+  }), init);
 }
 
 describe('courseware adapter errors', () => {
@@ -266,32 +312,49 @@ describe('concrete courseware adapters', () => {
     });
   });
 
-  it('returns Token Plan TTS bytes from the synchronous binary response', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(
-      new Uint8Array([73, 68, 51]),
-      { status: 200, headers: { 'Content-Type': 'audio/mpeg', 'X-Request-Id': 'tts-1' } },
-    ));
+  it('parses Token Plan TTS JSON and downloads its temporary audio without credentials', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: { audio: { url: 'http://cdn.example/audio.mp3' } },
+        request_id: 'tts-1',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([73, 68, 51]), {
+        status: 200,
+        headers: { 'Content-Type': 'audio/mpeg' },
+      }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const result = await tokenPlanTTSAdapter.synthesize({
-      baseUrl: 'https://provider.example/tts',
-      apiKey: 'sk-sp-test',
-      modelId: 'qwen-audio-3.0-tts-plus',
-      voiceId: 'longanlingxin',
-      text: '你好',
-      format: 'mp3',
-      sampleRate: 24000,
-      timeoutMs: 1000,
-    });
+    const result = await tokenPlanTTSAdapter.synthesize(speechRequest());
 
     expect(result.contentType).toBe('audio/mpeg');
     expect(result.requestId).toBe('tts-1');
     expect(new Uint8Array(result.bytes)).toEqual(new Uint8Array([73, 68, 51]));
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(JSON.parse(String(init.body))).toMatchObject({
+    const [, providerInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(providerInit.body))).toMatchObject({
       model: 'qwen-audio-3.0-tts-plus',
       input: { voice: 'longanlingxin', format: 'mp3', sample_rate: 24000 },
     });
+    const [audioUrl, audioInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(audioUrl).toBe('https://cdn.example/audio.mp3');
+    expect(audioInit.redirect).toBe('manual');
+    expect(new Headers(audioInit.headers).has('authorization')).toBe(false);
+    expect(new Headers(audioInit.headers).has('cookie')).toBe(false);
+  });
+
+  it.each([
+    'http://127.0.0.1/audio.mp3',
+    'http://printer.local./audio.mp3',
+    'http://cdn.attacker.example/audio.mp3',
+  ])('never fetches an unsafe Token Plan audio URL: %s', async (audioUrl) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      output: { audio: { url: audioUrl } },
+    }), { headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(tokenPlanTTSAdapter.synthesize(speechRequest({
+      allowedMediaHostSuffixes: ['cdn.example'],
+    }))).rejects.toMatchObject({ errorCode: 'invalid_model_output' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('downloads the temporary image URL without forwarding provider credentials', async () => {
@@ -359,6 +422,56 @@ describe('concrete courseware adapters', () => {
     });
   });
 
+  it('normalizes one public DNS trailing dot and rechecks the media allowlist', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: { choices: [{ message: { content: [{ image: 'https://img.cdn.example./image.png' }] } }] },
+      }), { headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([1]), {
+        headers: { 'Content-Type': 'image/png' },
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(tokenPlanImageAdapter.generate(imageRequest())).resolves.toMatchObject({
+      contentType: 'image/png',
+    });
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('https://img.cdn.example/image.png');
+  });
+
+  it.each(['https://localhost./image.png', 'https://printer.local./image.png'])(
+    'rejects a local trailing-dot media hostname after normalization: %s',
+    async (imageUrl) => {
+      mockImageGenerationResponse(imageUrl);
+      await expect(tokenPlanImageAdapter.generate(imageRequest({
+        allowedMediaHostSuffixes: ['localhost', 'printer.local'],
+      }))).rejects.toMatchObject({ errorCode: 'invalid_model_output' });
+    },
+  );
+
+  it('validates Token Plan audio redirects and keeps them credential-free', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: { audio: { url: 'http://cdn.example/start' } },
+      }), { headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(null, {
+        status: 302,
+        headers: { Location: 'http://media.cdn.example/final.mp3' },
+      }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([73, 68, 51]), {
+        headers: { 'Content-Type': 'audio/mpeg' },
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(tokenPlanTTSAdapter.synthesize(speechRequest())).resolves.toMatchObject({
+      contentType: 'audio/mpeg',
+    });
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('https://cdn.example/start');
+    expect(fetchMock.mock.calls[2]?.[0]).toBe('https://media.cdn.example/final.mp3');
+    for (const call of fetchMock.mock.calls.slice(1)) {
+      expect(new Headers((call[1] as RequestInit).headers).has('authorization')).toBe(false);
+    }
+  });
+
   it('validates every temporary-media redirect and follows at most three', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
@@ -413,10 +526,7 @@ describe('courseware adapter response boundaries', () => {
       baseUrl: 'https://provider.example/v1', apiKey: 'key', modelId: 'model',
       system: 'system', user: 'user', timeoutMs: 1000,
     })],
-    ['speech', () => tokenPlanTTSAdapter.synthesize({
-      baseUrl: 'https://provider.example/tts', apiKey: 'key', modelId: 'model',
-      voiceId: 'voice', text: 'text', format: 'mp3', sampleRate: 24000, timeoutMs: 1000,
-    })],
+    ['speech', () => tokenPlanTTSAdapter.synthesize(speechRequest({ apiKey: 'key' }))],
     ['image', () => tokenPlanImageAdapter.generate(imageRequest())],
   ] as const)('normalizes %s network failures without exposing transport details', async (_kind, call) => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('secret-key raw network detail')));
@@ -431,10 +541,7 @@ describe('courseware adapter response boundaries', () => {
       baseUrl: 'https://provider.example/v1', apiKey: 'key', modelId: 'model',
       system: 'system', user: 'user', timeoutMs: 1000,
     })],
-    ['speech', () => tokenPlanTTSAdapter.synthesize({
-      baseUrl: 'https://provider.example/tts', apiKey: 'key', modelId: 'model',
-      voiceId: 'voice', text: 'text', format: 'mp3', sampleRate: 24000, timeoutMs: 1000,
-    })],
+    ['speech', () => tokenPlanTTSAdapter.synthesize(speechRequest({ apiKey: 'key' }))],
     ['image', () => tokenPlanImageAdapter.generate(imageRequest())],
   ] as const)('normalizes %s timeouts', async (_kind, call) => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new DOMException('raw timeout', 'TimeoutError')));
@@ -449,6 +556,139 @@ describe('courseware adapter response boundaries', () => {
       baseUrl: 'https://provider.example/v1', apiKey: 'key', modelId: 'model',
       system: 'system', user: 'user', timeoutMs: 1000,
     })).rejects.toMatchObject({ errorCode: 'invalid_model_output' });
+  });
+
+  it('requires bounded JSON metadata from the Token Plan TTS endpoint', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(new Uint8Array([73, 68, 51]), {
+      headers: { 'Content-Type': 'audio/mpeg' },
+    })));
+    await expect(tokenPlanTTSAdapter.synthesize(speechRequest())).rejects.toMatchObject({
+      errorCode: 'invalid_model_output',
+    });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('{}', {
+      headers: { 'Content-Type': 'application/json', 'Content-Length': String(1024 * 1024 + 1) },
+    })));
+    await expect(tokenPlanTTSAdapter.synthesize(speechRequest())).rejects.toMatchObject({
+      errorCode: 'invalid_model_output',
+    });
+  });
+
+  it('rejects malformed provider JSON shapes without leaking a raw TypeError', async () => {
+    const malformedImage = new Response(JSON.stringify({
+      output: { choices: [{ message: { content: { image: 'https://cdn.example/image' } } }] },
+    }), { headers: { 'Content-Type': 'application/json' } });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(malformedImage));
+    const imageError = await tokenPlanImageAdapter.generate(imageRequest()).catch((error: unknown) => error);
+    expect(imageError).toBeInstanceOf(ProviderCallError);
+    expect(imageError).toMatchObject({ errorCode: 'invalid_model_output' });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      output: { audio: 'https://cdn.example/audio.mp3' },
+    }), { headers: { 'Content-Type': 'application/json' } })));
+    const speechError = await tokenPlanTTSAdapter.synthesize(speechRequest()).catch((error: unknown) => error);
+    expect(speechError).toBeInstanceOf(ProviderCallError);
+    expect(speechError).toMatchObject({ errorCode: 'invalid_model_output' });
+  });
+
+  it('rejects excessive JSON depth and critical response-array lengths', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: '{"ok":true}' } }],
+      extra: nestedJson(25),
+    }), { headers: { 'Content-Type': 'application/json' } })));
+    await expect(openAITextAdapter.generateStructured({
+      baseUrl: 'https://provider.example/v1', apiKey: 'key', modelId: 'model',
+      system: 'system', user: 'user', timeoutMs: 1000,
+    })).rejects.toMatchObject({ errorCode: 'invalid_model_output' });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: Array.from({ length: 101 }, () => ({ message: { content: '{"ok":true}' } })),
+    }), { headers: { 'Content-Type': 'application/json' } })));
+    await expect(openAITextAdapter.generateStructured({
+      baseUrl: 'https://provider.example/v1', apiKey: 'key', modelId: 'model',
+      system: 'system', user: 'user', timeoutMs: 1000,
+    })).rejects.toMatchObject({ errorCode: 'invalid_model_output' });
+  });
+
+  it('accepts only non-negative safe-integer token usage', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: '{"ok":true}' } }],
+      usage: { prompt_tokens: 1.5, completion_tokens: Number.MAX_SAFE_INTEGER + 1 },
+    }), { headers: { 'Content-Type': 'application/json' } })));
+    await expect(openAITextAdapter.generateStructured({
+      baseUrl: 'https://provider.example/v1', apiKey: 'key', modelId: 'model',
+      system: 'system', user: 'user', timeoutMs: 1000,
+    })).resolves.toMatchObject({ inputTokens: 0, outputTokens: 0 });
+  });
+
+  it('cancels response bodies on wrong MIME, declared oversize and explicit HTTP errors', async () => {
+    const cancelled: string[] = [];
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(cancelTrackedResponse(
+      new Uint8Array([1]),
+      { headers: { 'Content-Type': 'text/html' } },
+      () => cancelled.push('mime'),
+      true,
+    )));
+    await expect(openAITextAdapter.generateStructured({
+      baseUrl: 'https://provider.example/v1', apiKey: 'key', modelId: 'model',
+      system: 'system', user: 'user', timeoutMs: 1000,
+    })).rejects.toMatchObject({ errorCode: 'invalid_model_output' });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(cancelTrackedResponse(
+      new Uint8Array([1]),
+      { headers: { 'Content-Type': 'application/json', 'Content-Length': String(1024 * 1024 + 1) } },
+      () => cancelled.push('length'),
+      true,
+    )));
+    await expect(openAITextAdapter.generateStructured({
+      baseUrl: 'https://provider.example/v1', apiKey: 'key', modelId: 'model',
+      system: 'system', user: 'user', timeoutMs: 1000,
+    })).rejects.toMatchObject({ errorCode: 'invalid_model_output' });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(cancelTrackedResponse(
+      new Uint8Array([1]),
+      { status: 401, headers: { 'Content-Type': 'application/json' } },
+      () => cancelled.push('http'),
+      true,
+    )));
+    await expect(openAITextAdapter.generateStructured({
+      baseUrl: 'https://provider.example/v1', apiKey: 'key', modelId: 'model',
+      system: 'system', user: 'user', timeoutMs: 1000,
+    })).rejects.toMatchObject({ errorCode: 'invalid_credential' });
+    expect(cancelled).toEqual(['mime', 'length', 'http']);
+  });
+
+  it.each([
+    [401, 'invalid_model_output', false],
+    [403, 'invalid_model_output', false],
+    [404, 'invalid_model_output', false],
+    [410, 'invalid_model_output', false],
+    [429, 'rate_limited', true],
+    [504, 'provider_timeout', true],
+    [503, 'provider_unavailable', true],
+  ] as const)('maps temporary-media HTTP %s independently to %s', async (
+    status,
+    errorCode,
+    retryable,
+  ) => {
+    let cancelled = false;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: { choices: [{ message: { content: [{ image: 'https://cdn.example/image' }] } }] },
+      }), { headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(cancelTrackedResponse(
+        new Uint8Array([1]),
+        { status, headers: { 'Content-Type': 'application/octet-stream' } },
+        () => { cancelled = true; },
+        true,
+      ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(tokenPlanImageAdapter.generate(imageRequest())).rejects.toMatchObject({
+      errorCode,
+      retryable,
+    });
+    expect(cancelled).toBe(true);
   });
 
   it('rejects declared and actual structured-text bodies over 1 MiB', async () => {
@@ -472,30 +712,36 @@ describe('courseware adapter response boundaries', () => {
   });
 
   it.each(['audio/wav', 'audio/mpegurl', 'text/html'])('accepts no speech MIME except audio/mpeg: %s', async (contentType) => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array([1]), {
-      headers: { 'Content-Type': contentType },
-    })));
-    await expect(tokenPlanTTSAdapter.synthesize({
-      baseUrl: 'https://provider.example/tts', apiKey: 'key', modelId: 'model',
-      voiceId: 'voice', text: 'text', format: 'mp3', sampleRate: 24000, timeoutMs: 1000,
-    })).rejects.toMatchObject({ errorCode: 'invalid_model_output' });
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: { audio: { url: 'https://cdn.example/audio' } },
+      }), { headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([1]), {
+        headers: { 'Content-Type': contentType },
+      })));
+    await expect(tokenPlanTTSAdapter.synthesize(speechRequest({ apiKey: 'key' })))
+      .rejects.toMatchObject({ errorCode: 'invalid_model_output' });
   });
 
   it('rejects declared and actual speech bodies over 2 MiB', async () => {
-    const request = {
-      baseUrl: 'https://provider.example/tts', apiKey: 'key', modelId: 'model',
-      voiceId: 'voice', text: 'text', format: 'mp3' as const, sampleRate: 24000 as const, timeoutMs: 1000,
-    };
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(new Uint8Array([1]), {
-      headers: { 'Content-Type': 'audio/mpeg', 'Content-Length': String(2 * 1024 * 1024 + 1) },
-    })));
+    const request = speechRequest({ apiKey: 'key' });
+    const generation = () => new Response(JSON.stringify({
+      output: { audio: { url: 'https://cdn.example/audio' } },
+    }), { headers: { 'Content-Type': 'application/json' } });
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(generation())
+      .mockResolvedValueOnce(new Response(new Uint8Array([1]), {
+        headers: { 'Content-Type': 'audio/mpeg', 'Content-Length': String(2 * 1024 * 1024 + 1) },
+      })));
     await expect(tokenPlanTTSAdapter.synthesize(request)).rejects.toMatchObject({
       errorCode: 'invalid_model_output',
     });
 
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(new Uint8Array(2 * 1024 * 1024 + 1), {
-      headers: { 'Content-Type': 'audio/mpeg' },
-    })));
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(generation())
+      .mockResolvedValueOnce(new Response(new Uint8Array(2 * 1024 * 1024 + 1), {
+        headers: { 'Content-Type': 'audio/mpeg' },
+      })));
     await expect(tokenPlanTTSAdapter.synthesize(request)).rejects.toMatchObject({
       errorCode: 'invalid_model_output',
     });
@@ -543,10 +789,9 @@ describe('courseware adapter response boundaries', () => {
       baseUrl: 'http://provider.example/v1', apiKey: 'key', modelId: 'model',
       system: 'system', user: 'user', timeoutMs: 1000,
     })],
-    ['speech', 'https://127.0.0.1/tts', () => tokenPlanTTSAdapter.synthesize({
-      baseUrl: 'https://127.0.0.1/tts', apiKey: 'key', modelId: 'model',
-      voiceId: 'voice', text: 'text', format: 'mp3', sampleRate: 24000, timeoutMs: 1000,
-    })],
+    ['speech', 'https://127.0.0.1/tts', () => tokenPlanTTSAdapter.synthesize(speechRequest({
+      baseUrl: 'https://127.0.0.1/tts', apiKey: 'key',
+    }))],
     ['image', 'https://[::1]/image', () => tokenPlanImageAdapter.generate(imageRequest({
       baseUrl: 'https://[::1]/image',
     }))],
