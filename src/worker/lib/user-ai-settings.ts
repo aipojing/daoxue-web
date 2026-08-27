@@ -129,6 +129,19 @@ async function decryptPresentKey(
 }
 
 /**
+ * 仅解析旧设置中的个人 DeepSeek Key，供课件目录兼容使用。
+ * 此路径不读取站点设置或环境中的共享服务 Key。
+ */
+export async function resolvePersonalDeepSeekKey(
+  db: D1Database,
+  env: Env,
+  userId: number,
+): Promise<string> {
+  const personal = await readPersonalRow(db, userId);
+  return decryptPresentKey(env, personal, userId, 'deepseek');
+}
+
+/**
  * 共享兜底只有管理员显式写入 '1' 才开启（fail closed）：
  * 记录被误删、读取异常返回空配置等任何"取值不确定"的情况都按关闭处理，
  * 避免在管理员不知情时消耗站点共享 Key 的费用。
