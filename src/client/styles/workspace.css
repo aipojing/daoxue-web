@@ -1,7 +1,9 @@
 .student-workspace { min-height: 100dvh; display: flex; background: var(--paper); }
 .workspace-sidebar { width: 232px; min-height: 100dvh; flex: 0 0 232px; display: flex; flex-direction: column; padding: 18px 12px; background: var(--board-deep); color: var(--chalk); }
 .workspace-brand, .workspace-student, .workspace-nav-item { display: flex; align-items: center; gap: 10px; }
-.workspace-brand { padding: 0 10px 18px; font-family: var(--font-display); font-size: 19px; font-weight: 700; letter-spacing: .05em; }
+.workspace-sidebar-header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 18px; }
+.workspace-brand { padding: 0 10px; font-family: var(--font-display); font-size: 19px; font-weight: 700; letter-spacing: .05em; }
+.workspace-drawer-close { display: none; min-height: 44px; padding: 9px 10px; border: 1px solid rgba(253,251,242,.44); border-radius: var(--radius); color: var(--chalk); font-size: 13px; font-weight: 700; }
 .workspace-student { margin: 0 4px 20px; padding: 12px 8px; border-top: 1px solid rgba(253,251,242,.18); border-bottom: 1px solid rgba(253,251,242,.18); }
 .workspace-avatar { width: 42px; height: 42px; font-size: 18px; }
 .workspace-student strong, .workspace-student span { display: block; }
@@ -22,15 +24,15 @@
 .workspace-loading { grid-auto-flow: column; align-items: center; }
 .workspace-error h1 { color: var(--board-deep); font-family: var(--font-display); }
 .workspace-error-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; }
-.workspace-sidebar :focus-visible, .workspace-menu-button:focus-visible, .workspace-backdrop:focus-visible { outline: 3px solid var(--chalk); outline-offset: 3px; }
+.workspace-sidebar :focus-visible, .workspace-menu-button:focus-visible { outline: 3px solid var(--chalk); outline-offset: 3px; }
 .workspace-content :focus-visible { outline-color: var(--board-deep); }
-.workspace-content .chat-page { min-height: 100dvh; height: 100%; }
 
 @media (max-width: 899px) {
   .student-workspace { display: block; }
   .workspace-menu-button { position: fixed; top: 12px; left: 12px; z-index: 71; min-height: 44px; display: inline-flex; align-items: center; gap: 7px; padding: 9px 12px; border: 1px solid rgba(253,251,242,.4); border-radius: var(--radius); background: var(--board-deep); color: var(--chalk); font-weight: 700; box-shadow: 0 2px 10px rgba(22,68,55,.24); }
-  .workspace-sidebar { position: fixed; top: 0; bottom: 0; left: 0; z-index: 80; width: 232px; min-height: 100dvh; transform: translateX(-104%); transition: transform .2s ease; box-shadow: 12px 0 30px rgba(22,68,55,.3); }
-  .workspace-sidebar.is-open { transform: translateX(0); }
+  .workspace-sidebar { position: fixed; top: 0; bottom: 0; left: 0; z-index: 80; width: 232px; min-height: 100dvh; visibility: hidden; pointer-events: none; transform: translateX(-104%); transition: transform .2s ease, visibility 0s linear .2s; box-shadow: 12px 0 30px rgba(22,68,55,.3); }
+  .workspace-sidebar.is-open { visibility: visible; pointer-events: auto; transform: translateX(0); transition-delay: 0s; }
+  .workspace-drawer-close { display: inline-flex; align-items: center; justify-content: center; }
   .workspace-backdrop { position: fixed; inset: 0; z-index: 75; display: block; background: rgba(22,68,55,.54); }
   .workspace-content { min-height: 100dvh; padding-top: 56px; }
   .workspace-content .chat-page { min-height: calc(100dvh - 56px); height: calc(100dvh - 56px); }
@@ -40,8 +42,6 @@
   .workspace-menu-button span { font-size: 13px; }
   .workspace-content .page { padding: 18px 14px 44px; }
   .workspace-content .page-header { align-items: flex-start; }
-  .workspace-content .chat-page { display: block; }
-  .workspace-content .chat-main { min-height: calc(100dvh - 56px); }
 }
 
 @media (prefers-reduced-motion: reduce) { .workspace-sidebar { transition: none; } }

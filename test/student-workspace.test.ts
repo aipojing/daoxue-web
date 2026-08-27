@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   getNextWorkspaceFocusIndex,
   isStudentWorkspacePathActive,
+  shouldRestoreWorkspaceMenuFocus,
   studentWorkspaceGroups,
 } from '../src/client/lib/student-workspace';
 import {
@@ -35,6 +36,11 @@ describe('student workspace navigation', () => {
     expect(getNextWorkspaceFocusIndex(0, 4, 'previous')).toBe(3);
     expect(getNextWorkspaceFocusIndex(3, 4, 'next')).toBe(0);
     expect(getNextWorkspaceFocusIndex(1, 4, 'next')).toBe(2);
+  });
+
+  it('restores menu focus only after a real drawer close', () => {
+    expect(shouldRestoreWorkspaceMenuFocus(true)).toBe(true);
+    expect(shouldRestoreWorkspaceMenuFocus(false)).toBe(false);
   });
 });
 

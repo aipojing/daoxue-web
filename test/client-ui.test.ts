@@ -87,6 +87,7 @@ describe('客户端关键交互结构', () => {
   it('孩子工作台提供分组导航与移动端抽屉控制', () => {
     const app = clientSource('App.tsx');
     const workspace = clientSource('components/StudentWorkspaceLayout.tsx');
+    const workspaceCss = clientSource('styles/workspace.css');
 
     expect(app).toContain('StudentWorkspaceLayout');
     expect(workspace).toContain('aria-label="孩子学习功能"');
@@ -94,5 +95,13 @@ describe('客户端关键交互结构', () => {
     expect(workspace).toContain('返回学生列表');
     expect(workspace).toContain('aria-label="打开孩子学习菜单"');
     expect(workspace).toContain('aria-expanded={drawerOpen}');
+    expect(workspace).toContain('document.body.style.overflow = previousBodyOverflow');
+    expect(workspace).toContain("toggleAttribute('inert', drawerOpen)");
+    expect(workspace).toContain('aria-label="关闭菜单"');
+    expect(workspace).not.toContain('<button className="workspace-backdrop"');
+    expect(workspaceCss).toContain('visibility: hidden');
+    expect(workspaceCss).not.toContain('.workspace-content .chat-page { min-height: 100dvh; height: 100%; }');
+    expect(workspaceCss).not.toContain('.workspace-content .chat-page { display: block; }');
+    expect(workspaceCss).not.toContain('.workspace-content .chat-main { min-height: calc(100dvh - 56px); }');
   });
 });

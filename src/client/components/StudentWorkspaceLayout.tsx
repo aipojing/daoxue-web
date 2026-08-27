@@ -5,6 +5,7 @@ import type { Student } from '../types';
 import {
   getNextWorkspaceFocusIndex,
   isStudentWorkspacePathActive,
+  shouldRestoreWorkspaceMenuFocus,
   studentWorkspaceGroups,
   type StudentWorkspaceIcon,
 } from '../lib/student-workspace';
@@ -52,9 +53,13 @@ export default function StudentWorkspaceLayout() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [compactNavigation, setCompactNavigation] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 899px)').matches,
+  );
   const requestGenerationRef = useRef(0);
   const requestAbortRef = useRef<AbortController | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const contentRef = useRef<HTMLElement>(null);
   const drawerRef = useRef<HTMLElement>(null);
   const previousPathnameRef = useRef(location.pathname);
 
@@ -62,10 +67,11 @@ export default function StudentWorkspaceLayout() {
     window.requestAnimationFrame(() => menuButtonRef.current?.focus());
   }, []);
 
-  const closeDrawer = useCallback((restoreFocus = true) => {
+  const closeDrawer = useCallback(() => {
+    const restoreFocus = shouldRestoreWorkspaceMenuFocus(drawerOpen);
     setDrawerOpen(false);
     if (restoreFocus) restoreMenuFocus();
-  }, [restoreMenuFocus]);
+  }, [drawerOpen, restoreMenuFocus]);
 
   const reloadStudent = useCallback(async () => {
     requestAbortRef.current?.abort();
@@ -95,6 +101,31 @@ export default function StudentWorkspaceLayout() {
       requestAbortRef.current?.abort();
     };
   }, [reloadStudent]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(max-width: 899px)');
+    const updateCompactNavigation = () => setCompactNavigation(mediaQuery.matches);
+    updateCompactNavigation();
+    mediaQuery.addEventListener('change', updateCompactNavigation);
+    return () => mediaQuery.removeEventListener('change', updateCompactNavigation);
+  }, []);
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+    };
+  }, [drawerOpen]);
+
+  useEffect(() => {
+    const backgroundElements = [menuButtonRef.current, contentRef.current];
+    for (const element of backgroundElements) element?.toggleAttribute('inert', drawerOpen);
+    return () => {
+      for (const element of backgroundElements) element?.removeAttribute('inert');
+    };
+  }, [drawerOpen]);
 
   useEffect(() => {
     if (!drawerOpen) return;
@@ -162,17 +193,21 @@ export default function StudentWorkspaceLayout() {
         <IconMenu size={22} />
         <span>学习菜单</span>
       </button>
-      {drawerOpen && <button className="workspace-backdrop" aria-label="关闭孩子学习菜单" onClick={() => closeDrawer()} />}
+      {drawerOpen && <div className="workspace-backdrop" aria-hidden="true" onClick={() => closeDrawer()} />}
       <aside
         ref={drawerRef}
         id="student-workspace-navigation"
         className={drawerOpen ? 'workspace-sidebar is-open' : 'workspace-sidebar'}
         aria-label="孩子学习功能"
         aria-modal={drawerOpen || undefined}
+        aria-hidden={compactNavigation && !drawerOpen ? true : undefined}
         role={drawerOpen ? 'dialog' : undefined}
         onKeyDown={trapDrawerFocus}
       >
-        <div className="workspace-brand"><IconBook size={20} /><span>学伴 AI</span></div>
+        <div className="workspace-sidebar-header">
+          <div className="workspace-brand"><IconBook size={20} /><span>学伴 AI</span></div>
+          <button type="button" className="workspace-drawer-close" aria-label="关闭菜单" onClick={() => closeDrawer()}>关闭</button>
+        </div>
         <div className="workspace-student">
           <span className="avatar workspace-avatar" style={{ background: student.color }}>{student.name.slice(0, 1)}</span>
           <div><strong>{student.name}</strong><span>{student.grade}</span></div>
@@ -205,7 +240,7 @@ export default function StudentWorkspaceLayout() {
           <Link to="/" className="workspace-back-link" onClick={() => closeDrawer()}>返回学生列表</Link>
         </div>
       </aside>
-      <main className="workspace-content">
+      <main ref={contentRef} className="workspace-content" aria-hidden={drawerOpen || undefined}>
         <Outlet context={{ student, reloadStudent } satisfies StudentWorkspaceContext} />
       </main>
     </div>

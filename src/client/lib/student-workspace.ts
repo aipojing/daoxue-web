@@ -56,3 +56,7 @@ export function getNextWorkspaceFocusIndex(
   if (direction === 'next') return (currentIndex + 1) % itemCount;
   return (currentIndex - 1 + itemCount) % itemCount;
 }
+
+export function shouldRestoreWorkspaceMenuFocus(drawerWasOpen: boolean): boolean {
+  return drawerWasOpen;
+}
