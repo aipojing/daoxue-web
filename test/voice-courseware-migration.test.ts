@@ -53,8 +53,10 @@ type SegmentInput = Partial<{
   segmentKey: string;
   kind: string;
   speaker: string;
+  visualMode: string;
   checkpointJson: string;
   audioStatus: string;
+  alternateAudioStatus: string;
   imageStatus: string;
 }>;
 
@@ -64,17 +66,19 @@ function insertSegment(dbPath: string, input: SegmentInput = {}): void {
     segmentKey = 'intro',
     kind = 'teacher_intro',
     speaker = 'teacher',
+    visualMode = 'none',
     checkpointJson = '{}',
     audioStatus = 'pending',
+    alternateAudioStatus = 'not_required',
     imageStatus = 'not_required',
   } = input;
   runSql(
     dbPath,
     "INSERT INTO courseware_segments(" +
-    'courseware_id, position, segment_key, kind, speaker, title, display_markdown, speech_text, ' +
-    'checkpoint_json, audio_status, image_status) VALUES ' +
+    'courseware_id, position, segment_key, kind, speaker, title, display_markdown, speech_text, visual_mode, ' +
+    'checkpoint_json, audio_status, alternate_audio_status, image_status) VALUES ' +
     `(1, ${position}, '${segmentKey}', '${kind}', '${speaker}', '分数导入', '内容', '讲解', ` +
-    `'${checkpointJson}', '${audioStatus}', '${imageStatus}');`,
+    `'${visualMode}', '${checkpointJson}', '${audioStatus}', '${alternateAudioStatus}', '${imageStatus}');`,
   );
 }
 
@@ -123,11 +127,15 @@ describe('0013 voice courseware migration', () => {
       .toThrow(/CHECK constraint failed/);
     expect(() => insertSegment(dbPath, { position: 4, segmentKey: 'invalid-image', imageStatus: 'unknown' }))
       .toThrow(/CHECK constraint failed/);
-    expect(() => insertSegment(dbPath, { position: 5, segmentKey: 'invalid-json', checkpointJson: 'not-json' }))
+    expect(() => insertSegment(dbPath, { position: 5, segmentKey: 'invalid-visual', visualMode: 'unknown' }))
+      .toThrow(/CHECK constraint failed/);
+    expect(() => insertSegment(dbPath, { position: 6, segmentKey: 'invalid-alternate-audio', alternateAudioStatus: 'unknown' }))
+      .toThrow(/CHECK constraint failed/);
+    expect(() => insertSegment(dbPath, { position: 7, segmentKey: 'invalid-json', checkpointJson: 'not-json' }))
       .toThrow(/CHECK constraint failed/);
     expect(() => insertSegment(dbPath, { segmentKey: 'same-position' }))
       .toThrow(/UNIQUE constraint failed/);
-    expect(() => insertSegment(dbPath, { position: 6 }))
+    expect(() => insertSegment(dbPath, { position: 8 }))
       .toThrow(/UNIQUE constraint failed/);
   });
 
