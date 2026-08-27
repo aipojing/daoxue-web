@@ -1,4 +1,4 @@
-import { env } from 'cloudflare:workers';
+import { env, exports } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type {
   AICapability,
@@ -15,6 +15,51 @@ import {
 } from '../../src/worker/ai-catalog/repository';
 import { UserFacingError } from '../../src/worker/lib/errors';
 import { saveUserAISettings } from '../../src/worker/lib/user-ai-settings';
+
+interface Envelope<T> {
+  success: boolean;
+  data: T | null;
+  error: string | null;
+}
+
+const worker = exports.default as unknown as {
+  fetch(input: string, init?: RequestInit): Promise<Response>;
+};
+
+async function api(path: string, init: RequestInit = {}, cookie = ''): Promise<Response> {
+  const headers = new Headers(init.headers);
+  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  if (cookie) headers.set('Cookie', cookie);
+  return worker.fetch(`https://example.com${path}`, { ...init, headers });
+}
+
+async function json<T>(response: Response): Promise<Envelope<T>> {
+  return response.json<Envelope<T>>();
+}
+
+function sessionCookie(response: Response): string {
+  const value = response.headers.get('Set-Cookie');
+  if (!value) throw new Error('missing session cookie');
+  return value.split(';', 1)[0] ?? '';
+}
+
+async function register(email: string, inviteCode?: string) {
+  const response = await api('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({ email, password: 'correct-password', inviteCode }),
+  });
+  return {
+    response,
+    body: await json<{ id: number; isAdmin: boolean }>(response),
+    cookie: response.ok ? sessionCookie(response) : '',
+  };
+}
+
+async function createAdmin() {
+  const result = await register('admin@example.com');
+  expect(result.response.status).toBe(200);
+  return result;
+}
 
 async function insertUser(id: number, email: string): Promise<void> {
   await env.DB.prepare('INSERT INTO users(id, email, password_hash) VALUES (?, ?, ?)')
@@ -137,7 +182,222 @@ async function seededPreferences(
 }
 
 beforeEach(async () => {
+  await env.DB.prepare('DELETE FROM invite_codes').run();
   await env.DB.prepare('DELETE FROM users').run();
+  await env.DB.prepare("DELETE FROM ai_providers WHERE slug LIKE 'test-api-%'").run();
+});
+
+describe('courseware AI HTTP APIs', () => {
+  it('returns only enabled catalog data and masked personal credential state', async () => {
+    const account = await createAdmin();
+    const catalogResponse = await api('/api/ai-catalog', {}, account.cookie);
+    expect(catalogResponse.status).toBe(200);
+    const catalog = await json<import('../../src/shared/ai-catalog').AIProviderCatalogItem[]>(
+      catalogResponse,
+    );
+    expect(catalog.data?.[0]?.models.some((model) => model.modelId === 'qwen3.7-plus')).toBe(true);
+    expect(JSON.stringify(catalog.data)).not.toContain('baseUrl');
+
+    const settingsResponse = await api('/api/courseware-ai-settings', {}, account.cookie);
+    expect(settingsResponse.status).toBe(200);
+    const serializedSettings = JSON.stringify((await json(settingsResponse)).data);
+    expect(serializedSettings).not.toContain('key_ciphertext');
+    expect(serializedSettings).not.toContain('key_iv');
+    expect(serializedSettings).not.toContain('apiKey');
+  });
+
+  it('lets a user save a credential and preferences without accepting endpoint fields', async () => {
+    const account = await createAdmin();
+    const providerId = await seededProviderId();
+    const credentialResponse = await api(
+      `/api/courseware-ai-settings/credentials/${providerId}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ apiKey: 'test-api-secret', baseUrl: 'https://evil.example/v1' }),
+      },
+      account.cookie,
+    );
+    expect(credentialResponse.status).toBe(400);
+
+    const savedCredential = await api(
+      `/api/courseware-ai-settings/credentials/${providerId}`,
+      { method: 'PUT', body: JSON.stringify({ apiKey: 'test-api-secret' }) },
+      account.cookie,
+    );
+    expect(savedCredential.status).toBe(200);
+    const serialized = JSON.stringify((await json(savedCredential)).data);
+    expect(serialized).not.toContain('test-api-secret');
+    expect(serialized).not.toContain('key_ciphertext');
+
+    const preferences = await seededPreferences({ teacherVoice: 'longanlingxin' });
+    const preferenceResponse = await api(
+      '/api/courseware-ai-settings/preferences',
+      { method: 'PUT', body: JSON.stringify(preferences) },
+      account.cookie,
+    );
+    expect(preferenceResponse.status).toBe(200);
+    const settings = await json<import('../../src/shared/ai-catalog').CoursewareAISettings>(
+      preferenceResponse,
+    );
+    expect(settings.data?.preferences).toHaveLength(4);
+  });
+
+  it('lets administrators manage the complete catalog without exposing user credentials', async () => {
+    const admin = await createAdmin();
+    await saveCredential(
+      env.DB,
+      env,
+      admin.body.data?.id ?? 0,
+      await seededProviderId(),
+      'hidden-key',
+    );
+
+    const providerResponse = await api(
+      '/api/admin/ai-catalog/providers',
+      {
+        method: 'POST',
+        body: JSON.stringify({ slug: 'test-api-provider', displayName: 'Test API', enabled: true }),
+      },
+      admin.cookie,
+    );
+    expect(providerResponse.status).toBe(200);
+    const provider = await json<{ id: number }>(providerResponse);
+    expect(provider.data?.id).toBeTypeOf('number');
+
+    const endpointResponse = await api(
+      '/api/admin/ai-catalog/endpoints',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          providerId: provider.data?.id,
+          capability: 'structured_text',
+          adapterType: 'openai_text',
+          baseUrl: 'https://safe.example/v1',
+          config: { allowCustomModelId: true },
+          enabled: true,
+        }),
+      },
+      admin.cookie,
+    );
+    expect(endpointResponse.status).toBe(200);
+    const endpoint = await json<{ id: number }>(endpointResponse);
+
+    const modelResponse = await api(
+      '/api/admin/ai-catalog/models',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          endpointId: endpoint.data?.id,
+          modelId: 'test-model',
+          displayName: 'Test Model',
+          config: {},
+          voices: [],
+          recommended: true,
+          enabled: true,
+          sortOrder: 10,
+        }),
+      },
+      admin.cookie,
+    );
+    expect(modelResponse.status).toBe(200);
+    const model = await json<{ id: number }>(modelResponse);
+
+    expect(
+      (
+        await api(
+          `/api/admin/ai-catalog/providers/${provider.data?.id}`,
+          {
+            method: 'PUT',
+            body: JSON.stringify({ displayName: 'Disabled Test API', enabled: false }),
+          },
+          admin.cookie,
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await api(
+          `/api/admin/ai-catalog/endpoints/${endpoint.data?.id}`,
+          {
+            method: 'PUT',
+            body: JSON.stringify({
+              providerId: provider.data?.id,
+              capability: 'structured_text',
+              adapterType: 'openai_text',
+              baseUrl: 'https://safe.example/v2',
+              config: {},
+              enabled: false,
+            }),
+          },
+          admin.cookie,
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await api(
+          `/api/admin/ai-catalog/models/${model.data?.id}`,
+          {
+            method: 'PUT',
+            body: JSON.stringify({
+              endpointId: endpoint.data?.id,
+              modelId: 'test-model-v2',
+              displayName: 'Test Model V2',
+              config: {},
+              voices: [],
+              recommended: false,
+              enabled: false,
+              sortOrder: 20,
+            }),
+          },
+          admin.cookie,
+        )
+      ).status,
+    ).toBe(200);
+
+    const catalogResponse = await api('/api/admin/ai-catalog/providers', {}, admin.cookie);
+    expect(catalogResponse.status).toBe(200);
+    const serialized = JSON.stringify((await json(catalogResponse)).data);
+    expect(serialized).toContain('Disabled Test API');
+    expect(serialized).toContain('test-model-v2');
+    expect(serialized).toContain('https://safe.example/v2');
+    expect(serialized).not.toContain('hidden-key');
+    expect(serialized).not.toContain('key_ciphertext');
+    expect(serialized).not.toContain('key_iv');
+  });
+
+  it('rejects unsafe or incompatible administrator endpoint definitions', async () => {
+    const admin = await createAdmin();
+    const base = {
+      providerId: await seededProviderId(),
+      capability: 'structured_text',
+      adapterType: 'openai_text',
+      baseUrl: 'https://safe.example/v1',
+      config: {},
+      enabled: true,
+    };
+    const responses = await Promise.all([
+      api(
+        '/api/admin/ai-catalog/endpoints',
+        { method: 'POST', body: JSON.stringify({ ...base, baseUrl: 'http://unsafe.example/v1' }) },
+        admin.cookie,
+      ),
+      api(
+        '/api/admin/ai-catalog/endpoints',
+        {
+          method: 'POST',
+          body: JSON.stringify({ ...base, capability: 'image_generation' }),
+        },
+        admin.cookie,
+      ),
+      api(
+        '/api/admin/ai-catalog/endpoints',
+        { method: 'POST', body: JSON.stringify({ ...base, unexpected: true }) },
+        admin.cookie,
+      ),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([400, 400, 400]);
+  });
 });
 
 describe('courseware AI credentials', () => {

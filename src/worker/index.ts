@@ -9,6 +9,8 @@ import { mistakeExtractRoutes, mistakeStudentRoutes, mistakeCardRoutes } from '.
 import { selfLearnRoutes } from './selflearn/routes';
 import { userAISettingsRoutes } from './settings/routes';
 import { adminRoutes } from './admin/routes';
+import { aiCatalogRoutes, coursewareAISettingsRoutes } from './ai-catalog/routes';
+import { adminAICatalogRoutes } from './ai-catalog/admin-routes';
 import { toHttpError } from './lib/errors';
 
 const app = new Hono<AppContext>();
@@ -31,6 +33,9 @@ app.route('/api/conversations', conversationRoutes);
 app.route('/api/mistake-cards', mistakeCardRoutes);
 // requireAuth 已在子路由内执行一次，这里不再重复挂载
 app.route('/api/ai-settings', userAISettingsRoutes);
+app.route('/api/ai-catalog', aiCatalogRoutes);
+app.route('/api/courseware-ai-settings', coursewareAISettingsRoutes);
+app.route('/api/admin/ai-catalog', adminAICatalogRoutes);
 app.route('/api/admin', adminRoutes);
 
 app.notFound((c) => err(c, '接口不存在', 404));

@@ -223,6 +223,20 @@ describe('Worker 基础响应与鉴权', () => {
     expect((await json(response)).error).toBe('未登录');
   });
 
+  it('未登录不能访问课件 AI 用户与管理员接口', async () => {
+    const responses = await Promise.all([
+      api('/api/ai-catalog'),
+      api('/api/courseware-ai-settings'),
+      api('/api/admin/ai-catalog/providers'),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([401, 401, 401]);
+    expect(await Promise.all(responses.map((response) => json(response)))).toEqual([
+      { success: false, data: null, error: '未登录' },
+      { success: false, data: null, error: '未登录' },
+      { success: false, data: null, error: '未登录' },
+    ]);
+  });
+
   it('同邮箱并发错误登录只允许前 5 次进入校验', async () => {
     await createAdmin();
     const attempts = await Promise.all(
@@ -314,6 +328,29 @@ describe('注册与管理员权限', () => {
 
     const response = await api('/api/admin/users', {}, member.cookie);
     expect(response.status).toBe(403);
+  });
+
+  it('普通用户不能修改课件 AI 服务商端点', async () => {
+    const admin = await createAdmin();
+    const code = await createInvite(admin.cookie);
+    const member = await register('member@example.com', code);
+    const response = await api(
+      '/api/admin/ai-catalog/endpoints/1',
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          providerId: 1,
+          capability: 'structured_text',
+          adapterType: 'openai_text',
+          baseUrl: 'https://safe.example/v1',
+          config: {},
+          enabled: true,
+        }),
+      },
+      member.cookie,
+    );
+    expect(response.status).toBe(403);
+    expect((await json(response)).error).toBe('需要管理员权限');
   });
 
   it('同邮箱并发邀请注册失败时事务回滚占用次数', async () => {
