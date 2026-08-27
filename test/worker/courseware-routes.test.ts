@@ -4,6 +4,7 @@ import type { CoursewareModelPreference } from '../../src/shared/ai-catalog';
 import { saveCredential } from '../../src/worker/ai-catalog/credentials';
 import { saveUserModelPreferences } from '../../src/worker/ai-catalog/repository';
 import { createCourseware } from '../../src/worker/courseware/service';
+import { deleteCoursewareMedia } from '../../src/worker/courseware/media';
 
 interface Envelope<T> {
   success: boolean;
@@ -82,7 +83,13 @@ async function configureCoursewareAI(userId: number, health: 'valid' | 'invalid'
   ] });
 }
 
-async function insertCourseware(studentId: number, status: 'ready' | 'failed' | 'queued' = 'ready') {
+async function insertCourseware(
+  studentId: number,
+  status: 'ready' | 'failed' | 'queued' | 'generating' = 'ready',
+  generationStage?: 'queued' | 'scripting' | 'speech' | 'images' | 'finalizing' | 'ready' | 'failed',
+) {
+  const resolvedStage = generationStage
+    ?? (status === 'ready' ? 'ready' : status === 'failed' ? 'failed' : status === 'generating' ? 'speech' : 'queued');
   const row = await env.DB.prepare(
     `INSERT INTO coursewares
      (student_id, subject, grade, topic, learning_goal, title, status, generation_stage,
@@ -93,7 +100,7 @@ async function insertCourseware(studentId: number, status: 'ready' | 'failed' | 
   ).bind(
     studentId,
     status,
-    status === 'ready' ? 'ready' : status === 'failed' ? 'failed' : 'queued',
+    resolvedStage,
     status === 'ready' ? 100 : 0,
     status === 'failed' ? 1 : 0,
     status === 'failed' ? 'provider_timeout' : '',
@@ -101,6 +108,17 @@ async function insertCourseware(studentId: number, status: 'ready' | 'failed' | 
   ).first<{ id: number }>();
   if (!row) throw new Error('failed to insert courseware');
   return row.id;
+}
+
+async function setImageSnapshot(coursewareId: number) {
+  const imageEndpoint = await env.DB.prepare(
+    `SELECT e.id AS endpoint_id, p.id AS provider_id FROM ai_provider_endpoints e
+     JOIN ai_providers p ON p.id = e.provider_id WHERE e.capability = 'image_generation' LIMIT 1`,
+  ).first<{ endpoint_id: number; provider_id: number }>();
+  await env.DB.prepare('UPDATE coursewares SET model_snapshot_json = ? WHERE id = ?').bind(
+    JSON.stringify({ image: { endpointId: imageEndpoint?.endpoint_id, providerId: imageEndpoint?.provider_id } }),
+    coursewareId,
+  ).run();
 }
 
 async function insertSegment(coursewareId: number, imageStatus: 'ready' | 'failed' | 'not_required' = 'not_required') {
@@ -240,6 +258,20 @@ describe('courseware routes', () => {
     expect(serialized).toContain(`/api/coursewares/${coursewareId}/segments/`);
   });
 
+  it('authenticates a courseware request exactly once at the index boundary', async () => {
+    const account = await register('single-auth@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId);
+    const originalPrepare = env.DB.prepare.bind(env.DB);
+    let sessionQueries = 0;
+    vi.spyOn(env.DB, 'prepare').mockImplementation((query: string) => {
+      if (query.includes('FROM sessions')) sessionQueries += 1;
+      return originalPrepare(query);
+    });
+    expect((await api(`/api/coursewares/${coursewareId}`, {}, account.cookie)).status).toBe(200);
+    expect(sessionQueries).toBe(1);
+  });
+
   it('saves merged playback and checkpoint progress without writing knowledge evidence', async () => {
     const account = await register('progress@example.com');
     const studentId = await createStudent(account.cookie);
@@ -280,6 +312,33 @@ describe('courseware routes', () => {
     expect(new TextDecoder().decode(await response.arrayBuffer())).toBe('2345');
   });
 
+  it('honors wildcard, list, and weak If-None-Match before Range for GET and HEAD', async () => {
+    const account = await register('etag@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId);
+    const segmentId = await insertSegment(coursewareId);
+    const key = `courseware/${account.id}/${studentId}/${coursewareId}/audio/${segmentId}.mp3`;
+    await env.DB.prepare('UPDATE courseware_segments SET audio_object_key = ? WHERE id = ?').bind(key, segmentId).run();
+    await env.COURSEWARE_MEDIA.put(key, '0123456789', { httpMetadata: { contentType: 'audio/mpeg' } });
+    const path = `/api/coursewares/${coursewareId}/segments/${segmentId}/audio`;
+    const full = await api(path, {}, account.cookie);
+    const etag = full.headers.get('ETag');
+    expect(etag).toBeTruthy();
+    for (const [method, value] of [
+      ['GET', '*'],
+      ['GET', `"different", W/${etag}`],
+      ['HEAD', `W/${etag}`],
+    ] as const) {
+      const response = await api(path, {
+        method,
+        headers: { 'If-None-Match': value, Range: 'bytes=0-1' },
+      }, account.cookie);
+      expect(response.status).toBe(304);
+      expect(response.headers.get('ETag')).toBe(etag);
+      expect((await response.arrayBuffer()).byteLength).toBe(0);
+    }
+  });
+
   it('returns 403 when another parent requests a courseware or media object', async () => {
     const owner = await register('private-owner@example.com');
     const other = await register('private-other@example.com');
@@ -307,14 +366,7 @@ describe('courseware routes', () => {
     const studentId = await createStudent(account.cookie);
     await configureCoursewareAI(account.id);
     const coursewareId = await insertCourseware(studentId);
-    const imageEndpoint = await env.DB.prepare(
-      `SELECT e.id AS endpoint_id, p.id AS provider_id FROM ai_provider_endpoints e
-       JOIN ai_providers p ON p.id = e.provider_id WHERE e.capability = 'image_generation' LIMIT 1`,
-    ).first<{ endpoint_id: number; provider_id: number }>();
-    await env.DB.prepare('UPDATE coursewares SET model_snapshot_json = ? WHERE id = ?').bind(
-      JSON.stringify({ image: { endpointId: imageEndpoint?.endpoint_id, providerId: imageEndpoint?.provider_id } }),
-      coursewareId,
-    ).run();
+    await setImageSnapshot(coursewareId);
     const segmentId = await insertSegment(coursewareId, 'failed');
     const before = await env.DB.prepare('SELECT audio_object_key FROM courseware_segments WHERE id = ?').bind(segmentId).first<{ audio_object_key: string }>();
     const sent: unknown[] = [];
@@ -328,6 +380,206 @@ describe('courseware routes', () => {
     expect(after?.audio_object_key).toBe(before?.audio_object_key);
     expect(after?.image_status).toBe('pending');
     expect(sent).toEqual([{ coursewareId }]);
+  });
+
+  it('allows only one concurrent image retry claim and one queue message', async () => {
+    const account = await register('image-cas@example.com');
+    const studentId = await createStudent(account.cookie);
+    await configureCoursewareAI(account.id);
+    const coursewareId = await insertCourseware(studentId);
+    await setImageSnapshot(coursewareId);
+    await insertSegment(coursewareId, 'failed');
+    const sent: unknown[] = [];
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockImplementation(async (message) => {
+      sent.push(message);
+      return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+    });
+    const responses = await Promise.all([
+      api(`/api/coursewares/${coursewareId}/images/retry`, { method: 'POST' }, account.cookie),
+      api(`/api/coursewares/${coursewareId}/images/retry`, { method: 'POST' }, account.cookie),
+    ]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect(sent).toEqual([{ coursewareId }]);
+  });
+
+  it('rolls back only the failed image retry attempt and allows a later attempt', async () => {
+    const account = await register('image-queue-fail@example.com');
+    const studentId = await createStudent(account.cookie);
+    await configureCoursewareAI(account.id);
+    const coursewareId = await insertCourseware(studentId);
+    await setImageSnapshot(coursewareId);
+    const segmentId = await insertSegment(coursewareId, 'failed');
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockRejectedValueOnce(new Error('test queue failure'));
+    expect((await api(`/api/coursewares/${coursewareId}/images/retry`, { method: 'POST' }, account.cookie)).status).toBe(503);
+    const rolledBack = await env.DB.prepare(
+      `SELECT c.status, c.generation_stage, c.lease_token, cs.image_status, cs.image_request_id
+       FROM coursewares c JOIN courseware_segments cs ON cs.courseware_id = c.id
+       WHERE c.id = ? AND cs.id = ?`,
+    ).bind(coursewareId, segmentId).first<{
+      status: string; generation_stage: string; lease_token: string | null;
+      image_status: string; image_request_id: string;
+    }>();
+    expect(rolledBack).toEqual({
+      status: 'ready', generation_stage: 'ready', lease_token: null,
+      image_status: 'failed', image_request_id: '',
+    });
+    vi.restoreAllMocks();
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockResolvedValue({
+      metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+    });
+    expect((await api(`/api/coursewares/${coursewareId}/images/retry`, { method: 'POST' }, account.cookie)).status).toBe(200);
+  });
+
+  it('does not let retry queue failure overwrite a concurrent deleting state', async () => {
+    const account = await register('retry-delete-race@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId, 'failed', 'speech');
+    const segmentId = await insertSegment(coursewareId);
+    await env.DB.prepare("UPDATE courseware_segments SET audio_status = 'failed' WHERE id = ?")
+      .bind(segmentId).run();
+    const key = `courseware/${account.id}/${studentId}/${coursewareId}/audio/stale.mp3`;
+    await env.COURSEWARE_MEDIA.put(key, 'stale');
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockImplementationOnce(async () => {
+      vi.spyOn(env.COURSEWARE_MEDIA, 'delete').mockRejectedValueOnce(new Error('test storage failure'));
+      const deleting = await api(`/api/coursewares/${coursewareId}`, { method: 'DELETE' }, account.cookie);
+      expect(deleting.status).toBe(503);
+      throw new Error('test queue failure');
+    });
+    const response = await api(`/api/coursewares/${coursewareId}/retry`, { method: 'POST' }, account.cookie);
+    expect(response.status).toBe(503);
+    const row = await env.DB.prepare('SELECT status FROM coursewares WHERE id = ?')
+      .bind(coursewareId).first<{ status: string }>();
+    expect(row?.status).toBe('deleting');
+  });
+
+  it('allows only one concurrent full retry claim and one queue message', async () => {
+    const account = await register('full-retry-cas@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId, 'failed', 'speech');
+    const segmentId = await insertSegment(coursewareId);
+    await env.DB.prepare("UPDATE courseware_segments SET audio_status = 'failed' WHERE id = ?")
+      .bind(segmentId).run();
+    const sent: unknown[] = [];
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockImplementation(async (message) => {
+      sent.push(message);
+      return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+    });
+    const responses = await Promise.all([
+      api(`/api/coursewares/${coursewareId}/retry`, { method: 'POST' }, account.cookie),
+      api(`/api/coursewares/${coursewareId}/retry`, { method: 'POST' }, account.cookie),
+    ]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect(sent).toEqual([{ coursewareId }]);
+  });
+
+  it('restores a retryable stage after queue failure and permits a later retry', async () => {
+    const account = await register('full-retry-queue@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId, 'failed', 'speech');
+    const segmentId = await insertSegment(coursewareId);
+    await env.DB.prepare("UPDATE courseware_segments SET audio_status = 'failed' WHERE id = ?")
+      .bind(segmentId).run();
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockRejectedValueOnce(new Error('test queue failure'));
+    expect((await api(`/api/coursewares/${coursewareId}/retry`, { method: 'POST' }, account.cookie)).status).toBe(503);
+    const failed = await env.DB.prepare(
+      'SELECT status, generation_stage, retryable, lease_token FROM coursewares WHERE id = ?',
+    ).bind(coursewareId).first<{
+      status: string; generation_stage: string; retryable: number; lease_token: string | null;
+    }>();
+    expect(failed).toEqual({ status: 'failed', generation_stage: 'speech', retryable: 1, lease_token: null });
+    vi.restoreAllMocks();
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockResolvedValue({
+      metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+    });
+    expect((await api(`/api/coursewares/${coursewareId}/retry`, { method: 'POST' }, account.cookie)).status).toBe(200);
+  });
+
+  it('resumes full retry at scripting, speech, or images without resetting ready artifacts', async () => {
+    const account = await register('retry-stage@example.com');
+    const studentId = await createStudent(account.cookie);
+    const sent: unknown[] = [];
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockImplementation(async (message) => {
+      sent.push(message);
+      return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+    });
+
+    const scriptingId = await insertCourseware(studentId, 'failed', 'scripting');
+    const speechId = await insertCourseware(studentId, 'failed', 'speech');
+    await env.DB.prepare('UPDATE coursewares SET progress_percent = 47 WHERE id = ?').bind(speechId).run();
+    const speechReadySegment = await insertSegment(speechId);
+    const speechFailedSegment = await env.DB.prepare(
+      `INSERT INTO courseware_segments
+       (courseware_id, position, segment_key, kind, speaker, title, display_markdown, speech_text,
+        audio_status, audio_object_key, audio_content_type, audio_retry_count)
+       VALUES (?, 1, 'speech-failed', 'teacher_explanation', 'teacher', '讲解', '正文', '正文',
+         'failed', ?, 'audio/mpeg', 3) RETURNING id`,
+    ).bind(speechId, `courseware/fixed/${speechId}/failed.mp3`).first<{ id: number }>();
+    const imagesId = await insertCourseware(studentId, 'failed', 'images');
+    await env.DB.prepare('UPDATE coursewares SET progress_percent = 88 WHERE id = ?').bind(imagesId).run();
+    const imageReadySegment = await insertSegment(imagesId, 'ready');
+    const imageFailedSegment = await env.DB.prepare(
+      `INSERT INTO courseware_segments
+       (courseware_id, position, segment_key, kind, speaker, title, display_markdown, speech_text,
+        audio_status, audio_object_key, audio_content_type, image_status, image_object_key, image_content_type)
+       VALUES (?, 1, 'image-failed', 'teacher_explanation', 'teacher', '讲解', '正文', '正文',
+         'ready', ?, 'audio/mpeg', 'failed', ?, 'image/png') RETURNING id`,
+    ).bind(imagesId, `courseware/fixed/${imagesId}/audio.mp3`, `courseware/fixed/${imagesId}/image.png`)
+      .first<{ id: number }>();
+
+    for (const id of [scriptingId, speechId, imagesId]) {
+      expect((await api(`/api/coursewares/${id}/retry`, { method: 'POST' }, account.cookie)).status).toBe(200);
+    }
+    const stages = await env.DB.prepare(
+      'SELECT id, status, generation_stage, progress_percent FROM coursewares WHERE id IN (?, ?, ?) ORDER BY id',
+    ).bind(scriptingId, speechId, imagesId).all<{
+      id: number; status: string; generation_stage: string; progress_percent: number;
+    }>();
+    expect(stages.results.map((row) => row.status)).toEqual(['generating', 'generating', 'generating']);
+    expect(stages.results.map((row) => row.generation_stage)).toEqual(['scripting', 'speech', 'images']);
+    expect(stages.results.map((row) => row.progress_percent)).toEqual([0, 47, 88]);
+    const readySpeech = await env.DB.prepare('SELECT audio_status, audio_object_key FROM courseware_segments WHERE id = ?')
+      .bind(speechReadySegment).first<{ audio_status: string; audio_object_key: string }>();
+    const failedSpeech = await env.DB.prepare('SELECT audio_status, audio_object_key FROM courseware_segments WHERE id = ?')
+      .bind(speechFailedSegment?.id).first<{ audio_status: string; audio_object_key: string }>();
+    expect(readySpeech?.audio_status).toBe('ready');
+    expect(readySpeech?.audio_object_key).toContain('placeholder');
+    expect(failedSpeech).toMatchObject({ audio_status: 'pending', audio_object_key: `courseware/fixed/${speechId}/failed.mp3` });
+    const readyImage = await env.DB.prepare('SELECT image_status, image_object_key FROM courseware_segments WHERE id = ?')
+      .bind(imageReadySegment).first<{ image_status: string; image_object_key: string }>();
+    const failedImage = await env.DB.prepare('SELECT image_status, image_object_key FROM courseware_segments WHERE id = ?')
+      .bind(imageFailedSegment?.id).first<{ image_status: string; image_object_key: string }>();
+    expect(readyImage?.image_status).toBe('ready');
+    expect(failedImage).toMatchObject({ image_status: 'pending', image_object_key: `courseware/fixed/${imagesId}/image.png` });
+    expect(sent).toEqual([{ coursewareId: scriptingId }, { coursewareId: speechId }, { coursewareId: imagesId }]);
+  });
+
+  it('does not rerun scripting for a corrupt later-stage failure with no segments', async () => {
+    const account = await register('retry-corrupt@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId, 'failed', 'speech');
+    const sent: unknown[] = [];
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockImplementation(async (message) => {
+      sent.push(message);
+      return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+    });
+    expect((await api(`/api/coursewares/${coursewareId}/retry`, { method: 'POST' }, account.cookie)).status).toBe(409);
+    expect(sent).toEqual([]);
+  });
+
+  it('resumes finalizing without resetting a failed optional image', async () => {
+    const account = await register('retry-finalizing@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId, 'failed', 'finalizing');
+    const segmentId = await insertSegment(coursewareId, 'failed');
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockResolvedValue({
+      metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+    });
+    expect((await api(`/api/coursewares/${coursewareId}/retry`, { method: 'POST' }, account.cookie)).status).toBe(200);
+    const row = await env.DB.prepare(
+      `SELECT c.generation_stage, cs.image_status FROM coursewares c
+       JOIN courseware_segments cs ON cs.courseware_id = c.id WHERE c.id = ? AND cs.id = ?`,
+    ).bind(coursewareId, segmentId).first<{ generation_stage: string; image_status: string }>();
+    expect(row).toEqual({ generation_stage: 'finalizing', image_status: 'failed' });
   });
 
   it('marks a courseware deleting and removes its rows and objects', async () => {
@@ -352,5 +604,55 @@ describe('courseware routes', () => {
     expect(response.status).toBe(200);
     expect(await env.COURSEWARE_MEDIA.head(key)).toBeNull();
     expect(await env.DB.prepare('SELECT id FROM students WHERE id = ?').bind(studentId).first()).toBeNull();
+  });
+
+  it('keeps deleting ownership rows after an R2 failure and resumes on repeated DELETE', async () => {
+    const account = await register('delete-resume@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId, 'generating', 'speech');
+    const key = `courseware/${account.id}/${studentId}/${coursewareId}/audio/1.mp3`;
+    await env.COURSEWARE_MEDIA.put(key, 'delete-me');
+    vi.spyOn(env.COURSEWARE_MEDIA, 'delete').mockRejectedValueOnce(new Error('test partial failure'));
+    expect((await api(`/api/coursewares/${coursewareId}`, { method: 'DELETE' }, account.cookie)).status).toBe(503);
+    const retained = await env.DB.prepare('SELECT status FROM coursewares WHERE id = ?')
+      .bind(coursewareId).first<{ status: string }>();
+    expect(retained?.status).toBe('deleting');
+    vi.restoreAllMocks();
+    expect((await api(`/api/coursewares/${coursewareId}`, { method: 'DELETE' }, account.cookie)).status).toBe(200);
+    expect(await env.COURSEWARE_MEDIA.head(key)).toBeNull();
+  });
+
+  it('follows every R2 cursor and deletes each exact-prefix page in batches', async () => {
+    const list = vi.fn()
+      .mockResolvedValueOnce({ objects: [{ key: 'courseware/1/2/3/a' }], truncated: true, cursor: 'next' })
+      .mockResolvedValueOnce({ objects: [{ key: 'courseware/1/2/3/b' }], truncated: false });
+    const remove = vi.fn().mockResolvedValue(undefined);
+    await deleteCoursewareMedia({ list, delete: remove } as unknown as R2Bucket, {
+      userId: 1, studentId: 2, coursewareId: 3,
+    });
+    expect(list).toHaveBeenNthCalledWith(1, { prefix: 'courseware/1/2/3/', cursor: undefined, limit: 1000 });
+    expect(list).toHaveBeenNthCalledWith(2, { prefix: 'courseware/1/2/3/', cursor: 'next', limit: 1000 });
+    expect(remove.mock.calls).toEqual([[['courseware/1/2/3/a']], [['courseware/1/2/3/b']]]);
+  });
+
+  it('resumes exact-prefix deletion after a later R2 page fails', async () => {
+    const list = vi.fn()
+      .mockResolvedValueOnce({ objects: [{ key: 'courseware/1/2/3/a' }], truncated: true, cursor: 'next' })
+      .mockResolvedValueOnce({ objects: [{ key: 'courseware/1/2/3/b' }], truncated: false })
+      .mockResolvedValueOnce({ objects: [{ key: 'courseware/1/2/3/b' }], truncated: false });
+    const remove = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('test second-page failure'))
+      .mockResolvedValueOnce(undefined);
+    const bucket = { list, delete: remove } as unknown as R2Bucket;
+    await expect(deleteCoursewareMedia(bucket, { userId: 1, studentId: 2, coursewareId: 3 }))
+      .rejects.toThrow('test second-page failure');
+    await expect(deleteCoursewareMedia(bucket, { userId: 1, studentId: 2, coursewareId: 3 }))
+      .resolves.toBeUndefined();
+    expect(remove.mock.calls).toEqual([
+      [['courseware/1/2/3/a']],
+      [['courseware/1/2/3/b']],
+      [['courseware/1/2/3/b']],
+    ]);
   });
 });

@@ -8,7 +8,12 @@ import {
 } from '../ai-catalog/repository';
 import type { Env } from '../env';
 import { UserFacingError } from '../lib/errors';
-import { createCoursewareRepository } from './repository';
+import {
+  createCoursewareRepository,
+  type CoursewareStateGuard,
+  type SavedArtifact,
+} from './repository';
+import { putCoursewareMedia } from './media';
 
 export interface CreateCoursewareInput {
   studentId: number;
@@ -18,6 +23,31 @@ export interface CreateCoursewareInput {
   sourceConversationId?: number;
   sourceText?: string;
   includeImages: boolean;
+}
+
+export interface PersistCoursewareArtifactInput extends SavedArtifact {
+  bytes: ArrayBuffer;
+}
+
+/**
+ * Task 9 writes bytes before its D1 artifact CAS. If ownership of the state lease was
+ * lost (most importantly to deleting), remove exactly the just-written private object.
+ */
+export async function persistCoursewareArtifact(
+  env: Env,
+  input: PersistCoursewareArtifactInput,
+  guard: CoursewareStateGuard,
+): Promise<boolean> {
+  await putCoursewareMedia(env.COURSEWARE_MEDIA, input.objectKey, input.bytes, input.contentType);
+  try {
+    const committed = await createCoursewareRepository(env.DB).saveArtifact(input, guard);
+    if (committed) return true;
+  } catch (error) {
+    await env.COURSEWARE_MEDIA.delete(input.objectKey);
+    throw error;
+  }
+  await env.COURSEWARE_MEDIA.delete(input.objectKey);
+  return false;
 }
 
 interface OwnedStudent {
@@ -158,7 +188,13 @@ export async function createCourseware(
   try {
     await env.COURSEWARE_QUEUE.send({ coursewareId: created.id });
   } catch {
-    await repository.markFailed(created.id, 'queue_unavailable', '课件生成队列暂时不可用，请稍后重试', true);
+    await repository.markFailed(
+      created.id,
+      'queue_unavailable',
+      '课件生成队列暂时不可用，请稍后重试',
+      true,
+      { status: 'queued', stage: 'queued', leaseToken: null },
+    );
     throw new UserFacingError('课件生成服务暂时不可用，请稍后重试', 503);
   }
   return created;

@@ -8,7 +8,6 @@ import type {
   CoursewareSummary,
 } from '../../shared/courseware';
 import { resolveCredential } from '../ai-catalog/credentials';
-import { requireAuth } from '../auth/middleware';
 import type { AppContext } from '../env';
 import { ok, err } from '../lib/envelope';
 import { UserFacingError } from '../lib/errors';
@@ -126,7 +125,8 @@ function mapSegment(coursewareId: number, segment: CoursewareSegmentRow): Course
 }
 
 async function canRetryImages(db: D1Database, userId: number, detail: CoursewareDetailRow): Promise<boolean> {
-  if (detail.status !== 'ready' || !detail.segments.some((segment) => segment.image_status === 'failed')) return false;
+  if (detail.status !== 'ready' || detail.generation_stage !== 'ready'
+    || !detail.segments.some((segment) => segment.image_status === 'failed')) return false;
   const image = parseObject(detail.model_snapshot_json).image;
   if (!image || typeof image !== 'object' || Array.isArray(image)) return false;
   const snapshot = image as Record<string, unknown>;
@@ -184,7 +184,6 @@ async function ownedDetail(c: Context<AppContext>): Promise<CoursewareDetailRow 
 }
 
 export const coursewareStudentRoutes = new Hono<AppContext>();
-coursewareStudentRoutes.use('*', requireAuth);
 
 coursewareStudentRoutes.post('/:studentId/coursewares', async (c) => {
   const studentId = parseId(c.req.param('studentId'));
@@ -218,7 +217,6 @@ coursewareStudentRoutes.get('/:studentId/coursewares', async (c) => {
 });
 
 export const coursewareRoutes = new Hono<AppContext>();
-coursewareRoutes.use('*', requireAuth);
 
 coursewareRoutes.get('/:coursewareId', async (c) => {
   const detail = await ownedDetail(c);
@@ -266,7 +264,9 @@ coursewareRoutes.patch('/:coursewareId/progress', async (c) => {
     },
   };
   if (Object.keys(merged.checkpointAnswers).length > 30) return err(c, '检查点答案过多', 400);
-  await createCoursewareRepository(c.env.DB).saveProgress(c.get('user').id, detail.id, merged);
+  if (!await createCoursewareRepository(c.env.DB).saveProgress(c.get('user').id, detail.id, merged)) {
+    return err(c, '课件状态已变化，请刷新后重试', 409);
+  }
   return ok(c, merged);
 });
 
@@ -274,15 +274,19 @@ coursewareRoutes.post('/:coursewareId/retry', async (c) => {
   const detail = await ownedDetail(c);
   if (!detail) return err(c, '无权访问该课件', 403);
   const repository = createCoursewareRepository(c.env.DB);
-  if (!await repository.resetRetryableFailure(c.get('user').id, detail.id)) {
-    return err(c, '当前课件不可重试', 409);
-  }
+  const claim = await repository.claimRetryableFailure(
+    c.get('user').id, detail.id, `full-retry:${crypto.randomUUID()}`,
+  );
+  if (!claim) return err(c, '当前课件不可重试', 409);
   try {
     await c.env.COURSEWARE_QUEUE.send({ coursewareId: detail.id });
   } catch {
-    await repository.markFailed(detail.id, 'queue_unavailable', '课件生成队列暂时不可用，请稍后重试', true);
+    await repository.rollbackRetryClaim(
+      claim, 'queue_unavailable', '课件生成队列暂时不可用，请稍后重试',
+    );
     throw new UserFacingError('课件生成服务暂时不可用，请稍后重试', 503);
   }
+  await repository.finishRetryClaim(claim);
   return ok(c, { queued: true });
 });
 
@@ -294,26 +298,22 @@ coursewareRoutes.post('/:coursewareId/images/retry', async (c) => {
   const providerId = Number(image.providerId);
   const credential = await resolveCredential(c.env.DB, c.env, c.get('user').id, providerId);
   if (!credential) return err(c, '图片模型个人 Key 不可用', 409);
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      `UPDATE courseware_segments SET image_status = 'pending', image_object_key = '',
-         image_content_type = '', image_request_id = '', image_error_code = '', image_error_message = '',
-         updated_at = datetime('now') WHERE courseware_id = ? AND image_status = 'failed'`,
-    ).bind(detail.id),
-    c.env.DB.prepare(
-      `UPDATE coursewares SET generation_stage = 'images', updated_at = datetime('now')
-       WHERE id = ? AND status = 'ready'`,
-    ).bind(detail.id),
-  ]);
+  const repository = createCoursewareRepository(c.env.DB);
+  const attemptToken = `image-retry:${crypto.randomUUID()}`;
+  if (!await repository.claimImageRetry(c.get('user').id, detail.id, attemptToken)) {
+    return err(c, '当前课件图片不可重试', 409);
+  }
+  if (!await repository.resetClaimedFailedImages(detail.id, attemptToken)) {
+    await repository.rollbackImageRetryClaim(detail.id, attemptToken);
+    return err(c, '当前课件图片不可重试', 409);
+  }
   try {
     await c.env.COURSEWARE_QUEUE.send({ coursewareId: detail.id });
   } catch {
-    await c.env.DB.prepare(
-      `UPDATE courseware_segments SET image_status = 'failed', image_error_code = 'queue_unavailable',
-       image_error_message = '图片重试队列暂时不可用' WHERE courseware_id = ? AND image_status = 'pending'`,
-    ).bind(detail.id).run();
+    await repository.rollbackImageRetryClaim(detail.id, attemptToken);
     throw new UserFacingError('图片重试服务暂时不可用，请稍后重试', 503);
   }
+  await repository.finishImageRetryClaim(detail.id, attemptToken);
   return ok(c, { queued: true });
 });
 
@@ -328,7 +328,10 @@ coursewareRoutes.delete('/:coursewareId', async (c) => {
   } catch {
     throw new UserFacingError('课件媒体删除暂时失败，请稍后重试', 503);
   }
-  await repository.deleteRows(coursewareId);
+  if (!await repository.deleteRows(coursewareId)) {
+    const remaining = await repository.getForWorker(coursewareId);
+    if (remaining) throw new UserFacingError('课件删除状态已变化，请稍后重试', 503);
+  }
   return ok(c, { deleted: true });
 });
 

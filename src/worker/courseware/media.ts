@@ -79,6 +79,20 @@ function baseHeaders(object: R2Object): Headers {
   return headers;
 }
 
+function opaqueEtag(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith('W/') ? trimmed.slice(2).trim() : trimmed;
+}
+
+function ifNoneMatchMatches(value: string | null, etag: string): boolean {
+  if (!value) return false;
+  const expected = opaqueEtag(etag);
+  return value.split(',').some((candidate) => {
+    const trimmed = candidate.trim();
+    return trimmed === '*' || opaqueEtag(trimmed) === expected;
+  });
+}
+
 export async function getCoursewareMediaResponse(
   bucket: R2Bucket,
   key: string,
@@ -87,13 +101,13 @@ export async function getCoursewareMediaResponse(
   const metadata = await bucket.head(key);
   if (!metadata) return new Response('媒体不存在', { status: 404 });
   const headers = baseHeaders(metadata);
+  if (ifNoneMatchMatches(request.headers.get('If-None-Match'), metadata.httpEtag)) {
+    return new Response(null, { status: 304, headers });
+  }
   const rangeHeader = request.headers.get('Range');
   const ifRange = request.headers.get('If-Range');
   const useRange = Boolean(rangeHeader) && (!ifRange || ifRange === metadata.httpEtag);
 
-  if (!useRange && request.headers.get('If-None-Match') === metadata.httpEtag) {
-    return new Response(null, { status: 304, headers });
-  }
   if (useRange && rangeHeader) {
     const range = parseRange(rangeHeader, metadata.size);
     if (!range) {

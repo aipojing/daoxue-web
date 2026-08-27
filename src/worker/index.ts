@@ -22,6 +22,7 @@ app.route('/api/auth', authRoutes);
 // 鉴权在此统一执行一次。子应用各自 use('*') 会导致同一前缀下每个子应用都跑一遍，
 // 一个请求要重复查 4 次会话表。
 app.use('/api/students/*', requireAuth);
+app.use('/api/coursewares/*', requireAuth);
 app.use('/api/conversations/*', requireAuth);
 app.use('/api/mistake-cards/*', requireAuth);
 app.use('/api/admin/*', requireAuth, requireAdmin);

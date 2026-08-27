@@ -87,12 +87,27 @@ export interface CoursewareDetailRow {
 }
 
 export interface SavedArtifact {
+  coursewareId: number;
   segmentId: number;
   variant: 'main' | 'alternate' | 'image';
   objectKey: string;
   contentType: string;
   durationMs?: number;
   requestId?: string;
+}
+
+export interface CoursewareStateGuard {
+  status: CoursewareStatus;
+  stage: CoursewareGenerationStage;
+  leaseToken: string | null;
+}
+
+export interface CoursewareRetryClaim {
+  coursewareId: number;
+  failedStage: CoursewareGenerationStage;
+  resumeStatus: 'queued' | 'generating';
+  resumeStage: 'scripting' | 'speech' | 'images' | 'finalizing';
+  attemptToken: string;
 }
 
 export interface OwnedCoursewareCoordinates {
@@ -107,15 +122,21 @@ export interface CoursewareRepository {
   getOwned(userId: number, coursewareId: number): Promise<CoursewareDetailRow | null>;
   getForWorker(coursewareId: number): Promise<CoursewareDetailRow | null>;
   claimStage(coursewareId: number, expectedStage: string, nextStage: string, leaseToken: string, leaseUntil: string): Promise<boolean>;
-  releaseLease(coursewareId: number, leaseToken: string): Promise<void>;
-  saveScript(coursewareId: number, script: CoursewareScript): Promise<void>;
-  saveArtifact(artifact: SavedArtifact): Promise<void>;
-  saveProgress(userId: number, coursewareId: number, input: CoursewareProgressPatch): Promise<void>;
-  markReady(coursewareId: number): Promise<void>;
-  markFailed(coursewareId: number, code: string, safeMessage: string, retryable: boolean): Promise<void>;
-  resetRetryableFailure(userId: number, coursewareId: number): Promise<boolean>;
+  releaseLease(coursewareId: number, guard: CoursewareStateGuard): Promise<boolean>;
+  saveScript(coursewareId: number, script: CoursewareScript, guard: CoursewareStateGuard): Promise<boolean>;
+  saveArtifact(artifact: SavedArtifact, guard: CoursewareStateGuard): Promise<boolean>;
+  saveProgress(userId: number, coursewareId: number, input: CoursewareProgressPatch): Promise<boolean>;
+  markReady(coursewareId: number, guard: CoursewareStateGuard): Promise<boolean>;
+  markFailed(coursewareId: number, code: string, safeMessage: string, retryable: boolean, guard: CoursewareStateGuard): Promise<boolean>;
+  claimRetryableFailure(userId: number, coursewareId: number, attemptToken: string): Promise<CoursewareRetryClaim | null>;
+  finishRetryClaim(claim: CoursewareRetryClaim): Promise<boolean>;
+  rollbackRetryClaim(claim: CoursewareRetryClaim, code: string, safeMessage: string): Promise<boolean>;
+  claimImageRetry(userId: number, coursewareId: number, attemptToken: string): Promise<boolean>;
+  resetClaimedFailedImages(coursewareId: number, attemptToken: string): Promise<boolean>;
+  finishImageRetryClaim(coursewareId: number, attemptToken: string): Promise<boolean>;
+  rollbackImageRetryClaim(coursewareId: number, attemptToken: string): Promise<boolean>;
   markDeleting(userId: number, coursewareId: number): Promise<OwnedCoursewareCoordinates | null>;
-  deleteRows(coursewareId: number): Promise<void>;
+  deleteRows(coursewareId: number): Promise<boolean>;
 }
 
 interface SummaryRow {
@@ -269,22 +290,31 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
       return result.meta.changes === 1;
     },
 
-    async releaseLease(coursewareId, leaseToken) {
-      await db.prepare(
+    async releaseLease(coursewareId, guard) {
+      const result = await db.prepare(
         `UPDATE coursewares SET lease_token = NULL, lease_expires_at = NULL, updated_at = datetime('now')
-         WHERE id = ? AND lease_token = ?`,
-      ).bind(coursewareId, leaseToken).run();
+         WHERE id = ? AND status = ? AND generation_stage = ?
+           AND ((? IS NULL AND lease_token IS NULL) OR lease_token = ?)`,
+      ).bind(coursewareId, guard.status, guard.stage, guard.leaseToken, guard.leaseToken).run();
+      return result.meta.changes === 1;
     },
 
-    async saveScript(coursewareId, script) {
+    async saveScript(coursewareId, script, guard) {
       const statements: D1PreparedStatement[] = [
         db.prepare(
           `UPDATE coursewares SET title = ?, subject = ?, grade = ?, topic = ?,
              learning_objectives_json = ?, estimated_minutes = ?, updated_at = datetime('now')
-           WHERE id = ?`,
+           WHERE id = ? AND status = ? AND generation_stage = ?
+             AND ((? IS NULL AND lease_token IS NULL) OR lease_token = ?)`,
         ).bind(script.title, script.subject, script.grade, script.topic,
-          JSON.stringify(script.learningObjectives), script.estimatedMinutes, coursewareId),
-        db.prepare('DELETE FROM courseware_segments WHERE courseware_id = ?').bind(coursewareId),
+          JSON.stringify(script.learningObjectives), script.estimatedMinutes, coursewareId,
+          guard.status, guard.stage, guard.leaseToken, guard.leaseToken),
+        db.prepare(
+          `DELETE FROM courseware_segments WHERE courseware_id = ? AND EXISTS (
+             SELECT 1 FROM coursewares c WHERE c.id = ? AND c.status = ? AND c.generation_stage = ?
+               AND ((? IS NULL AND c.lease_token IS NULL) OR c.lease_token = ?)
+           )`,
+        ).bind(coursewareId, coursewareId, guard.status, guard.stage, guard.leaseToken, guard.leaseToken),
       ];
       script.segments.forEach((segment, position) => {
         statements.push(db.prepare(
@@ -292,7 +322,11 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
            (courseware_id, position, segment_key, kind, speaker, title, display_markdown, speech_text,
             alternate_display_markdown, alternate_speech_text, visual_mode, visual_prompt,
             visual_alt_text, checkpoint_json, audio_status, alternate_audio_status, image_status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE EXISTS (
+             SELECT 1 FROM coursewares c WHERE c.id = ? AND c.status = ? AND c.generation_stage = ?
+               AND ((? IS NULL AND c.lease_token IS NULL) OR c.lease_token = ?)
+           )`,
         ).bind(
           coursewareId, position, segment.segmentKey, segment.kind, segment.speaker, segment.title,
           segment.displayMarkdown, segment.speechText, segment.alternateExplanation?.displayMarkdown ?? '',
@@ -301,12 +335,14 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
           segment.speaker === 'system' ? 'not_required' : 'pending',
           segment.alternateExplanation ? 'pending' : 'not_required',
           segment.visual.mode === 'generated_image' ? 'pending' : 'not_required',
+          coursewareId, guard.status, guard.stage, guard.leaseToken, guard.leaseToken,
         ));
       });
-      await db.batch(statements);
+      const results = await db.batch(statements);
+      return results[0]?.meta.changes === 1;
     },
 
-    async saveArtifact(artifact) {
+    async saveArtifact(artifact, guard) {
       const fields = artifact.variant === 'main'
         ? ['audio_status', 'audio_object_key', 'audio_content_type', 'audio_duration_ms', 'audio_request_id']
         : artifact.variant === 'alternate'
@@ -314,53 +350,244 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
           : ['image_status', 'image_object_key', 'image_content_type', null, 'image_request_id'];
       const durationField = fields[3];
       const sql = durationField
-        ? `UPDATE courseware_segments SET ${fields[0]} = 'ready', ${fields[1]} = ?, ${fields[2]} = ?, ${durationField} = ?, ${fields[4]} = ?, updated_at = datetime('now') WHERE id = ?`
-        : `UPDATE courseware_segments SET ${fields[0]} = 'ready', ${fields[1]} = ?, ${fields[2]} = ?, ${fields[4]} = ?, updated_at = datetime('now') WHERE id = ?`;
+        ? `UPDATE courseware_segments SET ${fields[0]} = 'ready', ${fields[1]} = ?, ${fields[2]} = ?, ${durationField} = ?, ${fields[4]} = ?, updated_at = datetime('now')
+           WHERE id = ? AND courseware_id = ? AND ${fields[0]} = 'generating' AND EXISTS (
+             SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
+               AND c.status = ? AND c.generation_stage = ?
+               AND ((? IS NULL AND c.lease_token IS NULL) OR c.lease_token = ?)
+           )`
+        : `UPDATE courseware_segments SET ${fields[0]} = 'ready', ${fields[1]} = ?, ${fields[2]} = ?, ${fields[4]} = ?, updated_at = datetime('now')
+           WHERE id = ? AND courseware_id = ? AND ${fields[0]} = 'generating' AND EXISTS (
+             SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
+               AND c.status = ? AND c.generation_stage = ?
+               AND ((? IS NULL AND c.lease_token IS NULL) OR c.lease_token = ?)
+           )`;
       const statement = db.prepare(sql);
+      let result: D1Result;
       if (durationField) {
-        await statement.bind(artifact.objectKey, artifact.contentType, artifact.durationMs ?? 0, artifact.requestId ?? '', artifact.segmentId).run();
+        result = await statement.bind(
+          artifact.objectKey, artifact.contentType, artifact.durationMs ?? 0, artifact.requestId ?? '',
+          artifact.segmentId, artifact.coursewareId, guard.status, guard.stage,
+          guard.leaseToken, guard.leaseToken,
+        ).run();
       } else {
-        await statement.bind(artifact.objectKey, artifact.contentType, artifact.requestId ?? '', artifact.segmentId).run();
+        result = await statement.bind(
+          artifact.objectKey, artifact.contentType, artifact.requestId ?? '', artifact.segmentId,
+          artifact.coursewareId, guard.status, guard.stage, guard.leaseToken, guard.leaseToken,
+        ).run();
       }
+      return result.meta.changes === 1;
     },
 
     async saveProgress(userId, coursewareId, input) {
-      await db.prepare(
+      const result = await db.prepare(
         `UPDATE coursewares SET current_segment_position = ?, current_time_ms = ?,
            checkpoint_answers_json = ?, updated_at = datetime('now')
-         WHERE id = ? AND EXISTS (
+         WHERE id = ? AND status = 'ready' AND EXISTS (
            SELECT 1 FROM students s WHERE s.id = coursewares.student_id AND s.user_id = ?
          )`,
       ).bind(input.currentSegmentPosition, input.currentTimeMs,
         JSON.stringify(input.checkpointAnswers), coursewareId, userId).run();
+      return result.meta.changes === 1;
     },
 
-    async markReady(coursewareId) {
-      await db.prepare(
+    async markReady(coursewareId, guard) {
+      const result = await db.prepare(
         `UPDATE coursewares SET status = 'ready', generation_stage = 'ready', progress_percent = 100,
            lease_token = NULL, lease_expires_at = NULL, completed_at = datetime('now'), updated_at = datetime('now')
-         WHERE id = ?`,
-      ).bind(coursewareId).run();
-    },
-
-    async markFailed(coursewareId, code, safeMessage, retryable) {
-      await db.prepare(
-        `UPDATE coursewares SET status = 'failed', generation_stage = 'failed', error_code = ?,
-           error_message = ?, retryable = ?, lease_token = NULL, lease_expires_at = NULL,
-           updated_at = datetime('now') WHERE id = ?`,
-      ).bind(code, safeMessage, retryable ? 1 : 0, coursewareId).run();
-    },
-
-    async resetRetryableFailure(userId, coursewareId) {
-      const result = await db.prepare(
-        `UPDATE coursewares SET status = 'queued', generation_stage = 'queued', progress_percent = 0,
-           error_code = '', error_message = '', retryable = 0, lease_token = NULL,
-           lease_expires_at = NULL, updated_at = datetime('now')
-         WHERE id = ? AND status = 'failed' AND retryable = 1 AND EXISTS (
-           SELECT 1 FROM students s WHERE s.id = coursewares.student_id AND s.user_id = ?
-         )`,
-      ).bind(coursewareId, userId).run();
+         WHERE id = ? AND status = ? AND generation_stage = ?
+           AND ((? IS NULL AND lease_token IS NULL) OR lease_token = ?)`,
+      ).bind(coursewareId, guard.status, guard.stage, guard.leaseToken, guard.leaseToken).run();
       return result.meta.changes === 1;
+    },
+
+    async markFailed(coursewareId, code, safeMessage, retryable, guard) {
+      const result = await db.prepare(
+        `UPDATE coursewares SET status = 'failed', error_code = ?,
+           error_message = ?, retryable = ?, lease_token = NULL, lease_expires_at = NULL,
+           updated_at = datetime('now')
+         WHERE id = ? AND status = ? AND generation_stage = ?
+           AND ((? IS NULL AND lease_token IS NULL) OR lease_token = ?)`,
+      ).bind(code, safeMessage, retryable ? 1 : 0, coursewareId,
+        guard.status, guard.stage, guard.leaseToken, guard.leaseToken).run();
+      return result.meta.changes === 1;
+    },
+
+    async claimRetryableFailure(userId, coursewareId, attemptToken) {
+      const state = await db.prepare(
+        `SELECT c.generation_stage,
+                COUNT(cs.id) AS segment_count,
+                COALESCE(SUM(CASE WHEN cs.audio_status NOT IN ('ready', 'not_required')
+                                  OR cs.alternate_audio_status NOT IN ('ready', 'not_required')
+                                  THEN 1 ELSE 0 END), 0) AS unfinished_speech,
+                COALESCE(SUM(CASE WHEN cs.image_status NOT IN ('ready', 'not_required')
+                                  THEN 1 ELSE 0 END), 0) AS unfinished_images
+         FROM coursewares c
+         JOIN students s ON s.id = c.student_id
+         LEFT JOIN courseware_segments cs ON cs.courseware_id = c.id
+         WHERE c.id = ? AND s.user_id = ? AND c.status = 'failed' AND c.retryable = 1
+         GROUP BY c.id`,
+      ).bind(coursewareId, userId).first<{
+        generation_stage: CoursewareGenerationStage;
+        segment_count: number;
+        unfinished_speech: number;
+        unfinished_images: number;
+      }>();
+      if (!state) return null;
+      let resumeStage: CoursewareRetryClaim['resumeStage'];
+      if (['queued', 'scripting'].includes(state.generation_stage)) {
+        resumeStage = 'scripting';
+      } else {
+        if (state.segment_count === 0) return null;
+        if (state.generation_stage === 'finalizing') {
+          resumeStage = 'finalizing';
+        } else if (state.generation_stage === 'speech') {
+          resumeStage = state.unfinished_speech > 0
+            ? 'speech'
+            : state.unfinished_images > 0 ? 'images' : 'finalizing';
+        } else if (state.generation_stage === 'images') {
+          resumeStage = state.unfinished_speech > 0
+            ? 'speech'
+            : state.unfinished_images > 0 ? 'images' : 'finalizing';
+        } else {
+          // Compatibility for an old terminal `generation_stage = failed` row: infer from artifacts,
+          // but never re-run the paid scripting call without an explicit scripting/queued stage.
+          resumeStage = state.unfinished_speech > 0
+            ? 'speech'
+            : state.unfinished_images > 0 ? 'images' : 'finalizing';
+        }
+      }
+      const resumeStatus: CoursewareRetryClaim['resumeStatus'] = 'generating';
+      const claim: CoursewareRetryClaim = {
+        coursewareId,
+        failedStage: state.generation_stage,
+        resumeStatus,
+        resumeStage,
+        attemptToken,
+      };
+      const statements: D1PreparedStatement[] = [
+        db.prepare(
+          `UPDATE coursewares SET status = ?, generation_stage = ?, error_code = '', error_message = '',
+             retryable = 0, lease_token = ?, lease_expires_at = datetime('now', '+5 minutes'),
+             updated_at = datetime('now')
+           WHERE id = ? AND status = 'failed' AND generation_stage = ? AND retryable = 1
+             AND (lease_token IS NULL OR lease_expires_at <= datetime('now'))
+             AND EXISTS (
+               SELECT 1 FROM students s WHERE s.id = coursewares.student_id AND s.user_id = ?
+             )`,
+        ).bind(resumeStatus, resumeStage, attemptToken, coursewareId, state.generation_stage, userId),
+      ];
+      if (resumeStage === 'speech') {
+        statements.push(db.prepare(
+          `UPDATE courseware_segments SET
+             audio_status = CASE WHEN audio_status IN ('failed', 'generating') THEN 'pending' ELSE audio_status END,
+             audio_error_code = CASE WHEN audio_status IN ('failed', 'generating') THEN '' ELSE audio_error_code END,
+             audio_error_message = CASE WHEN audio_status IN ('failed', 'generating') THEN '' ELSE audio_error_message END,
+             audio_retry_count = CASE WHEN audio_status IN ('failed', 'generating') THEN 0 ELSE audio_retry_count END,
+             alternate_audio_status = CASE WHEN alternate_audio_status IN ('failed', 'generating') THEN 'pending' ELSE alternate_audio_status END,
+             alternate_audio_error_code = CASE WHEN alternate_audio_status IN ('failed', 'generating') THEN '' ELSE alternate_audio_error_code END,
+             alternate_audio_error_message = CASE WHEN alternate_audio_status IN ('failed', 'generating') THEN '' ELSE alternate_audio_error_message END,
+             alternate_audio_retry_count = CASE WHEN alternate_audio_status IN ('failed', 'generating') THEN 0 ELSE alternate_audio_retry_count END,
+             updated_at = datetime('now')
+           WHERE courseware_id = ? AND EXISTS (
+             SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
+               AND c.status = ? AND c.generation_stage = ? AND c.lease_token = ?
+           )`,
+        ).bind(coursewareId, resumeStatus, resumeStage, attemptToken));
+      } else if (resumeStage === 'images') {
+        statements.push(db.prepare(
+          `UPDATE courseware_segments SET
+             image_status = CASE WHEN image_status IN ('failed', 'generating') THEN 'pending' ELSE image_status END,
+             image_error_code = CASE WHEN image_status IN ('failed', 'generating') THEN '' ELSE image_error_code END,
+             image_error_message = CASE WHEN image_status IN ('failed', 'generating') THEN '' ELSE image_error_message END,
+             image_retry_count = CASE WHEN image_status IN ('failed', 'generating') THEN 0 ELSE image_retry_count END,
+             updated_at = datetime('now')
+           WHERE courseware_id = ? AND EXISTS (
+             SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
+               AND c.status = ? AND c.generation_stage = ? AND c.lease_token = ?
+           )`,
+        ).bind(coursewareId, resumeStatus, resumeStage, attemptToken));
+      }
+      const results = await db.batch(statements);
+      return results[0]?.meta.changes === 1 ? claim : null;
+    },
+
+    async finishRetryClaim(claim) {
+      const result = await db.prepare(
+        `UPDATE coursewares SET lease_token = NULL, lease_expires_at = NULL, updated_at = datetime('now')
+         WHERE id = ? AND status = ? AND generation_stage = ? AND lease_token = ?`,
+      ).bind(claim.coursewareId, claim.resumeStatus, claim.resumeStage, claim.attemptToken).run();
+      return result.meta.changes === 1;
+    },
+
+    async rollbackRetryClaim(claim, code, safeMessage) {
+      const result = await db.prepare(
+        `UPDATE coursewares SET status = 'failed', generation_stage = ?, error_code = ?,
+           error_message = ?, retryable = 1, lease_token = NULL, lease_expires_at = NULL,
+           updated_at = datetime('now')
+         WHERE id = ? AND status = ? AND generation_stage = ? AND lease_token = ?`,
+      ).bind(claim.resumeStage, code, safeMessage, claim.coursewareId,
+        claim.resumeStatus, claim.resumeStage, claim.attemptToken).run();
+      return result.meta.changes === 1;
+    },
+
+    async claimImageRetry(userId, coursewareId, attemptToken) {
+      const result = await db.prepare(
+        `UPDATE coursewares SET generation_stage = 'images', lease_token = ?,
+           lease_expires_at = datetime('now', '+5 minutes'), updated_at = datetime('now')
+         WHERE id = ? AND status = 'ready' AND generation_stage = 'ready'
+           AND (lease_token IS NULL OR lease_expires_at <= datetime('now'))
+           AND EXISTS (
+             SELECT 1 FROM students s WHERE s.id = coursewares.student_id AND s.user_id = ?
+           )
+           AND EXISTS (
+             SELECT 1 FROM courseware_segments cs
+             WHERE cs.courseware_id = coursewares.id AND cs.image_status = 'failed'
+           )`,
+      ).bind(attemptToken, coursewareId, userId).run();
+      return result.meta.changes === 1;
+    },
+
+    async resetClaimedFailedImages(coursewareId, attemptToken) {
+      const result = await db.prepare(
+        `UPDATE courseware_segments SET image_status = 'pending', image_request_id = ?,
+           image_error_code = '', image_error_message = '', image_retry_count = 0,
+           updated_at = datetime('now')
+         WHERE courseware_id = ? AND image_status = 'failed' AND EXISTS (
+           SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
+             AND c.status = 'ready' AND c.generation_stage = 'images' AND c.lease_token = ?
+         )`,
+      ).bind(attemptToken, coursewareId, attemptToken).run();
+      return result.meta.changes > 0;
+    },
+
+    async finishImageRetryClaim(coursewareId, attemptToken) {
+      const result = await db.prepare(
+        `UPDATE coursewares SET lease_token = NULL, lease_expires_at = NULL, updated_at = datetime('now')
+         WHERE id = ? AND status = 'ready' AND generation_stage = 'images' AND lease_token = ?`,
+      ).bind(coursewareId, attemptToken).run();
+      return result.meta.changes === 1;
+    },
+
+    async rollbackImageRetryClaim(coursewareId, attemptToken) {
+      const results = await db.batch([
+        db.prepare(
+          `UPDATE courseware_segments SET image_status = 'failed', image_request_id = '',
+             image_error_code = 'queue_unavailable', image_error_message = '图片重试队列暂时不可用',
+             updated_at = datetime('now')
+           WHERE courseware_id = ? AND image_status = 'pending' AND image_request_id = ?
+             AND EXISTS (
+               SELECT 1 FROM coursewares c WHERE c.id = courseware_segments.courseware_id
+                 AND c.status = 'ready' AND c.generation_stage = 'images' AND c.lease_token = ?
+             )`,
+        ).bind(coursewareId, attemptToken, attemptToken),
+        db.prepare(
+          `UPDATE coursewares SET generation_stage = 'ready', lease_token = NULL,
+             lease_expires_at = NULL, updated_at = datetime('now')
+           WHERE id = ? AND status = 'ready' AND generation_stage = 'images' AND lease_token = ?`,
+        ).bind(coursewareId, attemptToken),
+      ]);
+      return results[1]?.meta.changes === 1;
     },
 
     async markDeleting(userId, coursewareId) {
@@ -380,7 +607,9 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
     },
 
     async deleteRows(coursewareId) {
-      await db.prepare("DELETE FROM coursewares WHERE id = ? AND status = 'deleting'").bind(coursewareId).run();
+      const result = await db.prepare("DELETE FROM coursewares WHERE id = ? AND status = 'deleting'")
+        .bind(coursewareId).run();
+      return result.meta.changes === 1;
     },
   };
 }
