@@ -124,6 +124,9 @@ describe('courseware script schema', () => {
     ['bare email autolink', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = 'teacher@example.test'; }],
     ['C1 control character', (script: CoursewareScript) => { script.segments[0]!.speechText = '你好\u0085世界'; }],
     ['format control character', (script: CoursewareScript) => { script.segments[0]!.speechText = '你好\u202E世界'; }],
+    ['Unicode line separator in plain text', (script: CoursewareScript) => { script.segments[0]!.speechText = '你好\u2028世界'; }],
+    ['Unicode line separator in display text', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = '你好\u2028世界'; }],
+    ['Unicode paragraph separator in display text', (script: CoursewareScript) => { script.segments[0]!.displayMarkdown = '你好\u2029世界'; }],
   ])('rejects %s', (_name, mutate) => {
     const script = clonedScript();
     mutate(script);

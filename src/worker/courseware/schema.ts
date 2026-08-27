@@ -11,7 +11,7 @@ const SAFE_KATEX_COMMANDS = new Set([
   'pm', 'prod', 'right', 'sqrt', 'sum', 'text', 'times', 'underline',
 ]);
 const FORMAL_ASSESSMENT = /(?:\bL[1-4]\b|正式(?:测评|测验)|掌握(?:等级|结论)|学习等级)/i;
-const CONTROL_OR_FORMAT = /[\p{Cc}\p{Cf}]/u;
+const CONTROL_OR_FORMAT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 const NAMED_HTML_ENTITIES = new Map<string, string>([
   ['amp', '&'], ['apos', "'"], ['colon', ':'], ['gt', '>'], ['lt', '<'],
   ['newline', '\n'], ['quot', '"'], ['tab', '\t'],
