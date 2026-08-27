@@ -716,6 +716,38 @@ describe('courseware routes', () => {
     expect(row).toEqual({ generation_stage: 'finalizing', image_status: 'failed' });
   });
 
+  it('atomically resumes finalizing required speech failures and retains their object keys', async () => {
+    const account = await register('retry-finalizing-speech@example.com');
+    const studentId = await createStudent(account.cookie);
+    const coursewareId = await insertCourseware(studentId, 'failed', 'finalizing');
+    const segmentId = await insertSegment(coursewareId, 'not_required');
+    const mainKey = `courseware/retained/${coursewareId}/main.mp3`;
+    const alternateKey = `courseware/retained/${coursewareId}/alternate.mp3`;
+    await env.DB.prepare(
+      `UPDATE courseware_segments SET audio_status = 'failed', audio_object_key = ?, audio_retry_count = 3,
+         alternate_audio_status = 'generating', alternate_audio_object_key = ?,
+         alternate_speech_text = '另一种讲法', alternate_audio_retry_count = 2 WHERE id = ?`,
+    ).bind(mainKey, alternateKey, segmentId).run();
+    vi.spyOn(env.COURSEWARE_QUEUE, 'send').mockResolvedValue({
+      metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+    });
+    expect((await api(`/api/coursewares/${coursewareId}/retry`, { method: 'POST' }, account.cookie)).status).toBe(200);
+    const state = await env.DB.prepare(
+      `SELECT c.status, c.generation_stage, cs.audio_status, cs.audio_object_key,
+              cs.alternate_audio_status, cs.alternate_audio_object_key
+       FROM coursewares c JOIN courseware_segments cs ON cs.courseware_id = c.id
+       WHERE c.id = ? AND cs.id = ?`,
+    ).bind(coursewareId, segmentId).first<{
+      status: string; generation_stage: string; audio_status: string; audio_object_key: string;
+      alternate_audio_status: string; alternate_audio_object_key: string;
+    }>();
+    expect(state).toEqual({
+      status: 'generating', generation_stage: 'speech',
+      audio_status: 'pending', audio_object_key: mainKey,
+      alternate_audio_status: 'pending', alternate_audio_object_key: alternateKey,
+    });
+  });
+
   it('marks a courseware deleting and removes its rows and objects', async () => {
     const account = await register('delete@example.com');
     const studentId = await createStudent(account.cookie);

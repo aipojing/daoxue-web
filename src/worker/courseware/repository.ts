@@ -522,7 +522,7 @@ export function createCoursewareRepository(db: D1Database): CoursewareRepository
       } else {
         if (state.segment_count === 0) return null;
         if (state.generation_stage === 'finalizing') {
-          resumeStage = 'finalizing';
+          resumeStage = state.unfinished_speech > 0 ? 'speech' : 'finalizing';
         } else if (state.generation_stage === 'speech') {
           resumeStage = state.unfinished_speech > 0
             ? 'speech'

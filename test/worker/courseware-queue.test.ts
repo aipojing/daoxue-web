@@ -10,6 +10,7 @@ import {
   type CoursewareGenerationDependencies,
 } from '../../src/worker/courseware/generator';
 import { createCoursewareQueueConsumer } from '../../src/worker/courseware/queue';
+import { createCoursewareRepository } from '../../src/worker/courseware/repository';
 import type { Env } from '../../src/worker/env';
 
 class FakeBucket {
@@ -632,6 +633,92 @@ describe('courseware queue processor', () => {
     expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
     expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('done');
     expect(await row(fixture.coursewareId)).toMatchObject({ status: 'ready', generation_stage: 'ready' });
+  });
+
+  it('full-retries a third finalizing audio head failure through speech and restores the retained object', async () => {
+    const fixture = await createFixture({ includeImages: false });
+    const deps = dependencies();
+    while ((await row(fixture.coursewareId))?.generation_stage !== 'finalizing') {
+      expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    }
+    const artifact = await firstReadyArtifact(fixture.coursewareId);
+    if (!artifact) throw new Error('audio fixture unavailable');
+    fixture.bucket.headFailures.set(artifact.object_key, 3);
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('done');
+    expect(await row(fixture.coursewareId)).toMatchObject({
+      status: 'failed', generation_stage: 'finalizing', error_code: 'storage_failed',
+    });
+
+    const repository = createCoursewareRepository(env.DB);
+    const claim = await repository.claimRetryableFailure(
+      fixture.userId, fixture.coursewareId, `full-retry:${crypto.randomUUID()}`,
+    );
+    expect(claim).toMatchObject({ resumeStage: 'speech' });
+    if (!claim) throw new Error('retry claim unavailable');
+    await repository.finishRetryClaim(claim);
+    const retained = await env.DB.prepare(
+      'SELECT audio_status, audio_object_key FROM courseware_segments WHERE id = ?',
+    ).bind(artifact.id).first<{ audio_status: string; audio_object_key: string }>();
+    expect(retained).toEqual({ audio_status: 'pending', audio_object_key: artifact.object_key });
+
+    fixture.bucket.headFailures.set(artifact.object_key, 2);
+    const speechCalls = vi.mocked(deps.synthesizeSpeech).mock.calls.length;
+    const outcomes = await advanceUntilDone(fixture, deps, 8);
+    expect(outcomes.at(-1)).toBe('done');
+    expect(outcomes.length).toBeLessThanOrEqual(6);
+    expect(vi.mocked(deps.synthesizeSpeech).mock.calls.length).toBe(speechCalls);
+    expect(await row(fixture.coursewareId)).toMatchObject({ status: 'ready', generation_stage: 'ready' });
+    const incomplete = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM courseware_segments WHERE courseware_id = ? AND
+       (audio_status != 'ready' OR alternate_audio_status NOT IN ('ready', 'not_required'))`,
+    ).bind(fixture.coursewareId).first<{ count: number }>();
+    expect(incomplete?.count).toBe(0);
+  });
+
+  it('generates a missing retained alternate audio once and deletes the exact old attempt key', async () => {
+    const fixture = await createFixture({ includeImages: false });
+    const deps = dependencies();
+    await advanceUntilDone(fixture, deps);
+    const artifact = await env.DB.prepare(
+      `SELECT id, alternate_audio_object_key AS object_key FROM courseware_segments
+       WHERE courseware_id = ? AND alternate_audio_status = 'ready' ORDER BY position LIMIT 1`,
+    ).bind(fixture.coursewareId).first<{ id: number; object_key: string }>();
+    if (!artifact) throw new Error('alternate audio fixture unavailable');
+    fixture.bucket.hiddenHeads.add(artifact.object_key);
+    await env.DB.prepare("UPDATE coursewares SET status = 'generating', generation_stage = 'speech' WHERE id = ?")
+      .bind(fixture.coursewareId).run();
+    await env.DB.prepare("UPDATE courseware_segments SET alternate_audio_status = 'pending' WHERE id = ?")
+      .bind(artifact.id).run();
+    const calls = vi.mocked(deps.synthesizeSpeech).mock.calls.length;
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    expect(vi.mocked(deps.synthesizeSpeech).mock.calls.length).toBe(calls + 1);
+    expect(fixture.bucket.objects.has(artifact.object_key)).toBe(false);
+    const replaced = await env.DB.prepare(
+      'SELECT alternate_audio_status, alternate_audio_object_key FROM courseware_segments WHERE id = ?',
+    ).bind(artifact.id).first<{ alternate_audio_status: string; alternate_audio_object_key: string }>();
+    expect(replaced?.alternate_audio_status).toBe('ready');
+    expect(replaced?.alternate_audio_object_key).not.toBe(artifact.object_key);
+  });
+
+  it('tombstones a missing retained main audio when exact post-CAS cleanup fails', async () => {
+    const fixture = await createFixture({ includeImages: false });
+    const deps = dependencies();
+    await advanceUntilDone(fixture, deps);
+    const artifact = await firstReadyArtifact(fixture.coursewareId);
+    if (!artifact) throw new Error('audio fixture unavailable');
+    fixture.bucket.hiddenHeads.add(artifact.object_key);
+    fixture.bucket.deleteFailures.add(artifact.object_key);
+    await env.DB.prepare("UPDATE coursewares SET status = 'generating', generation_stage = 'speech' WHERE id = ?")
+      .bind(fixture.coursewareId).run();
+    await env.DB.prepare("UPDATE courseware_segments SET audio_status = 'pending' WHERE id = ?")
+      .bind(artifact.id).run();
+    expect(await advanceCourseware(fixture.appEnv, fixture.coursewareId, deps)).toBe('reenqueue');
+    const tombstone = await env.DB.prepare(
+      'SELECT object_key FROM courseware_media_tombstones WHERE object_key = ?',
+    ).bind(artifact.object_key).first<{ object_key: string }>();
+    expect(tombstone?.object_key).toBe(artifact.object_key);
   });
 
   it('restores a retained image object without another provider call', async () => {

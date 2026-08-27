@@ -240,6 +240,16 @@ async function advanceScripting(
 type AudioVariant = 'main' | 'alternate';
 interface AudioWork { segment: CoursewareSegmentRow; variant: AudioVariant }
 
+function pendingAudioWork(courseware: CoursewareDetailRow): AudioWork[] {
+  const work: AudioWork[] = [];
+  for (const item of courseware.segments) {
+    if (item.audio_status === 'pending') work.push({ segment: item, variant: 'main' });
+    if (item.alternate_audio_status === 'pending') work.push({ segment: item, variant: 'alternate' });
+  }
+  return work.sort((left, right) => left.segment.position - right.segment.position ||
+    (left.variant === right.variant ? 0 : left.variant === 'main' ? -1 : 1));
+}
+
 function audioFields(variant: AudioVariant) {
   return variant === 'main'
     ? { status: 'audio_status', object: 'audio_object_key', retry: 'audio_retry_count', errorCode: 'audio_error_code', errorMessage: 'audio_error_message' }
@@ -340,6 +350,14 @@ async function updateProgress(env: Env, coursewareId: number, leaseToken: string
   ).bind(coursewareId, leaseToken).run();
 }
 
+async function hasFailedRequiredSpeech(env: Env, coursewareId: number): Promise<boolean> {
+  const failed = await env.DB.prepare(
+    `SELECT 1 AS failed FROM courseware_segments WHERE courseware_id = ? AND
+     (audio_status = 'failed' OR alternate_audio_status = 'failed') LIMIT 1`,
+  ).bind(coursewareId).first<{ failed: number }>();
+  return failed?.failed === 1;
+}
+
 async function advanceSpeech(
   env: Env,
   courseware: CoursewareDetailRow,
@@ -365,24 +383,49 @@ async function advanceSpeech(
     if (storage === 'ignored') return 'ignored';
     const latest = await createCoursewareRepository(env.DB).getForWorker(courseware.id);
     if (!latest) return 'ignored';
-    const work: AudioWork[] = [];
-    for (const item of latest.segments) {
-      if (item.audio_status === 'pending') work.push({ segment: item, variant: 'main' });
-      if (item.alternate_audio_status === 'pending') work.push({ segment: item, variant: 'alternate' });
-    }
-    work.sort((left, right) => left.segment.position - right.segment.position ||
-      (left.variant === right.variant ? 0 : left.variant === 'main' ? -1 : 1));
-    const batch = work.slice(0, MAX_ARTIFACTS_PER_ADVANCE);
+    if (await hasFailedRequiredSpeech(env, courseware.id)) return failCourseware(
+      env, courseware, leaseToken, new ProviderCallError('provider_unavailable', 503),
+    );
+    const batch = pendingAudioWork(latest).slice(0, MAX_ARTIFACTS_PER_ADVANCE);
     if (batch.length === 0) {
       return await setStage(env, courseware, leaseToken, 'speech', 'images') ? 'reenqueue' : 'ignored';
     }
-    const needsStudent = batch.some((item) => item.segment.speaker === 'student');
-    const needsTeacher = batch.some((item) => item.segment.speaker !== 'student');
+    const generationBatch: AudioWork[] = [];
+    for (const item of batch) {
+      const fields = audioFields(item.variant);
+      const retainedKey = item.segment[fields.object as keyof CoursewareSegmentRow];
+      if (typeof retainedKey !== 'string' || retainedKey.length === 0) {
+        generationBatch.push(item);
+        continue;
+      }
+      const inspection = await inspectStoredArtifact(
+        env, courseware, leaseToken, 'speech', item.segment.id, item.variant, 'pending', retainedKey,
+      );
+      if (inspection === 'retry') return 'reenqueue';
+      if (inspection === 'failed') return failCourseware(
+        env, courseware, leaseToken, new ProviderCallError('storage_failed', 503),
+      );
+      if (inspection === 'lost') return 'ignored';
+      if (inspection === 'missing') generationBatch.push(item);
+    }
+    if (generationBatch.length === 0) {
+      const remaining = await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM courseware_segments WHERE courseware_id = ? AND
+         (audio_status = 'pending' OR alternate_audio_status = 'pending')`,
+      ).bind(courseware.id).first<{ count: number }>();
+      if ((remaining?.count ?? 0) > 0) return 'reenqueue';
+      if (await hasFailedRequiredSpeech(env, courseware.id)) return failCourseware(
+        env, courseware, leaseToken, new ProviderCallError('provider_unavailable', 503),
+      );
+      return await setStage(env, courseware, leaseToken, 'speech', 'images') ? 'reenqueue' : 'ignored';
+    }
+    const needsStudent = generationBatch.some((item) => item.segment.speaker === 'student');
+    const needsTeacher = generationBatch.some((item) => item.segment.speaker !== 'student');
     const [teacherModel, studentModel] = await Promise.all([
       needsTeacher ? resolveTeacherSpeechModelForJob(env, courseware) : Promise.resolve(null),
       needsStudent ? resolveStudentSpeechModelForJob(env, courseware) : Promise.resolve(null),
     ] as const);
-    for (const item of batch) {
+    for (const item of generationBatch) {
       if (!await renewLease(env, courseware.id, leaseToken, dependencies.now())) return 'ignored';
       const fields = audioFields(item.variant);
       const claimed = await env.DB.prepare(
@@ -437,6 +480,15 @@ async function advanceSpeech(
           throw new ProviderCallError('storage_failed', 503);
         }
         if (!committed) return 'ignored';
+        const retainedKey = item.segment[fields.object as keyof CoursewareSegmentRow];
+        const newKey = buildCoursewareMediaAttemptKey(logicalKey, leaseToken);
+        if (typeof retainedKey === 'string' && retainedKey.length > 0 && retainedKey !== newKey) {
+          try {
+            await cleanupCoursewareAttemptObject(env, retainedKey);
+          } catch {
+            // The exact retained key is tombstoned; the newly committed artifact remains authoritative.
+          }
+        }
         await recordHealth(dependencies, env, courseware, model);
       } catch (error) {
         const normalized = normalizedError(error);
