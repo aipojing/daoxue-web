@@ -99,6 +99,14 @@ export type {
   CoursewareModelPurpose,
 } from '../shared/ai-catalog';
 
+export type {
+  CoursewareDetail,
+  CoursewareGenerationStage,
+  CoursewareProgressPatch,
+  CoursewareStatus,
+  CoursewareSummary,
+} from '../shared/courseware';
+
 export interface User {
   id: number;
   email: string;

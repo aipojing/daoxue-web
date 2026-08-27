@@ -105,4 +105,16 @@ describe('客户端关键交互结构', () => {
     expect(workspaceCss).not.toContain('.workspace-content .chat-page { display: block; }');
     expect(workspaceCss).not.toContain('.workspace-content .chat-main { min-height: calc(100dvh - 56px); }');
   });
+
+  it('课件库明确后台生成、个人套餐和 AI 服务配置入口', () => {
+    const createPanel = clientSource('components/CoursewareCreatePanel.tsx');
+    const status = clientSource('components/CoursewareGenerationStatus.tsx');
+    const page = clientSource('pages/CoursewaresPage.tsx');
+
+    expect(createPanel).toContain('额度耗尽后不会切换到平台账号');
+    expect(createPanel).toContain('to="/ai-settings"');
+    expect(status).toContain('可以离开，后台会继续');
+    expect(page).toContain('CoursewareDeleteModal');
+    expect(page).not.toContain('window.confirm');
+  });
 });

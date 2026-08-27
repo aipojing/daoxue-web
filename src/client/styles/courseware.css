@@ -1,0 +1,64 @@
+.courseware-page { max-width: 1040px; }
+.courseware-hero { margin: -24px -16px 24px; padding: 42px max(16px, calc((100vw - 1008px) / 2)) 36px; color: var(--chalk); background: var(--board-deep); }
+.courseware-hero h1, .courseware-section-heading h1, .courseware-library h2 { font-family: var(--font-display); color: inherit; }
+.courseware-hero h1 { max-width: 620px; margin: 5px 0 8px; font-size: clamp(28px, 4vw, 42px); line-height: 1.25; }
+.courseware-hero p:last-child { max-width: 570px; color: rgba(253, 251, 242, .8); }
+.courseware-eyebrow { color: var(--board); font-size: 12px; font-weight: 800; letter-spacing: .1em; }
+.courseware-hero .courseware-eyebrow { color: #c9d9cf; }
+.courseware-create, .courseware-library { background: var(--paper-card); border: 1px solid var(--grid); box-shadow: var(--shadow); }
+.courseware-create { padding: 24px; border-top: 4px solid var(--board); }
+.courseware-section-heading h1, .courseware-library h2 { margin: 2px 0 0; color: var(--board-deep); font-size: 26px; }
+.courseware-readiness-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 20px 0 12px; }
+.courseware-readiness-grid span { min-height: 54px; display: grid; align-content: center; padding: 8px 10px; border: 1px solid var(--grid-soft); background: var(--paper); font-size: 13px; }
+.courseware-readiness-grid b { color: var(--board-deep); }
+.courseware-account-note, .courseware-config-note { margin: 10px 0; font-size: 14px; }
+.courseware-account-note { color: var(--ink-soft); }
+.courseware-config-note { padding: 9px 11px; border-left: 3px solid var(--sticker-amber); background: var(--warn-wash); }
+.courseware-config-note a { font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
+.courseware-form { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 20px; }
+.courseware-form label { display: grid; gap: 6px; color: var(--ink); font-weight: 700; font-size: 14px; }
+.courseware-form-wide { grid-column: 1 / -1; }
+.courseware-image-toggle { min-height: 44px; display: flex !important; align-items: center; gap: 9px; padding-top: 5px; }
+.courseware-image-toggle input { width: 20px; height: 20px; flex: 0 0 auto; }
+.courseware-form-actions { display: flex; justify-content: flex-end; }
+.courseware-form-actions .btn { min-height: 44px; }
+.courseware-library { margin-top: 24px; padding: 24px; }
+.courseware-library-heading, .courseware-card-head, .courseware-card-actions, .courseware-status-actions { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.courseware-inline-error { color: var(--redpen); font-size: 14px; }
+.courseware-list { display: grid; gap: 12px; margin-top: 18px; }
+.courseware-card { scroll-margin-top: 70px; padding: 18px; border: 1px solid var(--grid); border-left: 4px solid var(--board); background: var(--paper); }
+.courseware-card.is-failed { border-left-color: var(--redpen); }
+.courseware-card.is-ready { border-left-color: var(--success); }
+.courseware-card h3 { margin: 0; color: var(--board-deep); font-family: var(--font-display); font-size: 21px; }
+.courseware-card-head p { color: var(--ink-soft); font-size: 14px; }
+.courseware-card-head .courseware-subject { color: var(--board); font-size: 12px; font-weight: 800; letter-spacing: .08em; }
+.courseware-badge { flex: 0 0 auto; min-height: 28px; padding: 3px 8px; border: 1px solid var(--grid); border-radius: 999px; color: var(--board-deep); background: var(--paper-card); font-size: 12px; font-weight: 800; }
+.courseware-generation-status { margin-top: 12px; font-size: 14px; }
+.courseware-stage { color: var(--ink); }
+.courseware-progress { height: 8px; overflow: hidden; margin: 8px 0; border-radius: 999px; background: var(--grid-soft); }
+.courseware-progress span { display: block; height: 100%; background: var(--board); transition: width .25s ease; }
+.courseware-warning { margin-top: 8px; padding: 8px 10px; border-left: 3px solid var(--sticker-amber); background: var(--warn-wash); }
+.courseware-error { margin-top: 8px; color: var(--redpen); }
+.courseware-status-actions { justify-content: flex-start; margin-top: 10px; }
+.courseware-card-actions { align-items: center; margin-top: 14px; }
+.courseware-card-actions .btn { min-height: 44px; }
+.courseware-delete-button { min-height: 44px; padding: 9px 10px; color: var(--redpen); text-decoration: underline; text-underline-offset: 3px; }
+.courseware-delete-button:disabled { color: var(--ink-soft); cursor: wait; }
+.courseware-empty, .courseware-loading, .courseware-error-state { display: grid; place-items: center; min-height: 190px; padding: 28px; border: 1px dashed var(--grid); color: var(--ink-soft); text-align: center; }
+.courseware-empty h3 { color: var(--board-deep); }
+.courseware-error-state { gap: 12px; color: var(--redpen); }
+.courseware-load-more { display: flex; justify-content: center; margin-top: 18px; }
+.courseware-load-more .btn { min-height: 44px; }
+
+@media (max-width: 767px) {
+  .courseware-hero { margin: -18px -14px 18px; padding: 35px 18px 30px 70px; }
+  .courseware-create, .courseware-library { padding: 18px 14px; }
+  .courseware-readiness-grid, .courseware-form { grid-template-columns: 1fr; }
+  .courseware-form-wide { grid-column: auto; }
+  .courseware-library-heading, .courseware-card-head, .courseware-card-actions { align-items: stretch; flex-direction: column; }
+  .courseware-badge { align-self: flex-start; }
+  .courseware-card-actions .btn { width: 100%; justify-content: center; }
+  .courseware-delete-button { align-self: flex-start; }
+}
+
+@media (prefers-reduced-motion: reduce) { .courseware-progress span { transition: none; } }

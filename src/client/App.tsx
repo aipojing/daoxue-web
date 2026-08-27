@@ -17,6 +17,7 @@ const AISettingsPage = lazy(() => import('./pages/AISettingsPage'));
 const StudentWorkspaceLayout = lazy(() => import('./components/StudentWorkspaceLayout'));
 const StudentMasteryPage = lazy(() => import('./pages/StudentMasteryPage'));
 const StudentProfilePage = lazy(() => import('./pages/StudentProfilePage'));
+const CoursewaresPage = lazy(() => import('./pages/CoursewaresPage'));
 
 function WorkspacePlaceholder({ title }: { title: string }) {
   return (
@@ -128,7 +129,7 @@ function AppRoutes() {
         <Route path="chat/:conversationId" element={<ChatPage />} />
         <Route path="selflearn" element={<SelfLearnPage />} />
         <Route path="mistakes" element={<MistakesPage />} />
-        <Route path="coursewares" element={<WorkspacePlaceholder title="语音课件" />} />
+        <Route path="coursewares" element={<CoursewaresPage />} />
         <Route path="coursewares/:coursewareId" element={<WorkspacePlaceholder title="语音课件" />} />
         <Route path="mastery" element={<StudentMasteryPage />} />
         <Route path="profile" element={<StudentProfilePage />} />
