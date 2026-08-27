@@ -6,6 +6,9 @@ import {
   applyCurrentRequestResult,
   CoursewareRequestGuard,
   CoursewareSettingsRevision,
+  CoursewareSettingsWriteTracker,
+  mergeCredentialSettings,
+  mergePreferenceSettings,
   modelsForPurpose,
   voicesForModel,
   type CoursewareSelectionDraft,
@@ -201,6 +204,7 @@ export default function CoursewareAISettingsCard() {
   const [testing, setTesting] = useState<Set<TestKind>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState('');
+  const [syncError, setSyncError] = useState('');
   const [credentialNotices, setCredentialNotices] = useState<Record<number, string>>({});
   const [audioUrls, setAudioUrls] = useState<Record<'teacher_tts' | 'student_tts', string>>({
     teacher_tts: '',
@@ -211,6 +215,7 @@ export default function CoursewareAISettingsCard() {
   const pendingTestsRef = useRef(new Set<TestKind>());
   const requestGuardRef = useRef(new CoursewareRequestGuard());
   const settingsRevisionRef = useRef(new CoursewareSettingsRevision());
+  const settingsWritesRef = useRef(new CoursewareSettingsWriteTracker());
   const requestControllersRef = useRef(new Set<AbortController>());
   const audioUrlRefs = useRef<Partial<Record<'teacher_tts' | 'student_tts', string>>>({});
   const imageUrlRef = useRef('');
@@ -269,6 +274,7 @@ export default function CoursewareAISettingsCard() {
   useEffect(() => {
     requestGuardRef.current = new CoursewareRequestGuard();
     settingsRevisionRef.current = new CoursewareSettingsRevision();
+    settingsWritesRef.current = new CoursewareSettingsWriteTracker();
     return () => {
       requestGuardRef.current.dispose();
       for (const controller of requestControllersRef.current) controller.abort();
@@ -293,8 +299,9 @@ export default function CoursewareAISettingsCard() {
     return '';
   }, [settings]);
 
-  const refreshSettings = async (errorKey: string) => {
-    const scope = 'settings-refresh';
+  const refreshSettings = async (errorKey: string, authoritative = false) => {
+    if (authoritative && settingsWritesRef.current.hasPending()) return;
+    const scope = authoritative ? 'settings-authority-refresh' : 'settings-refresh';
     const token = requestGuardRef.current.begin(scope);
     const settingsRevision = settingsRevisionRef.current.captureRefresh();
     const controller = beginRequest();
@@ -308,41 +315,52 @@ export default function CoursewareAISettingsCard() {
         settingsRevisionRef.current.isRefreshCurrent(settingsRevision)
       ) {
         setSettings(refreshed);
+        if (authoritative) setSyncError('');
       }
     } catch (error) {
-      if (!isAbort(error, controller) && requestGuardRef.current.isCurrent(scope, token)) {
-        setErrors((current) => ({ ...current, [errorKey]: '连接已验证，但状态刷新失败，请稍后重试' }));
+      if (
+        !isAbort(error, controller) &&
+        requestGuardRef.current.isCurrent(scope, token) &&
+        settingsRevisionRef.current.isRefreshCurrent(settingsRevision)
+      ) {
+        if (authoritative) {
+          setSyncError('设置已保存，但状态同步失败。请重新同步后再确认可用状态。');
+        } else {
+          setErrors((current) => ({ ...current, [errorKey]: '连接已验证，但状态刷新失败，请稍后重试' }));
+        }
       }
     } finally {
       finishRequest(controller);
     }
   };
 
+  const settleSettingsWrite = (writeId: number, succeeded: boolean) => {
+    if (settingsWritesRef.current.settle(writeId, succeeded)) {
+      void refreshSettings('sync', true);
+    }
+  };
+
   const saveCredential = async (providerId: number, clear = false) => {
     if (pendingProviderIdsRef.current.has(providerId)) return;
+    let body: { apiKey: string | null };
+    try {
+      body = buildCredentialPatch(clear ? null : (credentialInput[providerId] ?? ''));
+    } catch (error) {
+      setErrors((current) => ({ ...current, [`credential-${providerId}`]: error instanceof Error ? error.message : '请输入完整的 API Key' }));
+      return;
+    }
     const scope = `credential-${providerId}`;
     const token = requestGuardRef.current.begin(scope);
     const settingsWriteRevision = settingsRevisionRef.current.beginWrite();
+    const writeId = settingsWritesRef.current.begin();
     requestGuardRef.current.invalidate('load');
     requestGuardRef.current.invalidate('settings-refresh');
     pendingProviderIdsRef.current.add(providerId);
     setPendingProviderIds((current) => new Set(current).add(providerId));
     setErrors((current) => ({ ...current, [`credential-${providerId}`]: '' }));
     setCredentialNotices((current) => ({ ...current, [providerId]: '' }));
-    let body: { apiKey: string | null };
-    try {
-      body = buildCredentialPatch(clear ? null : (credentialInput[providerId] ?? ''));
-    } catch (error) {
-      setErrors((current) => ({ ...current, [`credential-${providerId}`]: error instanceof Error ? error.message : '请输入完整的 API Key' }));
-      pendingProviderIdsRef.current.delete(providerId);
-      setPendingProviderIds((current) => {
-        const next = new Set(current);
-        next.delete(providerId);
-        return next;
-      });
-      return;
-    }
     const controller = beginRequest();
+    let succeeded = false;
     try {
       const saved = await apiPut<CoursewareAISettings>(
         `/api/courseware-ai-settings/credentials/${providerId}`,
@@ -350,14 +368,9 @@ export default function CoursewareAISettingsCard() {
         { signal: controller.signal },
       );
       if (!requestGuardRef.current.isCurrent(scope, token)) return;
-      const isLatestSettingsWrite = settingsRevisionRef.current.commitWrite(settingsWriteRevision);
-      setSettings((current) => {
-        if (!current || isLatestSettingsWrite) return saved;
-        const savedProvider = saved.providers.find((item) => item.providerId === providerId);
-        return savedProvider
-          ? { ...current, providers: current.providers.map((item) => item.providerId === providerId ? savedProvider : item) }
-          : current;
-      });
+      succeeded = true;
+      settingsRevisionRef.current.commitWrite(settingsWriteRevision);
+      setSettings((current) => current ? mergeCredentialSettings(current, saved, providerId) : saved);
       setCredentialInput((current) => ({ ...current, [providerId]: '' }));
       setCredentialNotices((current) => ({
         ...current,
@@ -375,18 +388,13 @@ export default function CoursewareAISettingsCard() {
           next.delete(providerId);
           return next;
         });
+        settleSettingsWrite(writeId, succeeded);
       }
     }
   };
 
   const savePreferences = async () => {
     if (savingPreferences) return;
-    const scope = 'preferences';
-    const token = requestGuardRef.current.begin(scope);
-    const settingsWriteRevision = settingsRevisionRef.current.beginWrite();
-    requestGuardRef.current.invalidate('load');
-    requestGuardRef.current.invalidate('settings-refresh');
-    setErrors((current) => ({ ...current, preferences: '' }));
     let body: ReturnType<typeof buildCoursewarePreferences>;
     try {
       body = buildCoursewarePreferences({ catalog, includeImages, text, image, teacherSpeech, studentSpeech });
@@ -394,8 +402,16 @@ export default function CoursewareAISettingsCard() {
       setErrors((current) => ({ ...current, preferences: error instanceof Error ? error.message : '请检查模型设置' }));
       return;
     }
+    const scope = 'preferences';
+    const token = requestGuardRef.current.begin(scope);
+    const settingsWriteRevision = settingsRevisionRef.current.beginWrite();
+    const writeId = settingsWritesRef.current.begin();
+    requestGuardRef.current.invalidate('load');
+    requestGuardRef.current.invalidate('settings-refresh');
+    setErrors((current) => ({ ...current, preferences: '' }));
     setSavingPreferences(true);
     const controller = beginRequest();
+    let succeeded = false;
     try {
       const saved = await apiPut<CoursewareAISettings>(
         '/api/courseware-ai-settings/preferences',
@@ -403,14 +419,19 @@ export default function CoursewareAISettingsCard() {
         { signal: controller.signal },
       );
       if (!requestGuardRef.current.isCurrent(scope, token)) return;
-      if (settingsRevisionRef.current.commitWrite(settingsWriteRevision)) setSettings(saved);
+      succeeded = true;
+      settingsRevisionRef.current.commitWrite(settingsWriteRevision);
+      setSettings((current) => current ? mergePreferenceSettings(current, saved) : saved);
       setNotice('课件模型和音色已保存。');
     } catch (error) {
       if (!requestGuardRef.current.isCurrent(scope, token) || isAbort(error, controller)) return;
       setErrors((current) => ({ ...current, preferences: error instanceof ApiError ? error.message : '模型设置保存失败，请稍后重试' }));
     } finally {
       finishRequest(controller);
-      if (requestGuardRef.current.isCurrent(scope, token)) setSavingPreferences(false);
+      if (requestGuardRef.current.isCurrent(scope, token)) {
+        setSavingPreferences(false);
+        settleSettingsWrite(writeId, succeeded);
+      }
     }
   };
 
@@ -480,6 +501,7 @@ export default function CoursewareAISettingsCard() {
     <div className="courseware-settings" aria-busy={!settings}>
       {readinessNotice && <div className="courseware-readiness" role="status">{readinessNotice}</div>}
       {notice && <div className="courseware-notice" role="status">{notice}</div>}
+      {syncError && <div className="form-error" role="alert">{syncError} <button type="button" className="btn-link" onClick={() => void refreshSettings('sync', true)}>重新同步</button></div>}
 
       <section className="courseware-settings-section" aria-labelledby="courseware-credential-title">
         <h3 id="courseware-credential-title">服务商密钥</h3>

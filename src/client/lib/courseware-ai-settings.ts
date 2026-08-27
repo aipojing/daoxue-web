@@ -2,6 +2,7 @@ import type {
   AIModelOption,
   AIProviderCatalogItem,
   AIVoiceOption,
+  CoursewareAISettings,
   CoursewareModelPreference,
   CoursewareModelPurpose,
 } from '../../shared/ai-catalog';
@@ -68,7 +69,6 @@ export class CoursewareSettingsRevision {
   }
 
   commitWrite(writeRevision: number): boolean {
-    if (writeRevision !== this.revision) return false;
     this.revision += 1;
     return true;
   }
@@ -76,6 +76,55 @@ export class CoursewareSettingsRevision {
   isRefreshCurrent(refreshRevision: number): boolean {
     return refreshRevision === this.revision;
   }
+}
+
+export class CoursewareSettingsWriteTracker {
+  private nextId = 1;
+  private pending = new Set<number>();
+  private needsRefresh = false;
+
+  begin(): number {
+    const id = this.nextId;
+    this.nextId += 1;
+    this.pending.add(id);
+    this.needsRefresh = true;
+    return id;
+  }
+
+  settle(id: number, _succeeded: boolean): boolean {
+    this.pending.delete(id);
+    if (this.pending.size !== 0 || !this.needsRefresh) return false;
+    this.needsRefresh = false;
+    return true;
+  }
+
+  hasPending(): boolean {
+    return this.pending.size > 0;
+  }
+
+  retryRefresh(): void {
+    this.needsRefresh = true;
+  }
+}
+
+export function mergeCredentialSettings(
+  current: CoursewareAISettings,
+  snapshot: CoursewareAISettings,
+  providerId: number,
+): CoursewareAISettings {
+  const provider = snapshot.providers.find((item) => item.providerId === providerId);
+  if (!provider) return current;
+  return {
+    ...current,
+    providers: current.providers.map((item) => item.providerId === providerId ? provider : item),
+  };
+}
+
+export function mergePreferenceSettings(
+  current: CoursewareAISettings,
+  snapshot: CoursewareAISettings,
+): CoursewareAISettings {
+  return { ...current, preferences: snapshot.preferences };
 }
 
 export function applyCurrentRequestResult(

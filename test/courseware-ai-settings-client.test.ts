@@ -5,10 +5,13 @@ import {
   applyCurrentRequestResult,
   CoursewareRequestGuard,
   CoursewareSettingsRevision,
+  CoursewareSettingsWriteTracker,
+  mergeCredentialSettings,
+  mergePreferenceSettings,
   modelsForPurpose,
   type CoursewareSettingsDraft,
 } from '../src/client/lib/courseware-ai-settings';
-import type { AIProviderCatalogItem } from '../src/shared/ai-catalog';
+import type { AIProviderCatalogItem, CoursewareAISettings } from '../src/shared/ai-catalog';
 
 const catalog: AIProviderCatalogItem[] = [{
   id: 1,
@@ -117,5 +120,40 @@ describe('courseware AI settings client', () => {
     expect(revision.commitWrite(write)).toBe(true);
     expect(revision.isRefreshCurrent(refreshDuringWrite)).toBe(false);
     expect(revision.isRefreshCurrent(revision.captureRefresh())).toBe(true);
+  });
+
+  it('keeps a newer credential while an older preferences snapshot arrives later', () => {
+    const current: CoursewareAISettings = {
+      featureEnabled: true,
+      providers: [{ providerId: 1, keySet: true, keyTail: 'old', healthStatus: 'unknown', healthCheckedAt: null }],
+      preferences: [{ purpose: 'courseware_text', endpointId: 101, modelCatalogId: 11, customModelId: '', voiceId: '', params: {} }],
+      readiness: { text: 'unconfigured', teacherSpeech: 'unconfigured', studentSpeech: 'unconfigured', image: 'disabled' },
+    };
+    const credentialSnapshot: CoursewareAISettings = {
+      ...current,
+      providers: [{ ...current.providers[0]!, keyTail: 'new', healthStatus: 'valid' }],
+    };
+    const preferencesSnapshot: CoursewareAISettings = {
+      ...current,
+      preferences: [{ purpose: 'courseware_text', endpointId: 202, modelCatalogId: 22, customModelId: '', voiceId: '', params: {} }],
+    };
+
+    const afterCredential = mergeCredentialSettings(current, credentialSnapshot, 1);
+    const afterPreferences = mergePreferenceSettings(afterCredential, preferencesSnapshot);
+
+    expect(afterPreferences.providers[0]?.keyTail).toBe('new');
+    expect(afterPreferences.preferences[0]?.endpointId).toBe(202);
+    expect(afterPreferences.readiness).toEqual(current.readiness);
+  });
+
+  it('requests one authority refresh only after three concurrent writes settle', () => {
+    const writes = new CoursewareSettingsWriteTracker();
+    const credentialA = writes.begin();
+    const credentialB = writes.begin();
+    const preferences = writes.begin();
+
+    expect(writes.settle(credentialB, true)).toBe(false);
+    expect(writes.settle(preferences, true)).toBe(false);
+    expect(writes.settle(credentialA, true)).toBe(true);
   });
 });
