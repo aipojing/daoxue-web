@@ -27,6 +27,11 @@ export class ProviderCallError extends Error {
     super(details.message);
     this.name = 'ProviderCallError';
     this.retryable = details.retryable;
+    Object.defineProperties(this, {
+      message: { value: details.message, writable: false, configurable: false },
+      errorCode: { value: errorCode, writable: false, configurable: false, enumerable: true },
+      retryable: { value: details.retryable, writable: false, configurable: false, enumerable: true },
+    });
   }
 }
 

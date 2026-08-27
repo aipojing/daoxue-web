@@ -87,6 +87,42 @@ describe('courseware adapter errors', () => {
     expect(JSON.stringify(quota)).not.toContain('requestId');
   });
 
+  it('makes public provider error fields immutable at JavaScript runtime', () => {
+    const error = new ProviderCallError('invalid_credential', 401);
+    const mutable = error as unknown as {
+      message: string;
+      errorCode: string;
+      retryable: boolean;
+    };
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.name).toBe('ProviderCallError');
+    expect(error.stack).toContain('ProviderCallError');
+    expect(() => {
+      mutable.message = 'raw provider body must not escape';
+    }).toThrow(TypeError);
+    expect(() => {
+      mutable.errorCode = 'rate_limited';
+    }).toThrow(TypeError);
+    expect(() => {
+      mutable.retryable = true;
+    }).toThrow(TypeError);
+    expect(() => {
+      Object.defineProperty(error, 'message', { value: 'raw provider body must not escape' });
+    }).toThrow(TypeError);
+    expect(() => {
+      Object.defineProperty(error, 'errorCode', { value: 'rate_limited' });
+    }).toThrow(TypeError);
+    expect(() => {
+      Object.defineProperty(error, 'retryable', { value: true });
+    }).toThrow(TypeError);
+    expect(error).toMatchObject({
+      message: '模型服务密钥无效',
+      errorCode: 'invalid_credential',
+      retryable: false,
+    });
+  });
+
   it.each([
     [401, 'Throttling', 'invalid_credential', false],
     [402, 'ModelNotFound', 'quota_exhausted', false],
