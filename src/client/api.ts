@@ -27,7 +27,11 @@ async function request<T>(method: string, path: string, body?: unknown, options?
       credentials: 'same-origin',
       signal: options?.signal,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error;
+    }
+    if (options?.signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
     throw new ApiError('网络连接失败，请检查网络', 0);
   }
 

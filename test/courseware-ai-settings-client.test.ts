@@ -4,6 +4,7 @@ import {
   buildCoursewarePreferences,
   applyCurrentRequestResult,
   CoursewareRequestGuard,
+  CoursewareSettingsRevision,
   modelsForPurpose,
   type CoursewareSettingsDraft,
 } from '../src/client/lib/courseware-ai-settings';
@@ -104,5 +105,17 @@ describe('courseware AI settings client', () => {
 
     expect(applyCurrentRequestResult(guard, 'image', token, () => { createdUrls += 1; })).toBe(false);
     expect(createdUrls).toBe(0);
+  });
+
+  it('rejects a refresh that began before a successful settings write committed', () => {
+    const revision = new CoursewareSettingsRevision();
+    const oldRefresh = revision.captureRefresh();
+    const write = revision.beginWrite();
+    const refreshDuringWrite = revision.captureRefresh();
+
+    expect(revision.isRefreshCurrent(oldRefresh)).toBe(false);
+    expect(revision.commitWrite(write)).toBe(true);
+    expect(revision.isRefreshCurrent(refreshDuringWrite)).toBe(false);
+    expect(revision.isRefreshCurrent(revision.captureRefresh())).toBe(true);
   });
 });

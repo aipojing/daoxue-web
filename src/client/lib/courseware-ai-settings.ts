@@ -51,6 +51,33 @@ export class CoursewareRequestGuard {
   }
 }
 
+/**
+ * Keeps settings reads behind successful writes. A refresh captures the current
+ * revision and may apply only if no write has started or committed since then.
+ */
+export class CoursewareSettingsRevision {
+  private revision = 0;
+
+  beginWrite(): number {
+    this.revision += 1;
+    return this.revision;
+  }
+
+  captureRefresh(): number {
+    return this.revision;
+  }
+
+  commitWrite(writeRevision: number): boolean {
+    if (writeRevision !== this.revision) return false;
+    this.revision += 1;
+    return true;
+  }
+
+  isRefreshCurrent(refreshRevision: number): boolean {
+    return refreshRevision === this.revision;
+  }
+}
+
 export function applyCurrentRequestResult(
   guard: CoursewareRequestGuard,
   scope: string,

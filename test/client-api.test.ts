@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { streamChatRequest, type StreamHandlers } from '../src/client/api';
+import { apiGet, streamChatRequest, type StreamHandlers } from '../src/client/api';
 import * as clientApi from '../src/client/api';
 
 const encoder = new TextEncoder();
@@ -175,5 +175,48 @@ describe('鉴权交互辅助函数', () => {
 
     expect(getAuthProbeError?.(new Error('断网'))).toBe('无法确认登录状态，请重试');
     expect(getAuthProbeError?.(new clientApi.ApiError('未登录', 401))).toBe('');
+  });
+});
+
+describe('普通 API 请求', () => {
+  it('中止请求时原样抛出 AbortError', async () => {
+    const controller = new AbortController();
+    const abortError = new DOMException('已中止', 'AbortError');
+    controller.abort();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(abortError));
+
+    await expect(apiGet('/api/example', { signal: controller.signal })).rejects.toBe(abortError);
+  });
+
+  it('已中止信号遇到非 AbortError 时仍暴露 AbortError', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('socket closed')));
+
+    await expect(apiGet('/api/example', { signal: controller.signal })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+  });
+
+  it('普通网络错误仍转换为面向用户的网络错误', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('socket closed')));
+
+    await expect(apiGet('/api/example')).rejects.toMatchObject({
+      message: '网络连接失败，请检查网络',
+      status: 0,
+    });
+  });
+
+  it('401 仍跳转登录页并返回 API 错误', async () => {
+    const assign = vi.fn();
+    vi.stubGlobal('window', { location: { pathname: '/students/1', assign } });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      success: false,
+      data: null,
+      error: '登录已过期，请重新登录',
+    }), { status: 401, headers: { 'Content-Type': 'application/json' } })));
+
+    await expect(apiGet('/api/example')).rejects.toMatchObject({ status: 401 });
+    expect(assign).toHaveBeenCalledWith('/login');
   });
 });

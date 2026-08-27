@@ -5,6 +5,7 @@ import {
   buildCoursewarePreferences,
   applyCurrentRequestResult,
   CoursewareRequestGuard,
+  CoursewareSettingsRevision,
   modelsForPurpose,
   voicesForModel,
   type CoursewareSelectionDraft,
@@ -209,6 +210,7 @@ export default function CoursewareAISettingsCard() {
   const pendingProviderIdsRef = useRef(new Set<number>());
   const pendingTestsRef = useRef(new Set<TestKind>());
   const requestGuardRef = useRef(new CoursewareRequestGuard());
+  const settingsRevisionRef = useRef(new CoursewareSettingsRevision());
   const requestControllersRef = useRef(new Set<AbortController>());
   const audioUrlRefs = useRef<Partial<Record<'teacher_tts' | 'student_tts', string>>>({});
   const imageUrlRef = useRef('');
@@ -239,17 +241,25 @@ export default function CoursewareAISettingsCard() {
   const load = useCallback(async () => {
     const scope = 'load';
     const token = requestGuardRef.current.begin(scope);
+    const settingsRevision = settingsRevisionRef.current.captureRefresh();
     const controller = beginRequest();
     try {
       const [loadedCatalog, loadedSettings] = await Promise.all([
         apiGet<AIProviderCatalogItem[]>('/api/ai-catalog', { signal: controller.signal }),
         apiGet<CoursewareAISettings>('/api/courseware-ai-settings', { signal: controller.signal }),
       ]);
-      if (!requestGuardRef.current.isCurrent(scope, token)) return;
+      if (
+        !requestGuardRef.current.isCurrent(scope, token) ||
+        !settingsRevisionRef.current.isRefreshCurrent(settingsRevision)
+      ) return;
       applyLoaded(loadedCatalog, loadedSettings);
       setErrors({});
     } catch (error) {
-      if (!requestGuardRef.current.isCurrent(scope, token) || isAbort(error, controller)) return;
+      if (
+        !requestGuardRef.current.isCurrent(scope, token) ||
+        !settingsRevisionRef.current.isRefreshCurrent(settingsRevision) ||
+        isAbort(error, controller)
+      ) return;
       setErrors({ load: error instanceof ApiError ? error.message : '语音课件设置加载失败，请刷新后重试' });
     } finally {
       finishRequest(controller);
@@ -258,6 +268,7 @@ export default function CoursewareAISettingsCard() {
 
   useEffect(() => {
     requestGuardRef.current = new CoursewareRequestGuard();
+    settingsRevisionRef.current = new CoursewareSettingsRevision();
     return () => {
       requestGuardRef.current.dispose();
       for (const controller of requestControllersRef.current) controller.abort();
@@ -285,13 +296,19 @@ export default function CoursewareAISettingsCard() {
   const refreshSettings = async (errorKey: string) => {
     const scope = 'settings-refresh';
     const token = requestGuardRef.current.begin(scope);
+    const settingsRevision = settingsRevisionRef.current.captureRefresh();
     const controller = beginRequest();
     try {
       const refreshed = await apiGet<CoursewareAISettings>(
         '/api/courseware-ai-settings',
         { signal: controller.signal },
       );
-      if (requestGuardRef.current.isCurrent(scope, token)) setSettings(refreshed);
+      if (
+        requestGuardRef.current.isCurrent(scope, token) &&
+        settingsRevisionRef.current.isRefreshCurrent(settingsRevision)
+      ) {
+        setSettings(refreshed);
+      }
     } catch (error) {
       if (!isAbort(error, controller) && requestGuardRef.current.isCurrent(scope, token)) {
         setErrors((current) => ({ ...current, [errorKey]: '连接已验证，但状态刷新失败，请稍后重试' }));
@@ -305,6 +322,7 @@ export default function CoursewareAISettingsCard() {
     if (pendingProviderIdsRef.current.has(providerId)) return;
     const scope = `credential-${providerId}`;
     const token = requestGuardRef.current.begin(scope);
+    const settingsWriteRevision = settingsRevisionRef.current.beginWrite();
     requestGuardRef.current.invalidate('load');
     requestGuardRef.current.invalidate('settings-refresh');
     pendingProviderIdsRef.current.add(providerId);
@@ -332,8 +350,9 @@ export default function CoursewareAISettingsCard() {
         { signal: controller.signal },
       );
       if (!requestGuardRef.current.isCurrent(scope, token)) return;
+      const isLatestSettingsWrite = settingsRevisionRef.current.commitWrite(settingsWriteRevision);
       setSettings((current) => {
-        if (!current) return saved;
+        if (!current || isLatestSettingsWrite) return saved;
         const savedProvider = saved.providers.find((item) => item.providerId === providerId);
         return savedProvider
           ? { ...current, providers: current.providers.map((item) => item.providerId === providerId ? savedProvider : item) }
@@ -364,6 +383,7 @@ export default function CoursewareAISettingsCard() {
     if (savingPreferences) return;
     const scope = 'preferences';
     const token = requestGuardRef.current.begin(scope);
+    const settingsWriteRevision = settingsRevisionRef.current.beginWrite();
     requestGuardRef.current.invalidate('load');
     requestGuardRef.current.invalidate('settings-refresh');
     setErrors((current) => ({ ...current, preferences: '' }));
@@ -383,7 +403,7 @@ export default function CoursewareAISettingsCard() {
         { signal: controller.signal },
       );
       if (!requestGuardRef.current.isCurrent(scope, token)) return;
-      setSettings(saved);
+      if (settingsRevisionRef.current.commitWrite(settingsWriteRevision)) setSettings(saved);
       setNotice('课件模型和音色已保存。');
     } catch (error) {
       if (!requestGuardRef.current.isCurrent(scope, token) || isAbort(error, controller)) return;
