@@ -248,8 +248,8 @@ export default function AISettingsPage() {
 
       <section className="settings-section" aria-labelledby="courseware-ai-title">
         <div className="section-heading">
-          <h2 id="courseware-ai-title">语音课件模型</h2>
-          <p>分别选择脚本、老师声音、AI 同学声音和可选配图模型。</p>
+          <h2 id="courseware-ai-title">语音课件模型配置</h2>
+          <p>在这里配置服务商 Key、测试模型，并保存各用途的默认值；新建课件时仍可为本次任务重新选择。</p>
         </div>
         <CoursewareAISettingsCard />
       </section>

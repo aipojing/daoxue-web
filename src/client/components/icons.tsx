@@ -84,6 +84,33 @@ export function IconPlay(props: IconProps) {
   );
 }
 
+/** 暂停 */
+export function IconPause(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M8 5.5v13M16 5.5v13" strokeWidth={2.5} />
+    </Svg>
+  );
+}
+
+/** 上一段 */
+export function IconPrevious(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6.5 5.5v13M17.5 6.5 9 12l8.5 5.5z" />
+    </Svg>
+  );
+}
+
+/** 下一段 */
+export function IconNext(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M17.5 5.5v13M6.5 6.5 15 12l-8.5 5.5z" />
+    </Svg>
+  );
+}
+
 /** 菜单 */
 export function IconMenu(props: IconProps) {
   return (

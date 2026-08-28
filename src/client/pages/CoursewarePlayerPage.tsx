@@ -169,14 +169,17 @@ export default function CoursewarePlayerPage() {
         <span aria-current="page">{courseware.title}</span>
       </nav>
       <header className="courseware-lesson-header">
-        <div>
+        <div className="courseware-lesson-heading">
           <p className="courseware-eyebrow">{student.name}的 AI 对话课堂 · {courseware.subject}</p>
-          <h1>{courseware.title}</h1>
+          <h1><span className="courseware-lesson-subject">{courseware.subject} · </span>{courseware.title}</h1>
           <p>{courseware.topic} · 预计 {courseware.estimatedMinutes} 分钟</p>
         </div>
-        <span className={ready ? 'courseware-lesson-status is-ready' : 'courseware-lesson-status'}>
-          {ready ? '可以上课' : '课件准备中'}
-        </span>
+        <div className="courseware-lesson-meta">
+          <span className={ready ? 'courseware-lesson-status is-ready' : 'courseware-lesson-status'}>
+            {ready ? '音频已全部生成并保存' : '课件准备中'}
+          </span>
+          <time dateTime={courseware.createdAt}>{courseware.createdAt.slice(0, 10)}</time>
+        </div>
       </header>
 
       {courseware.learningObjectives.length > 0 && (

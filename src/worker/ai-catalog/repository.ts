@@ -458,6 +458,54 @@ export async function resolvePreference(
   };
 }
 
+export async function resolveModelSelection(
+  db: D1Database,
+  preference: CoursewareModelPreference,
+): Promise<ResolvedModelSelection | null> {
+  try {
+    await validatePreferences(db, [preference]);
+  } catch (error) {
+    if (error instanceof UserFacingError) return null;
+    throw error;
+  }
+  const row = await db.prepare(
+    `SELECT p.id AS provider_id, p.slug AS provider_slug,
+            e.id AS endpoint_id, e.adapter_type, e.base_url, e.capability,
+            e.config_json AS endpoint_config_json,
+            m.model_id, m.config_json AS model_config_json
+     FROM ai_provider_endpoints e
+     JOIN ai_providers p ON p.id = e.provider_id AND p.enabled = 1
+     LEFT JOIN ai_models m
+       ON m.id = ? AND m.endpoint_id = e.id AND m.enabled = 1
+     WHERE e.id = ? AND e.enabled = 1`,
+  ).bind(preference.modelCatalogId, preference.endpointId).first<{
+    provider_id: number;
+    provider_slug: string;
+    endpoint_id: number;
+    adapter_type: AdapterType;
+    base_url: string;
+    capability: AICapability;
+    endpoint_config_json: string;
+    model_id: string | null;
+    model_config_json: string | null;
+  }>();
+  if (!row || row.capability !== PURPOSE_CAPABILITY[preference.purpose]) return null;
+  return {
+    purpose: preference.purpose,
+    providerId: row.provider_id,
+    providerSlug: row.provider_slug,
+    endpointId: row.endpoint_id,
+    adapterType: row.adapter_type,
+    baseUrl: row.base_url,
+    capability: row.capability,
+    modelId: preference.modelCatalogId === null ? preference.customModelId : (row.model_id as string),
+    voiceId: preference.voiceId,
+    endpointConfig: parseObject(row.endpoint_config_json),
+    modelConfig: parseObject(row.model_config_json),
+    params: preference.params,
+  };
+}
+
 function readinessFor(
   preference: PreferenceRow | undefined,
   providers: Map<number, CoursewareAISettings['providers'][number]>,

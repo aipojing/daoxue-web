@@ -5,6 +5,7 @@ import type { Student } from '../types';
 import StudentFormModal from '../components/StudentFormModal';
 import StudentWizard from '../components/StudentWizard';
 import StudentDeleteModal from '../components/StudentDeleteModal';
+import StudentAvatar from '../components/StudentAvatar';
 
 export default function StudentsPage() {
   const [students, setStudents] = useState<Student[] | null>(null);
@@ -76,9 +77,7 @@ export default function StudentsPage() {
         {students.map((s) => (
           <div key={s.id} className="student-card">
             <Link to={`/students/${s.id}`} className="student-card-main">
-              <span className="avatar" style={{ background: s.color }}>
-                {s.name.slice(0, 1)}
-              </span>
+              <StudentAvatar name={s.name} color={s.color} gender={s.gender} />
               <span className="student-card-info">
                 <span className="student-card-name">{s.name}</span>
                 <span className="student-card-meta">

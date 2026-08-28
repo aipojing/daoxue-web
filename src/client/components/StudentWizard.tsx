@@ -10,8 +10,10 @@ import {
   EMPTY_PROFILE_FORM,
   type ProfileFormData,
   type Student,
+  type StudentGender,
 } from '../types';
 import { useDialogFocus } from '../lib/modal';
+import StudentGenderField from './StudentGenderField';
 
 const COLOR_OPTIONS: Array<{ value: string; name: string }> = [
   { value: '#1e5b4a', name: '墨绿' },
@@ -40,6 +42,7 @@ interface BasicInfo {
   textbook: string;
   region: string;
   color: string;
+  gender: StudentGender;
   notes: string;
 }
 
@@ -122,6 +125,7 @@ export default function StudentWizard({ mode, studentId, student, initialForm, o
     textbook: student?.textbook ?? '',
     region: student?.region ?? '',
     color: student?.color ?? COLOR_OPTIONS[0]!.value,
+    gender: student?.gender ?? 'unspecified',
     notes: student?.notes ?? '',
   });
   const [province, setProvince] = useState(initialRegion.province);
@@ -278,6 +282,10 @@ export default function StudentWizard({ mode, studentId, student, initialForm, o
                 ))}
               </div>
             </div>
+            <StudentGenderField
+              value={basic.gender}
+              onChange={(gender) => setBasic({ ...basic, gender })}
+            />
           </div>
         )}
 

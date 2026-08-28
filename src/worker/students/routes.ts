@@ -35,6 +35,7 @@ export interface StudentRow {
   textbook: string;
   region: string;
   color: string;
+  gender: 'male' | 'female' | 'unspecified';
   notes: string;
   created_at: string;
 }
@@ -71,12 +72,12 @@ studentRoutes.post('/', async (c) => {
   const raw = (await c.req.json().catch(() => ({}))) as { profileForm?: unknown };
   const body = studentSchema.safeParse(raw);
   if (!body.success) return err(c, body.error.issues[0]?.message ?? '输入不合法');
-  const { name, grade, textbook, region, color, notes } = body.data;
+  const { name, grade, textbook, region, color, gender, notes } = body.data;
   const row = await c.env.DB.prepare(
-    `INSERT INTO students (user_id, name, grade, textbook, region, color, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+    `INSERT INTO students (user_id, name, grade, textbook, region, color, gender, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
   )
-    .bind(user.id, name, grade, textbook, region, color, notes)
+    .bind(user.id, name, grade, textbook, region, color, gender, notes)
     .first<StudentRow>();
 
   if (row && raw.profileForm !== undefined) {
@@ -113,10 +114,19 @@ studentRoutes.put('/:id', async (c) => {
 
   const merged = { ...student, ...body.data };
   const row = await c.env.DB.prepare(
-    `UPDATE students SET name = ?, grade = ?, textbook = ?, region = ?, color = ?, notes = ?
+    `UPDATE students SET name = ?, grade = ?, textbook = ?, region = ?, color = ?, gender = ?, notes = ?
      WHERE id = ? RETURNING *`,
   )
-    .bind(merged.name, merged.grade, merged.textbook, merged.region, merged.color, merged.notes, student.id)
+    .bind(
+      merged.name,
+      merged.grade,
+      merged.textbook,
+      merged.region,
+      merged.color,
+      merged.gender,
+      merged.notes,
+      student.id,
+    )
     .first<StudentRow>();
   return ok(c, row);
 });

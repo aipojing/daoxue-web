@@ -15,6 +15,7 @@ import {
   type CoursewareReadiness,
 } from '../src/client/lib/courseware';
 import type { CoursewareStatus, CoursewareSummary } from '../src/shared/courseware';
+import type { CoursewareModelPreference } from '../src/shared/ai-catalog';
 
 function readiness(patch: Partial<CoursewareReadiness> = {}): CoursewareReadiness {
   return {
@@ -91,10 +92,28 @@ describe('courseware library helpers', () => {
   });
 
   it('whitelists only backend-accepted create fields', () => {
+    const modelSelections: CoursewareModelPreference[] = [
+      {
+        purpose: 'courseware_text',
+        endpointId: 3,
+        modelCatalogId: 7,
+        customModelId: '',
+        voiceId: '',
+        params: {},
+      },
+    ];
     expect(buildCoursewareCreatePayload({
       subject: ' 数学 ', topic: ' 分数 ', learningGoal: ' 学会比较分数 ', sourceText: '教材节选', sourceConversationId: 7,
       includeImages: true, userId: 99, baseUrl: 'https://example.com', apiKey: 'secret', snapshot: { model: 'private' },
-    } as Parameters<typeof buildCoursewareCreatePayload>[0])).toEqual({ subject: '数学', topic: '分数', learningGoal: '学会比较分数', sourceText: '教材节选', sourceConversationId: 7, includeImages: true });
+    } as Parameters<typeof buildCoursewareCreatePayload>[0], modelSelections)).toEqual({
+      subject: '数学',
+      topic: '分数',
+      learningGoal: '学会比较分数',
+      sourceText: '教材节选',
+      sourceConversationId: 7,
+      includeImages: true,
+      modelSelections,
+    });
   });
 
   it('rejects a stale poll or delete result after its route epoch has changed', () => {

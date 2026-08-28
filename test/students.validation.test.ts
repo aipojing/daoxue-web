@@ -8,7 +8,16 @@ describe('studentSchema', () => {
     if (r.success) {
       expect(r.data.textbook).toBe('');
       expect(r.data.color).toBe('#1e5b4a');
+      expect(r.data.gender).toBe('unspecified');
     }
+  });
+
+  it('只接受男孩、女孩和不指定三种性别', () => {
+    for (const gender of ['male', 'female', 'unspecified']) {
+      const r = studentSchema.safeParse({ name: '小明', grade: '初二', gender });
+      expect(r.success).toBe(true);
+    }
+    expect(studentSchema.safeParse({ name: '小明', grade: '初二', gender: 'unknown' }).success).toBe(false);
   });
 
   it('拒绝空 name', () => {
@@ -33,6 +42,13 @@ describe('studentUpdateSchema', () => {
     const r = studentUpdateSchema.safeParse({ name: '小红' });
     expect(r.success).toBe(true);
     if (r.success) expect(r.data).toEqual({ name: '小红' });
+  });
+
+  it('允许单独更新学生性别', () => {
+    expect(studentUpdateSchema.safeParse({ gender: 'female' })).toMatchObject({
+      success: true,
+      data: { gender: 'female' },
+    });
   });
 
   it('仍会校验显式提交的字段', () => {

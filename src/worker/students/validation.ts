@@ -17,6 +17,10 @@ export const studentSchema = z.object({
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/, '颜色格式不正确')
     .default('#1e5b4a'),
+  gender: z.enum(['male', 'female', 'unspecified'], {
+    invalid_type_error: '请选择孩子性别',
+    required_error: '请选择孩子性别',
+  }).default('unspecified'),
   notes: z.string().trim().max(500, '备注最长 500 字').default(''),
 });
 

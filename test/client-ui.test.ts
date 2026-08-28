@@ -106,6 +106,41 @@ describe('客户端关键交互结构', () => {
     expect(workspaceCss).not.toContain('.workspace-content .chat-main { min-height: calc(100dvh - 56px); }');
   });
 
+  it('学生入口统一使用设计稿风格的插画默认头像', () => {
+    const workspace = clientSource('components/StudentWorkspaceLayout.tsx');
+    const students = clientSource('pages/StudentsPage.tsx');
+    const detail = clientSource('pages/StudentDetailPage.tsx');
+    const avatar = clientSource('components/StudentAvatar.tsx');
+    const form = clientSource('components/StudentFormModal.tsx');
+    const wizard = clientSource('components/StudentWizard.tsx');
+    const genderField = clientSource('components/StudentGenderField.tsx');
+
+    expect(workspace).toContain('<StudentAvatar');
+    expect(students).toContain('<StudentAvatar');
+    expect(detail).toContain('<StudentAvatar');
+    expect(workspace).toContain('gender={student.gender}');
+    expect(students).toContain('gender={s.gender}');
+    expect(detail).toContain('gender={student.gender}');
+    expect(avatar).toContain('default-student-male.png');
+    expect(avatar).toContain('default-student-female.png');
+    expect(avatar).toContain('default-student-neutral.png');
+    expect(form).toContain('<StudentGenderField');
+    expect(wizard).toContain('<StudentGenderField');
+    expect(genderField).toContain('孩子性别（用于默认头像）');
+    expect(genderField).toContain('不指定时使用中性头像');
+    expect(workspace).not.toContain("student.name.slice(0, 1)");
+    expect(students).not.toContain("s.name.slice(0, 1)");
+    expect(detail).not.toContain("student.name.slice(0, 1)");
+  });
+
+  it('孩子工作台让导航独立滚动并保持底部 AI 服务可见', () => {
+    const workspaceCss = clientSource('styles/workspace.css');
+
+    expect(workspaceCss).toMatch(/\.workspace-sidebar\s*\{[^}]*overflow:\s*hidden/s);
+    expect(workspaceCss).toMatch(/\.workspace-navigation\s*\{[^}]*min-height:\s*0[^}]*overflow-y:\s*auto/s);
+    expect(workspaceCss).toMatch(/\.workspace-sidebar-footer\s*\{[^}]*flex:\s*0\s+0\s+auto/s);
+  });
+
   it('课件库明确后台生成、个人套餐和 AI 服务配置入口', () => {
     const createPanel = clientSource('components/CoursewareCreatePanel.tsx');
     const status = clientSource('components/CoursewareGenerationStatus.tsx');
@@ -131,6 +166,18 @@ describe('客户端关键交互结构', () => {
     expect(timeline).toContain('aria-current');
     expect(timeline).toContain('visual.altText');
     expect(timeline).not.toContain('dangerouslySetInnerHTML');
+  });
+
+  it('课件时间线用老师和 AI 同学插画区分发言角色', () => {
+    const page = clientSource('pages/CoursewarePlayerPage.tsx');
+    const timeline = clientSource('components/CoursewareTimeline.tsx');
+
+    expect(page).toContain('courseware-lesson-meta');
+    expect(page).toContain('<time');
+    expect(timeline).toContain('courseware-teacher.png');
+    expect(timeline).toContain('courseware-classmate.png');
+    expect(timeline).toContain('courseware-speaker-avatar');
+    expect(timeline).toContain('position + 1');
   });
 
   it('自学页只在配置明确关闭时展示旧流程，并区分配置加载失败', () => {

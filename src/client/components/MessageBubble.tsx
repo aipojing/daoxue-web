@@ -4,6 +4,7 @@ import ErrorBoundary from './ErrorBoundary';
 import { IconSpark, IconNotebook } from './icons';
 import CoursewareDraftCard from './CoursewareDraftCard';
 import type { CoursewareAISettings, SelfLearnCoursewareDraft } from '../types';
+import type { AIProviderCatalogItem } from '../../shared/ai-catalog';
 import type { CoursewareSettingsState } from '../lib/chat';
 
 interface Props {
@@ -18,11 +19,12 @@ interface Props {
   studentId?: number;
   sourceConversationId?: number;
   coursewareSettings?: CoursewareAISettings | null;
+  coursewareCatalog?: AIProviderCatalogItem[];
   coursewareSettingsState?: CoursewareSettingsState;
 }
 
 function MessageBubble({ role, content, reasoning, streaming, messageId, onSaveMistake, saveState,
-  coursewareDraft, studentId, sourceConversationId, coursewareSettings, coursewareSettingsState }: Props) {
+  coursewareDraft, studentId, sourceConversationId, coursewareSettings, coursewareCatalog, coursewareSettingsState }: Props) {
   const [reasoningOpen, setReasoningOpen] = useState(false);
 
   if (role === 'user') {
@@ -63,6 +65,7 @@ function MessageBubble({ role, content, reasoning, streaming, messageId, onSaveM
             sourceConversationId={sourceConversationId}
             draft={coursewareDraft}
             settings={coursewareSettings ?? null}
+            catalog={coursewareCatalog ?? []}
             settingsState={coursewareSettingsState ?? 'loading'}
           />
         )}

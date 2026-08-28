@@ -11,6 +11,8 @@ import {
   mergeCredentialSettings,
   mergePreferenceSettings,
   modelsForPurpose,
+  createCoursewareSettingsDraft,
+  validateCoursewareSelectionCredentials,
   type CoursewareSettingsDraft,
 } from '../src/client/lib/courseware-ai-settings';
 import type { AIProviderCatalogItem, CoursewareAISettings } from '../src/shared/ai-catalog';
@@ -78,6 +80,31 @@ describe('courseware AI settings client', () => {
       catalog: customCatalog,
       image: { ...validDraft.image!, modelCatalogId: null, customModelId: 'not-allowed-for-images' },
     })).toThrow('请先选择兼容的模型');
+  });
+
+  it('starts each feature-level picker from the models configured on the AI service page', () => {
+    const settings: CoursewareAISettings = {
+      featureEnabled: true,
+      providers: [{ providerId: 1, keySet: true, keyTail: '1234', healthStatus: 'valid', healthCheckedAt: null }],
+      preferences: buildCoursewarePreferences(validDraft).preferences,
+      readiness: { text: 'ready', teacherSpeech: 'ready', studentSpeech: 'ready', image: 'ready' },
+    };
+    expect(createCoursewareSettingsDraft(settings, catalog)).toEqual(validDraft);
+  });
+
+  it('blocks a feature-level choice whose provider key is missing or exhausted', () => {
+    const preferences = buildCoursewarePreferences({ ...validDraft, includeImages: false }).preferences;
+    const settings: CoursewareAISettings = {
+      featureEnabled: true,
+      providers: [{ providerId: 1, keySet: false, keyTail: '', healthStatus: 'unknown', healthCheckedAt: null }],
+      preferences: [],
+      readiness: { text: 'unconfigured', teacherSpeech: 'unconfigured', studentSpeech: 'unconfigured', image: 'disabled' },
+    };
+    expect(validateCoursewareSelectionCredentials(settings, catalog, preferences))
+      .toBe('请先在 AI 服务中配置所选模型的服务商密钥');
+    settings.providers[0] = { ...settings.providers[0]!, keySet: true, healthStatus: 'quota_exhausted' };
+    expect(validateCoursewareSelectionCredentials(settings, catalog, preferences))
+      .toBe('所选模型的服务商额度已用完');
   });
 
   it('keeps concurrent provider and voice requests in separate latest-intent scopes', () => {

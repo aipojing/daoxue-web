@@ -193,6 +193,69 @@ export function voicesForModel(
   return [];
 }
 
+function defaultSelectionForPurpose(
+  settings: CoursewareAISettings,
+  catalog: AIProviderCatalogItem[],
+  purpose: CoursewareModelPurpose,
+): CoursewareSelectionDraft {
+  const saved = settings.preferences.find((preference) => preference.purpose === purpose);
+  if (saved) {
+    return {
+      endpointId: saved.endpointId,
+      modelCatalogId: saved.modelCatalogId,
+      customModelId: saved.customModelId,
+      voiceId: saved.voiceId,
+      params: { ...saved.params },
+    };
+  }
+  const model = modelsForPurpose(catalog, purpose).find((candidate) => candidate.recommended)
+    ?? modelsForPurpose(catalog, purpose)[0];
+  if (!model) return { endpointId: 0, modelCatalogId: null, customModelId: '', voiceId: '', params: {} };
+  const recommendedRole = purpose === 'teacher_tts' ? 'teacher' : purpose === 'student_tts' ? 'student' : undefined;
+  const voice = recommendedRole
+    ? model.voices.find((candidate) => candidate.recommendedRole === recommendedRole) ?? model.voices[0]
+    : undefined;
+  return {
+    endpointId: model.endpointId,
+    modelCatalogId: model.id,
+    customModelId: '',
+    voiceId: voice?.id ?? '',
+    params: {},
+  };
+}
+
+export function createCoursewareSettingsDraft(
+  settings: CoursewareAISettings,
+  catalog: AIProviderCatalogItem[],
+): CoursewareSettingsDraft {
+  return {
+    includeImages: settings.preferences.some((preference) => preference.purpose === 'courseware_image'),
+    text: defaultSelectionForPurpose(settings, catalog, 'courseware_text'),
+    image: defaultSelectionForPurpose(settings, catalog, 'courseware_image'),
+    teacherSpeech: defaultSelectionForPurpose(settings, catalog, 'teacher_tts'),
+    studentSpeech: defaultSelectionForPurpose(settings, catalog, 'student_tts'),
+    catalog,
+  };
+}
+
+export function validateCoursewareSelectionCredentials(
+  settings: CoursewareAISettings,
+  catalog: AIProviderCatalogItem[],
+  selections: CoursewareModelPreference[],
+): string {
+  for (const selection of selections) {
+    const provider = catalog.find((candidate) =>
+      candidate.models.some((model) => model.endpointId === selection.endpointId));
+    const credential = provider
+      ? settings.providers.find((candidate) => candidate.providerId === provider.id)
+      : undefined;
+    if (!credential?.keySet) return '请先在 AI 服务中配置所选模型的服务商密钥';
+    if (credential.healthStatus === 'quota_exhausted') return '所选模型的服务商额度已用完';
+    if (credential.healthStatus === 'invalid') return '所选模型的服务商密钥无效';
+  }
+  return '';
+}
+
 function selectedModel(
   catalog: AIProviderCatalogItem[],
   selection: CoursewareSelectionDraft,

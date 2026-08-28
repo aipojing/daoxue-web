@@ -544,6 +544,23 @@ a {
   font-size: 22px;
 }
 
+.student-avatar {
+  overflow: hidden;
+  padding: 2px;
+  border: 3px solid var(--student-avatar-accent, #c95135);
+  background: #f3ead8;
+  box-shadow: 0 2px 9px rgba(35, 63, 51, .16);
+}
+
+.student-avatar img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+  transform: scale(1.08);
+}
+
 .student-card-info {
   display: flex;
   flex-direction: column;
@@ -753,6 +770,79 @@ a {
 
 .color-dot.selected {
   border-color: var(--ink);
+}
+
+.student-gender-field {
+  min-width: 0;
+  margin: 0 0 12px;
+  padding: 0;
+  border: 0;
+}
+
+.student-gender-field legend {
+  margin-bottom: 7px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.student-gender-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.student-gender-option {
+  position: relative;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.student-gender-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.student-gender-card {
+  min-height: 76px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 8px;
+  border: 1px solid var(--grid);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  transition: border-color .15s, background .15s, box-shadow .15s;
+}
+
+.student-gender-option:hover .student-gender-card {
+  border-color: var(--board);
+}
+
+.student-gender-option input:checked + .student-gender-card {
+  border-color: var(--board);
+  background: var(--board-wash);
+  color: var(--board-deep);
+  box-shadow: inset 0 0 0 1px var(--board);
+}
+
+.student-gender-option input:focus-visible + .student-gender-card {
+  outline: 2px solid var(--board);
+  outline-offset: 2px;
+}
+
+.student-gender-preview {
+  width: 48px;
+  height: 48px;
+}
+
+.student-gender-field .form-hint {
+  margin: 7px 0 0;
 }
 
 /* ===== 聊天页：方格纸上做题 ===== */

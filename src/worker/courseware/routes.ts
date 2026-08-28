@@ -24,6 +24,7 @@ import {
   isCoursewareMediaKeyForLogicalKey,
 } from './media';
 import { getOrCreateCoursewareAssessment } from './assessment';
+import { preferenceSchema } from '../ai-catalog/validation';
 
 const createSchema = z.object({
   subject: z.string().trim().min(1).max(40),
@@ -32,6 +33,7 @@ const createSchema = z.object({
   sourceConversationId: z.number().int().positive().optional(),
   sourceText: z.string().max(10_000).optional(),
   includeImages: z.boolean(),
+  modelSelections: z.array(preferenceSchema).min(3).max(4).optional(),
 }).strict();
 
 const checkpointAnswersSchema = z.record(

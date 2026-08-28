@@ -20,7 +20,7 @@ import {
   shouldPollCourseware,
   updateCoursewareList,
 } from "../lib/courseware";
-import type { CoursewareAISettings } from "../../shared/ai-catalog";
+import type { AIProviderCatalogItem, CoursewareAISettings } from "../../shared/ai-catalog";
 import type { CoursewareSummary } from "../../shared/courseware";
 import type { StudentWorkspaceContext } from "../components/StudentWorkspaceLayout";
 
@@ -127,6 +127,7 @@ export default function CoursewaresPage() {
   const { student } = useOutletContext<StudentWorkspaceContext>();
   const studentId = Number(rawId);
   const [settings, setSettings] = useState<CoursewareAISettings | null>(null);
+  const [catalog, setCatalog] = useState<AIProviderCatalogItem[]>([]);
   const [items, setItems] = useState<CoursewareSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -236,6 +237,7 @@ export default function CoursewaresPage() {
     setRouteToken(token);
     setRouteSignal(routeAbortRef.current.signal);
     setSettings(null);
+    setCatalog([]);
     commitItems([]);
     setNextCursor(null);
     setError("");
@@ -249,16 +251,18 @@ export default function CoursewaresPage() {
     }
     void (async () => {
       try {
-        const [loadedSettings, page] = await Promise.all([
+        const [loadedSettings, loadedCatalog, page] = await Promise.all([
           get<CoursewareAISettings>("/api/courseware-ai-settings", token),
+          get<AIProviderCatalogItem[]>("/api/ai-catalog", token),
           get<CoursewarePageResponse>(
             `/api/students/${studentId}/coursewares?limit=20`,
             token,
           ),
         ]);
-        if (!routeRef.current.isCurrent(token) || !loadedSettings || !page)
+        if (!routeRef.current.isCurrent(token) || !loadedSettings || !loadedCatalog || !page)
           return;
         setSettings(loadedSettings);
+        setCatalog(loadedCatalog);
         commitItems(page.items);
         setNextCursor(page.nextCursor);
       } catch (cause) {
@@ -374,6 +378,7 @@ export default function CoursewaresPage() {
         key={studentId}
         studentId={studentId}
         settings={settings}
+        catalog={catalog}
         routeToken={routeToken}
         routeSignal={routeSignal}
         isRouteCurrent={isRouteCurrent}

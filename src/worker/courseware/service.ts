@@ -1,8 +1,9 @@
 import type { CoursewareSummary } from '../../shared/courseware';
-import type { CoursewareModelPurpose } from '../../shared/ai-catalog';
+import type { CoursewareModelPreference, CoursewareModelPurpose } from '../../shared/ai-catalog';
 import { resolveCredential } from '../ai-catalog/credentials';
 import {
   getUserCoursewareAISettings,
+  resolveModelSelection,
   resolvePreference,
   type ResolvedModelSelection,
 } from '../ai-catalog/repository';
@@ -23,6 +24,7 @@ export interface CreateCoursewareInput {
   sourceConversationId?: number;
   sourceText?: string;
   includeImages: boolean;
+  modelSelections?: CoursewareModelPreference[];
 }
 
 export interface PersistCoursewareArtifactInput extends SavedArtifact {
@@ -132,6 +134,7 @@ function validateInput(input: CreateCoursewareInput): CreateCoursewareInput {
     ...(input.sourceConversationId === undefined ? {} : { sourceConversationId: input.sourceConversationId }),
     ...(input.sourceText === undefined ? {} : { sourceText: boundedText(input.sourceText, 10_000, '来源文本', true) }),
     includeImages: input.includeImages,
+    ...(input.modelSelections === undefined ? {} : { modelSelections: input.modelSelections }),
   };
 }
 
@@ -149,9 +152,17 @@ async function requiredSelection(
   userId: number,
   purpose: CoursewareModelPurpose,
   label: string,
+  settings: Awaited<ReturnType<typeof getUserCoursewareAISettings>>,
+  requested?: CoursewareModelPreference,
 ): Promise<ResolvedModelSelection> {
-  const selection = await resolvePreference(env.DB, userId, purpose);
+  const selection = requested
+    ? await resolveModelSelection(env.DB, requested)
+    : await resolvePreference(env.DB, userId, purpose);
   if (!selection) throw new UserFacingError(`${label}尚未完整配置`, 400);
+  const provider = settings.providers.find((candidate) => candidate.providerId === selection.providerId);
+  if (!provider?.keySet) throw new UserFacingError(`${label}尚未配置个人 Key`, 400);
+  if (provider.healthStatus === 'invalid') throw new UserFacingError(`${label} Key 已失效，请替换并测试后重试`, 400);
+  if (provider.healthStatus === 'quota_exhausted') throw new UserFacingError(`${label} Key 额度已用尽，请更换并测试后重试`, 400);
   const credential = await resolveCredential(env.DB, env, userId, selection.providerId);
   if (!credential) throw new UserFacingError(`${label}尚未配置个人 Key`, 400);
   return selection;
@@ -201,19 +212,28 @@ export async function createCourseware(
   }
 
   const settings = await getUserCoursewareAISettings(env.DB, env, userId);
-  if (settings.readiness.text !== 'ready') throw readinessError('课件文本模型', settings.readiness.text);
-  if (settings.readiness.teacherSpeech !== 'ready') throw readinessError('老师语音模型', settings.readiness.teacherSpeech);
-  if (settings.readiness.studentSpeech !== 'ready') throw readinessError('AI 同学语音模型', settings.readiness.studentSpeech);
-  if (input.includeImages && settings.readiness.image !== 'ready') {
-    throw readinessError('课件图片模型', settings.readiness.image);
+  const requested = new Map(input.modelSelections?.map((selection) => [selection.purpose, selection]));
+  if (input.modelSelections) {
+    const requiredPurposes: CoursewareModelPurpose[] = ['courseware_text', 'teacher_tts', 'student_tts'];
+    if (input.includeImages) requiredPurposes.push('courseware_image');
+    if (requested.size !== requiredPurposes.length || requiredPurposes.some((purpose) => !requested.has(purpose))) {
+      throw new UserFacingError('请选择本次课件使用的完整模型配置', 400);
+    }
+  } else {
+    if (settings.readiness.text !== 'ready') throw readinessError('课件文本模型', settings.readiness.text);
+    if (settings.readiness.teacherSpeech !== 'ready') throw readinessError('老师语音模型', settings.readiness.teacherSpeech);
+    if (settings.readiness.studentSpeech !== 'ready') throw readinessError('AI 同学语音模型', settings.readiness.studentSpeech);
+    if (input.includeImages && settings.readiness.image !== 'ready') {
+      throw readinessError('课件图片模型', settings.readiness.image);
+    }
   }
 
   const [text, teacherSpeech, studentSpeech, image] = await Promise.all([
-    requiredSelection(env, userId, 'courseware_text', '课件文本模型'),
-    requiredSelection(env, userId, 'teacher_tts', '老师语音模型'),
-    requiredSelection(env, userId, 'student_tts', 'AI 同学语音模型'),
+    requiredSelection(env, userId, 'courseware_text', '课件文本模型', settings, requested.get('courseware_text')),
+    requiredSelection(env, userId, 'teacher_tts', '老师语音模型', settings, requested.get('teacher_tts')),
+    requiredSelection(env, userId, 'student_tts', 'AI 同学语音模型', settings, requested.get('student_tts')),
     input.includeImages
-      ? requiredSelection(env, userId, 'courseware_image', '课件图片模型')
+      ? requiredSelection(env, userId, 'courseware_image', '课件图片模型', settings, requested.get('courseware_image'))
       : Promise.resolve(null),
   ]);
   const snapshot = {

@@ -11,6 +11,7 @@ import {
   type PlayerAction,
 } from '../lib/courseware-player';
 import CoursewareTimeline from './CoursewareTimeline';
+import { IconNext, IconPause, IconPlay, IconPrevious } from './icons';
 
 interface Props {
   courseware: CoursewareDetail;
@@ -157,7 +158,7 @@ export default function CoursewarePlayer({ courseware }: Props) {
     applyAction(action, true);
   };
   const toggle = () => {
-    applyAction({ type: 'TOGGLE' }, state.isPlaying);
+    applyAction({ type: state.awaitingStart ? 'START' : 'TOGGLE' }, state.isPlaying);
   };
   const replay = () => {
     if (audioRef.current) audioRef.current.currentTime = 0;
@@ -195,17 +196,12 @@ export default function CoursewarePlayer({ courseware }: Props) {
             <span>{state.mode === 'alternate' ? '听完后回到本段，不会自动前进' : `第 ${state.segmentPosition + 1} 段，共 ${courseware.segments.length} 段`}</span>
           </div>
         </div>
-        {state.awaitingStart && (
-          <button type="button" className="btn btn-primary courseware-start-button" onClick={() => applyAction({ type: 'START' })}>
-            开始上课
-          </button>
-        )}
         <div className="courseware-transport">
-          <button type="button" className="courseware-icon-button" disabled={state.segmentPosition === 0} onClick={() => move({ type: 'PREVIOUS' })}>上一段</button>
-          <button type="button" className="btn btn-primary courseware-play-button" onClick={toggle} aria-label={state.isPlaying ? '暂停语音' : '播放语音'}>
-            {state.isPlaying ? '暂停' : '播放'}
+          <button type="button" className="courseware-icon-button" disabled={state.segmentPosition === 0} onClick={() => move({ type: 'PREVIOUS' })} aria-label="上一段"><IconPrevious size={24} /></button>
+          <button type="button" className="btn btn-primary courseware-play-button" onClick={toggle} aria-label={state.awaitingStart ? '开始上课' : state.isPlaying ? '暂停语音' : '播放语音'}>
+            {state.isPlaying ? <IconPause size={24} /> : <IconPlay size={25} />}
           </button>
-          <button type="button" className="courseware-icon-button" disabled={state.segmentPosition >= courseware.segments.length - 1} onClick={() => move({ type: 'NEXT' })}>下一段</button>
+          <button type="button" className="courseware-icon-button" disabled={state.segmentPosition >= courseware.segments.length - 1} onClick={() => move({ type: 'NEXT' })} aria-label="下一段"><IconNext size={24} /></button>
         </div>
         <div className="courseware-seek-row">
           <span>{formatTime(state.currentSeconds)}</span>

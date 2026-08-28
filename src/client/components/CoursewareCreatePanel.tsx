@@ -1,13 +1,16 @@
-import { useRef, useState, type FormEvent } from 'react';
+import { useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { apiPost, ApiError } from '../api';
-import type { CoursewareAISettings } from '../../shared/ai-catalog';
+import type { AIProviderCatalogItem, CoursewareAISettings } from '../../shared/ai-catalog';
 import type { CoursewareSummary } from '../../shared/courseware';
-import { buildCoursewareCreatePayload, canCreateCourseware, type CoursewareCreateDraft } from '../lib/courseware';
+import { buildCoursewareCreatePayload, type CoursewareCreateDraft } from '../lib/courseware';
+import { buildCoursewarePreferences, createCoursewareSettingsDraft, validateCoursewareSelectionCredentials } from '../lib/courseware-ai-settings';
+import CoursewareModelPicker from './CoursewareModelPicker';
 
 interface Props {
   studentId: number;
   settings: CoursewareAISettings;
+  catalog: AIProviderCatalogItem[];
   onCreated: (courseware: CoursewareSummary) => void;
   routeToken: number;
   isRouteCurrent: (token: number) => boolean;
@@ -20,13 +23,25 @@ function readinessLabel(value: CoursewareAISettings['readiness'][keyof Coursewar
   return value === 'ready' ? '已就绪' : value === 'disabled' ? '未启用' : value === 'quota_exhausted' ? '额度已用完' : value === 'invalid_credential' ? '密钥无效' : '尚未配置';
 }
 
-export default function CoursewareCreatePanel({ studentId, settings, onCreated, routeToken, isRouteCurrent, routeSignal }: Props) {
+export default function CoursewareCreatePanel({ studentId, settings, catalog, onCreated, routeToken, isRouteCurrent, routeSignal }: Props) {
   const [draft, setDraft] = useState(EMPTY_DRAFT);
+  const [modelDraft, setModelDraft] = useState(() => createCoursewareSettingsDraft(settings, catalog));
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
-  const readiness = { featureEnabled: settings.featureEnabled, ...settings.readiness };
-  const eligible = canCreateCourseware(readiness, draft.includeImages);
+  const modelSelection = useMemo(() => {
+    try {
+      const selections = buildCoursewarePreferences({ ...modelDraft, includeImages: draft.includeImages }).preferences;
+      return { selections, error: validateCoursewareSelectionCredentials(settings, catalog, selections) };
+    } catch (cause) {
+      return { selections: [], error: cause instanceof Error ? cause.message : '请选择本次课件使用的模型' };
+    }
+  }, [catalog, draft.includeImages, modelDraft, settings]);
+  const eligible = !settings.featureEnabled
+    ? { ok: false as const, reason: '课件功能尚未开放' }
+    : modelSelection.error
+      ? { ok: false as const, reason: modelSelection.error }
+      : { ok: true as const };
 
   const change = <K extends keyof CoursewareCreateDraft>(key: K, value: CoursewareCreateDraft[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -35,7 +50,7 @@ export default function CoursewareCreatePanel({ studentId, settings, onCreated, 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!eligible.ok || submittingRef.current) return;
-    const payload = buildCoursewareCreatePayload(draft);
+    const payload = buildCoursewareCreatePayload(draft, modelSelection.selections);
     if (!payload.subject || !payload.topic || !payload.learningGoal) {
       setError('请填写学科、主题和学习目标');
       return;
@@ -74,6 +89,7 @@ export default function CoursewareCreatePanel({ studentId, settings, onCreated, 
         <label className="courseware-form-wide">参考材料（可选）<textarea value={draft.sourceText} maxLength={10_000} onChange={(event) => change('sourceText', event.target.value)} disabled={submitting} placeholder="可粘贴教材要点、题目或家长的补充说明" rows={3} /></label>
         <label>来源自学会话 ID（可选）<input inputMode="numeric" value={draft.sourceConversationId} onChange={(event) => change('sourceConversationId', event.target.value)} disabled={submitting} /></label>
         <label className="courseware-image-toggle"><input type="checkbox" checked={draft.includeImages} onChange={(event) => change('includeImages', event.target.checked)} disabled={submitting} />生成教学配图</label>
+        <CoursewareModelPicker value={modelDraft} includeImages={draft.includeImages} disabled={submitting} onChange={setModelDraft} />
         {error && <p className="form-error courseware-form-wide" role="alert">{error}</p>}
         <div className="courseware-form-actions courseware-form-wide"><button className="btn btn-primary" type="submit" disabled={!eligible.ok || submitting}>{submitting ? '正在提交…' : '开始生成课件'}</button></div>
       </form>

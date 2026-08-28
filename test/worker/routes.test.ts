@@ -445,6 +445,32 @@ describe('资源归属、局部更新与聊天额度', () => {
     });
   });
 
+  it('学生性别默认不指定，并支持显式创建和局部更新', async () => {
+    const admin = await createAdmin();
+    const createdDefault = await api('/api/students', {
+      method: 'POST',
+      body: JSON.stringify({ name: '小安', grade: '二年级' }),
+    }, admin.cookie);
+    expect((await json<Record<string, unknown>>(createdDefault)).data).toMatchObject({
+      name: '小安', gender: 'unspecified',
+    });
+
+    const createdMale = await api('/api/students', {
+      method: 'POST',
+      body: JSON.stringify({ name: '小树', grade: '三年级', gender: 'male' }),
+    }, admin.cookie);
+    const student = (await json<{ id: number; gender: string }>(createdMale)).data!;
+    expect(student.gender).toBe('male');
+
+    const updated = await api(`/api/students/${student.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ gender: 'female' }),
+    }, admin.cookie);
+    expect((await json<Record<string, unknown>>(updated)).data).toMatchObject({
+      name: '小树', gender: 'female',
+    });
+  });
+
   it('未配置 DeepSeek 时不扣额度也不落用户消息', async () => {
     const admin = await createAdmin();
     const created = await api('/api/students', {

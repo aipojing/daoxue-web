@@ -162,7 +162,7 @@ provider
 
 目录 capability 只有 `structured_text`、`speech_synthesis` 和 `image_generation`。编译进 Worker 的 adapter registry 再校验 endpoint 的 `adapter_type`，当前支持 `openai_text`、`token_plan_tts` 和 `token_plan_image`；目录记录不能让运行时执行任意代码。
 
-家长按用途保存 `courseware_text`、`teacher_tts`、`student_tts` 和可选的 `courseware_image` 偏好。语音用途必须从所选模型声明的音色中选择。创建课件时，Worker 校验 capability/adapter/voice 后把 provider、endpoint、model、voice、参数、adapter/prompt 版本写入 `model_snapshot_json`；后续 Queue 消费者使用该快照，不会偷偷换成账户刚修改的新模型，也不会跨 provider fallback。
+家长在 AI 服务页按用途保存 `courseware_text`、`teacher_tts`、`student_tts` 和可选的 `courseware_image` 默认偏好。新建课件时，前端从这些默认值初始化本次选择器，也允许家长只为当前课件改选目录模型或音色。语音用途必须从所选模型声明的音色中选择。Worker 不信任客户端选择，会重新校验 capability、adapter、voice、个人凭证及健康状态，再把 provider、endpoint、model、voice、参数、adapter/prompt 版本写入 `model_snapshot_json`；后续 Queue 消费者使用该快照，不会偷偷换成账户刚修改的新模型，也不会跨 provider fallback。旧客户端未提交本次选择时仍回退到账户默认偏好。
 
 ### 严格 BYOK 与凭证隔离
 

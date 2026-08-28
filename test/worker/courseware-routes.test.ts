@@ -236,6 +236,74 @@ describe('courseware routes', () => {
     expect(enqueue).toEqual({ enqueue_token: null, enqueue_kind: null });
   });
 
+  it('snapshots the models selected for this creation instead of the saved defaults', async () => {
+    const account = await register('create-with-model-selection@example.com');
+    const studentId = await createStudent(account.cookie);
+    await configureCoursewareAI(account.id);
+    await env.DB.prepare("UPDATE app_settings SET value = '1' WHERE key = 'courseware_enabled'").run();
+    const { results } = await env.DB.prepare(
+      `SELECT purpose, endpoint_id, model_catalog_id, custom_model_id, voice_id, params_json
+       FROM user_model_preferences WHERE user_id = ? ORDER BY purpose`,
+    ).bind(account.id).all<{
+      purpose: CoursewareModelPreference['purpose'];
+      endpoint_id: number;
+      model_catalog_id: number | null;
+      custom_model_id: string;
+      voice_id: string;
+      params_json: string;
+    }>();
+    const modelSelections = results.map((row): CoursewareModelPreference => ({
+      purpose: row.purpose,
+      endpointId: row.endpoint_id,
+      modelCatalogId: row.purpose === 'courseware_text' ? null : row.model_catalog_id,
+      customModelId: row.purpose === 'courseware_text' ? 'qwen-courseware-custom' : row.custom_model_id,
+      voiceId: row.voice_id,
+      params: JSON.parse(row.params_json) as Record<string, unknown>,
+    })).filter((selection) => selection.purpose !== 'courseware_image');
+
+    const response = await api(`/api/students/${studentId}/coursewares`, {
+      method: 'POST',
+      body: JSON.stringify({
+        subject: 'math', topic: '一次函数', learningGoal: '理解图像', includeImages: false, modelSelections,
+      }),
+    }, account.cookie);
+    expect(response.status).toBe(201);
+    const created = await json<{ id: number }>(response);
+    const row = await env.DB.prepare(
+      'SELECT model_snapshot_json FROM coursewares WHERE id = ?',
+    ).bind(created.data?.id).first<{ model_snapshot_json: string }>();
+    const snapshot = JSON.parse(row?.model_snapshot_json ?? '{}') as { text?: { modelId?: string } };
+    expect(snapshot.text?.modelId).toBe('qwen-courseware-custom');
+  });
+
+  it('rejects a per-creation model selection when its provider credential is invalid', async () => {
+    const account = await register('selected-model-invalid-key@example.com');
+    const studentId = await createStudent(account.cookie);
+    await configureCoursewareAI(account.id, 'invalid');
+    await env.DB.prepare("UPDATE app_settings SET value = '1' WHERE key = 'courseware_enabled'").run();
+    const { results } = await env.DB.prepare(
+      `SELECT purpose, endpoint_id, model_catalog_id, custom_model_id, voice_id, params_json
+       FROM user_model_preferences WHERE user_id = ? AND purpose <> 'courseware_image'`,
+    ).bind(account.id).all<{
+      purpose: CoursewareModelPreference['purpose']; endpoint_id: number; model_catalog_id: number | null;
+      custom_model_id: string; voice_id: string; params_json: string;
+    }>();
+    const modelSelections = results.map((row) => ({
+      purpose: row.purpose,
+      endpointId: row.endpoint_id,
+      modelCatalogId: row.model_catalog_id,
+      customModelId: row.custom_model_id,
+      voiceId: row.voice_id,
+      params: JSON.parse(row.params_json) as Record<string, unknown>,
+    }));
+    const response = await api(`/api/students/${studentId}/coursewares`, {
+      method: 'POST',
+      body: JSON.stringify({ subject: 'math', topic: '一次函数', learningGoal: '理解图像', includeImages: false, modelSelections }),
+    }, account.cookie);
+    expect(response.status).toBe(400);
+    expect((await json(response)).error).toContain('失效');
+  });
+
   it('recovers an expired create enqueue during owned detail polling and ignores its delayed message', async () => {
     const account = await register('recover-create-poll@example.com');
     const studentId = await createStudent(account.cookie);

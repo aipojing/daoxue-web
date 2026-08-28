@@ -2,15 +2,17 @@ import type { CoursewareDetail } from '../../shared/courseware';
 import type { PlayerMode } from '../lib/courseware-player';
 import MarkdownContent from './MarkdownContent';
 import CoursewareCheckpoint from './CoursewareCheckpoint';
+import teacherAvatar from '../assets/avatars/courseware-teacher.png';
+import classmateAvatar from '../assets/avatars/courseware-classmate.png';
 
-const kindMeta: Record<CoursewareDetail['segments'][number]['kind'], { icon: string; label: string; tone: string }> = {
-  teacher_intro: { icon: '讲', label: '老师开场', tone: 'teacher' },
-  teacher_explanation: { icon: '讲', label: '老师讲解', tone: 'teacher' },
-  student_question: { icon: '问', label: 'AI 同学提问', tone: 'student' },
-  student_misconception: { icon: '惑', label: 'AI 同学易错想法', tone: 'student' },
-  teacher_reframe: { icon: '解', label: '换个角度讲', tone: 'reframe' },
-  checkpoint: { icon: '验', label: '理解检查', tone: 'checkpoint' },
-  summary: { icon: '结', label: '本课小结', tone: 'summary' },
+const kindMeta: Record<CoursewareDetail['segments'][number]['kind'], { label: string; tone: string }> = {
+  teacher_intro: { label: '老师开场', tone: 'teacher' },
+  teacher_explanation: { label: '老师讲解', tone: 'teacher' },
+  student_question: { label: 'AI 同学提问', tone: 'student' },
+  student_misconception: { label: 'AI 同学易错想法', tone: 'student' },
+  teacher_reframe: { label: '换个角度讲', tone: 'reframe' },
+  checkpoint: { label: '理解检查', tone: 'checkpoint' },
+  summary: { label: '本课小结', tone: 'summary' },
 };
 
 interface Props {
@@ -46,6 +48,8 @@ export default function CoursewareTimeline({
         const isComplete = position < currentPosition || (completed && current);
         const hasError = current && Boolean(audioError);
         const alternateVisible = current && mode === 'alternate' && segment.alternateExplanation;
+        const classmateSpeaking = segment.speaker === 'student';
+        const speakerName = classmateSpeaking ? 'AI 同学' : segment.speaker === 'system' ? '互动练习' : '老师';
         return (
           <li
             key={segment.segmentKey}
@@ -53,7 +57,15 @@ export default function CoursewareTimeline({
             aria-current={current ? 'step' : undefined}
           >
             <div className="courseware-timeline-rail" aria-hidden="true">
-              <span>{isComplete ? '✓' : meta.icon}</span>
+              <span>{isComplete ? '✓' : position + 1}</span>
+            </div>
+            <div className="courseware-speaker">
+              <img
+                className="courseware-speaker-avatar"
+                src={classmateSpeaking ? classmateAvatar : teacherAvatar}
+                alt={`${speakerName}头像`}
+              />
+              <span>{speakerName}</span>
             </div>
             <article className="courseware-dialogue-card">
               <header>

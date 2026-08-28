@@ -34,6 +34,7 @@ import {
   type ConversationDetail,
   type ConversationSubject,
   type CoursewareAISettings,
+  type AIProviderCatalogItem,
   type Message,
 } from '../types';
 import MessageBubble from '../components/MessageBubble';
@@ -83,6 +84,7 @@ export default function ChatPage() {
   const [reconcilingStream, setReconcilingStream] = useState(false);
   const [toast, setToast] = useState('');
   const [coursewareSettings, setCoursewareSettings] = useState<CoursewareAISettings | null>(null);
+  const [coursewareCatalog, setCoursewareCatalog] = useState<AIProviderCatalogItem[]>([]);
   const [coursewareSettingsState, setCoursewareSettingsState] = useState<CoursewareSettingsState>('loading');
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -262,21 +264,28 @@ export default function ChatPage() {
   useEffect(() => {
     if (!isCoursewareDailyConversation(detail?.subject, detail?.mode)) {
       setCoursewareSettings(null);
+      setCoursewareCatalog([]);
       setCoursewareSettingsState('loading');
       return;
     }
     const controller = new AbortController();
     setCoursewareSettings(null);
+    setCoursewareCatalog([]);
     setCoursewareSettingsState('loading');
-    void apiGet<CoursewareAISettings>('/api/courseware-ai-settings', { signal: controller.signal })
-      .then((settings) => {
+    void Promise.all([
+      apiGet<CoursewareAISettings>('/api/courseware-ai-settings', { signal: controller.signal }),
+      apiGet<AIProviderCatalogItem[]>('/api/ai-catalog', { signal: controller.signal }),
+    ])
+      .then(([settings, catalog]) => {
         if (controller.signal.aborted) return;
         setCoursewareSettings(settings);
+        setCoursewareCatalog(catalog);
         setCoursewareSettingsState('ready');
       })
       .catch(() => {
         if (controller.signal.aborted) return;
         setCoursewareSettings(null);
+        setCoursewareCatalog([]);
         setCoursewareSettingsState('error');
       });
     return () => controller.abort();
@@ -733,6 +742,7 @@ export default function ChatPage() {
                 studentId={detail?.studentId}
                 sourceConversationId={detail?.id}
                 coursewareSettings={coursewareSettings}
+                coursewareCatalog={coursewareCatalog}
                 coursewareSettingsState={coursewareSettingsState}
               />
             );

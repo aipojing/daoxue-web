@@ -13,6 +13,7 @@ import {
 } from '../src/client/lib/chat';
 import { buildCoursewareDraftCreateRequest } from '../src/client/components/CoursewareDraftCard';
 import type { Message } from '../src/client/types';
+import type { CoursewareModelPreference } from '../src/shared/ai-catalog';
 import * as chatHelpers from '../src/client/lib/chat';
 
 describe('client chat helpers', () => {
@@ -51,14 +52,18 @@ describe('client chat helpers', () => {
   });
 
   it('builds only an internal sanitized courseware creation request from a draft card', () => {
+    const modelSelections: CoursewareModelPreference[] = [{
+      purpose: 'courseware_text', endpointId: 2, modelCatalogId: 4, customModelId: '', voiceId: '', params: {},
+    }];
     const request = buildCoursewareDraftCreateRequest(7, 11, {
       subject: '数学', topic: '一次函数', learningGoal: '能判断一次函数', sourceText: '前置诊断摘要',
-    }, true);
+    }, true, modelSelections);
     expect(request).toEqual({
       path: '/api/students/7/coursewares',
       body: {
         subject: '数学', topic: '一次函数', learningGoal: '能判断一次函数', sourceText: '前置诊断摘要',
         sourceConversationId: 11, includeImages: true,
+        modelSelections,
       },
     });
     expect(JSON.stringify(request)).not.toMatch(/https?:\/\/|apiKey|baseUrl/i);

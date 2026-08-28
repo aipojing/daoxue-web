@@ -1,4 +1,4 @@
-import type { CoursewareAISettings } from '../../shared/ai-catalog';
+import type { CoursewareAISettings, CoursewareModelPreference } from '../../shared/ai-catalog';
 import type { CoursewareGenerationStage, CoursewareStatus, CoursewareSummary } from '../../shared/courseware';
 
 export interface CoursewareReadiness {
@@ -25,6 +25,7 @@ export interface CoursewareCreatePayload {
   sourceText?: string;
   sourceConversationId?: number;
   includeImages: boolean;
+  modelSelections: CoursewareModelPreference[];
 }
 
 export function canCreateCourseware(readiness: CoursewareReadiness, includeImages = false): { ok: true } | { ok: false; reason: string } {
@@ -76,12 +77,23 @@ export function mergeCoursewarePage(current: CoursewareSummary[], incoming: Cour
   return [...current, ...incoming.filter((item) => !byId.has(item.id))];
 }
 
-export function buildCoursewareCreatePayload(draft: CoursewareCreateDraft): CoursewareCreatePayload {
+export function buildCoursewareCreatePayload(
+  draft: CoursewareCreateDraft,
+  modelSelections: CoursewareModelPreference[],
+): CoursewareCreatePayload {
   const payload: CoursewareCreatePayload = {
     subject: draft.subject.trim(),
     topic: draft.topic.trim(),
     learningGoal: draft.learningGoal.trim(),
     includeImages: draft.includeImages,
+    modelSelections: modelSelections.map((selection) => ({
+      purpose: selection.purpose,
+      endpointId: selection.endpointId,
+      modelCatalogId: selection.modelCatalogId,
+      customModelId: selection.customModelId,
+      voiceId: selection.voiceId,
+      params: { ...selection.params },
+    })),
   };
   const sourceText = draft.sourceText.trim();
   if (sourceText) payload.sourceText = sourceText;

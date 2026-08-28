@@ -21,6 +21,7 @@ import {
   IconNotebook,
   IconTarget,
 } from './icons';
+import StudentAvatar from './StudentAvatar';
 
 export interface StudentWorkspaceContext {
   student: Student;
@@ -38,7 +39,7 @@ function WorkspaceIcon({ icon }: { icon: StudentWorkspaceIcon }) {
     archive: IconArchive,
   };
   const Icon = icons[icon];
-  return <Icon size={18} />;
+  return <Icon size={20} />;
 }
 
 function getFocusableElements(container: HTMLElement): HTMLElement[] {
@@ -225,8 +226,10 @@ export default function StudentWorkspaceLayout() {
           <button type="button" className="workspace-drawer-close" aria-label="关闭菜单" onClick={() => closeDrawer()}>关闭</button>
         </div>
         <div className="workspace-student">
-          <span className="avatar workspace-avatar" style={{ background: student.color }}>{student.name.slice(0, 1)}</span>
-          <div><strong>{student.name}</strong><span>{student.grade}</span></div>
+          <StudentAvatar name={student.name} color={student.color} gender={student.gender} className="workspace-avatar" />
+          <p className="workspace-student-summary">
+            <strong>{student.name}</strong><span aria-hidden="true">·</span><span>{student.grade}</span>
+          </p>
         </div>
         <nav className="workspace-navigation" aria-label="孩子学习功能">
           {studentWorkspaceGroups.map((group) => (

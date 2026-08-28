@@ -2,6 +2,7 @@ import { Link, useOutletContext } from 'react-router-dom';
 import StudentFormModal from '../components/StudentFormModal';
 import { IconLamp, IconNotebook, IconTarget } from '../components/icons';
 import type { StudentWorkspaceContext } from '../components/StudentWorkspaceLayout';
+import StudentAvatar from '../components/StudentAvatar';
 import { useState } from 'react';
 
 export default function StudentDetailPage() {
@@ -11,7 +12,7 @@ export default function StudentDetailPage() {
     <div className="page">
       <div className="page-header">
         <div className="student-header">
-          <span className="avatar avatar-lg" style={{ background: student.color }}>{student.name.slice(0, 1)}</span>
+          <StudentAvatar name={student.name} color={student.color} gender={student.gender} className="avatar-lg" />
           <div><h1>今日学习</h1><p className="text-secondary">{student.name} · {student.grade}{student.textbook ? ` · ${student.textbook}` : ''}</p></div>
         </div>
         <div className="header-actions"><button className="btn" onClick={() => setEditOpen(true)}>编辑资料</button><Link to={`/students/${student.id}/mistakes`} className="btn"><IconNotebook size={16} />错题本</Link></div>

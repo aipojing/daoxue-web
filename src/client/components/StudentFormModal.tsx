@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import { apiPost, apiPut, ApiError } from '../api';
-import { GRADES, PROVINCES, splitRegion, joinRegion, type Student } from '../types';
+import { GRADES, PROVINCES, splitRegion, joinRegion, type Student, type StudentGender } from '../types';
 import { useDialogFocus } from '../lib/modal';
+import StudentGenderField from './StudentGenderField';
 
 const COLOR_OPTIONS = ['#1e5b4a', '#b8432f', '#33648f', '#b0782a', '#635c9b', '#3a7d5c'];
 
@@ -19,6 +20,7 @@ export default function StudentFormModal({ student, onClose, onSaved }: Props) {
   const [province, setProvince] = useState(initialRegion.province);
   const [city, setCity] = useState(initialRegion.city);
   const [color, setColor] = useState(student?.color ?? COLOR_OPTIONS[0]!);
+  const [gender, setGender] = useState<StudentGender>(student?.gender ?? 'unspecified');
   const [notes, setNotes] = useState(student?.notes ?? '');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -28,7 +30,7 @@ export default function StudentFormModal({ student, onClose, onSaved }: Props) {
     e.preventDefault();
     setError('');
     setSubmitting(true);
-    const body = { name, grade, textbook, region: joinRegion(province, city), color, notes };
+    const body = { name, grade, textbook, region: joinRegion(province, city), color, gender, notes };
     try {
       if (student) {
         await apiPut(`/api/students/${student.id}`, body);
@@ -106,6 +108,7 @@ export default function StudentFormModal({ student, onClose, onSaved }: Props) {
             ))}
           </div>
         </div>
+        <StudentGenderField value={gender} onChange={setGender} />
         <label className="form-label">
           备注（AI 会参考）
           <textarea

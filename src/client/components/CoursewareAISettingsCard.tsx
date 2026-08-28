@@ -11,16 +11,12 @@ import {
   mergeCredentialSettings,
   mergePreferenceSettings,
   shouldClearSettingsSyncStatus,
+  createCoursewareSettingsDraft,
   modelsForPurpose,
   voicesForModel,
   type CoursewareSelectionDraft,
 } from '../lib/courseware-ai-settings';
-import type {
-  AIModelOption,
-  AIProviderCatalogItem,
-  CoursewareAISettings,
-  CoursewareModelPurpose,
-} from '../types';
+import type { AIProviderCatalogItem, CoursewareAISettings, CoursewareModelPurpose } from '../types';
 
 type TestKind = 'text' | 'teacher_tts' | 'student_tts' | 'image';
 
@@ -77,19 +73,6 @@ async function binaryTest(
   return response.blob();
 }
 
-function selectionFor(
-  preferences: CoursewareAISettings['preferences'],
-  purpose: CoursewareModelPurpose,
-  models: AIModelOption[],
-): CoursewareSelectionDraft {
-  const saved = preferences.find((item) => item.purpose === purpose);
-  if (saved) return { ...saved, params: saved.params ?? {} };
-  const recommended = models.find((model) => model.recommended) ?? models[0];
-  return recommended
-    ? { ...EMPTY_SELECTION, endpointId: recommended.endpointId, modelCatalogId: recommended.id }
-    : EMPTY_SELECTION;
-}
-
 function providerForModel(catalog: AIProviderCatalogItem[], modelId: number | null): AIProviderCatalogItem | null {
   if (modelId === null) return null;
   return catalog.find((provider) => provider.models.some((model) => model.id === modelId)) ?? null;
@@ -106,9 +89,10 @@ interface ModelFieldProps {
   showVoice?: boolean;
   error?: string;
   errorId?: string;
+  featureSelection?: boolean;
 }
 
-function ModelField({
+export function ModelField({
   id,
   label,
   purpose,
@@ -119,6 +103,7 @@ function ModelField({
   showVoice = false,
   error = '',
   errorId,
+  featureSelection = false,
 }: ModelFieldProps) {
   const models = modelsForPurpose(catalog, purpose);
   const currentModel = models.find((model) => model.id === selection.modelCatalogId)
@@ -161,7 +146,7 @@ function ModelField({
           return <option key={model.id} value={model.id}>{owner?.displayName} / {model.displayName}</option>;
         })}
       </select>
-      {provider && <p className="form-hint">服务商：{provider.displayName}。保存设置后可测试当前选择。</p>}
+      {provider && <p className="form-hint">服务商：{provider.displayName}。{featureSelection ? '仅用于本次课件。' : '保存设置后可测试当前选择。'}</p>}
       {purpose === 'courseware_text' && currentModel?.allowCustomModelId && (
         <div className="courseware-custom-model">
           <label htmlFor={`${id}-custom`}>自定义模型 ID</label>
@@ -239,13 +224,14 @@ export default function CoursewareAISettingsCard() {
     controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError');
 
   const applyLoaded = useCallback((loadedCatalog: AIProviderCatalogItem[], loadedSettings: CoursewareAISettings) => {
+    const draft = createCoursewareSettingsDraft(loadedSettings, loadedCatalog);
     setCatalog(loadedCatalog);
     setSettings(loadedSettings);
-    setText(selectionFor(loadedSettings.preferences, 'courseware_text', modelsForPurpose(loadedCatalog, 'courseware_text')));
-    setImage(selectionFor(loadedSettings.preferences, 'courseware_image', modelsForPurpose(loadedCatalog, 'courseware_image')));
-    setTeacherSpeech(selectionFor(loadedSettings.preferences, 'teacher_tts', modelsForPurpose(loadedCatalog, 'teacher_tts')));
-    setStudentSpeech(selectionFor(loadedSettings.preferences, 'student_tts', modelsForPurpose(loadedCatalog, 'student_tts')));
-    setIncludeImages(loadedSettings.readiness.image !== 'disabled');
+    setText(draft.text);
+    setImage(draft.image ?? EMPTY_SELECTION);
+    setTeacherSpeech(draft.teacherSpeech);
+    setStudentSpeech(draft.studentSpeech);
+    setIncludeImages(draft.includeImages);
   }, []);
 
   const load = useCallback(async () => {
@@ -445,7 +431,7 @@ export default function CoursewareAISettingsCard() {
       succeeded = true;
       settingsRevisionRef.current.commitWrite(settingsWriteRevision);
       setSettings((current) => current ? mergePreferenceSettings(current, saved) : saved);
-      setNotice('课件模型和音色已保存。');
+      setNotice('课件默认模型和音色已保存。');
     } catch (error) {
       if (!requestGuardRef.current.isCurrent(scope, token) || isAbort(error, controller)) return;
       setErrors((current) => ({ ...current, preferences: error instanceof ApiError ? error.message : '模型设置保存失败，请稍后重试' }));
@@ -617,7 +603,7 @@ export default function CoursewareAISettingsCard() {
       {imageUrl && <section className="courseware-preview" aria-labelledby="courseware-image-preview"><h3 id="courseware-image-preview">图片预览</h3><img src={imageUrl} alt="测试生成的课件配图预览" /></section>}
 
       <div className="courseware-save-row">
-        <button type="button" className="btn btn-primary" disabled={savingPreferences} aria-describedby={errors.preferences ? 'courseware-preferences-error' : undefined} onClick={() => void savePreferences()}>{savingPreferences ? '保存中…' : '保存课件设置'}</button>
+        <button type="button" className="btn btn-primary" disabled={savingPreferences} aria-describedby={errors.preferences ? 'courseware-preferences-error' : undefined} onClick={() => void savePreferences()}>{savingPreferences ? '保存中…' : '保存默认模型'}</button>
         {errors.preferences && <p id="courseware-preferences-error" className="field-error" role="alert">{errors.preferences}</p>}
       </div>
     </div>

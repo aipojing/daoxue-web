@@ -67,6 +67,14 @@ export const GRADES = [
   '高一', '高二', '高三',
 ];
 
+export type StudentGender = 'male' | 'female' | 'unspecified';
+
+export const STUDENT_GENDER_OPTIONS: Array<{ value: StudentGender; label: string }> = [
+  { value: 'male', label: '男孩' },
+  { value: 'female', label: '女孩' },
+  { value: 'unspecified', label: '不指定' },
+];
+
 export type AIConfigSource = 'personal' | 'shared' | 'none';
 
 export interface UserAISettings {
@@ -124,6 +132,7 @@ export interface Student {
   textbook: string;
   region: string;
   color: string;
+  gender: StudentGender;
   notes: string;
   created_at: string;
   conversation_count?: number;
